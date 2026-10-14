@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2329  # cmd_* are dispatched indirectly via "cmd_$c"
+# shellcheck disable=SC2317,SC2329  # cmd_* are dispatched indirectly via "cmd_$c"
 # pr-demon — label an issue, get a pull request.
 #
 #   pr-demon auto                 pick the command from the GitHub Actions event
