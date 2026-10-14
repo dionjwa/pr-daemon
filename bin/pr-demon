@@ -276,7 +276,7 @@ main() {
   local c="${1:-}"; shift || true
   case "$c" in
     auto|build|review|revise|teardown|reap|status) "cmd_$c" "$@" ;;
-    ""|-h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    ""|-h|--help|help) sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) die "unknown command: $c (try --help)" ;;
   esac
 }
