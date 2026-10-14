@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2034  # globals here are read by bin/pr-demon
 # Shared helpers for bin/pr-demon. Sourced, never executed.
 
 # ---------- config (all overridable via env) ----------
@@ -102,7 +102,8 @@ find_branch() {
 # Local worktree for an issue, if one exists.
 find_worktree() {
   local n="$1" d
-  for d in "$WT_ROOT/$n"-*; do [ -d "$d" ] && { echo "$d"; return; }; done
+  for d in "$WT_ROOT/$n"-*; do [ -d "$d" ] && { echo "$d"; return 0; }; done
+  return 0
 }
 
 slugify() {

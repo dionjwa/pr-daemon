@@ -13,7 +13,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../lib/common.sh
+# shellcheck source=lib/common.sh source-path=SCRIPTDIR/..
 source "$ROOT/lib/common.sh"
 
 need git gh jq perl claude
@@ -33,7 +33,7 @@ cmd_build() {
   set_status_label "$n" "$LABEL_WORKING"
   comment "$n" "🛠️ **pr-demon** is on it.
 - branch: \`$BRANCH\`
-- log: $(run_url || echo "local run")"
+- log: $(r="$(run_url)"; echo "${r:-local run}")"
 
   # Stack first. If it won't start, the agent's first job is to fix that.
   if stack_up; then
@@ -106,7 +106,7 @@ publish_pr() {
   local n="$1" out="$OUT_ROOT/$BRANCH" title body shots pr
   title="$(head -1 "$out/pr-title.txt" 2>/dev/null || true)"
   [ -n "$title" ] || title="$(gh issue view "$n" -R "$REPO" --json title --jq .title)"
-  shots="$(upload_screenshots "$out/screenshots")"
+  shots="$(upload_screenshots "$out/screenshots" || log "screenshot upload failed")"
   body="$(cat "$out/pr-body.md" 2>/dev/null || echo "_The agent wrote no description._")
 
 ## Try it
@@ -120,7 +120,7 @@ $shots}
 Closes #$n
 
 ---
-<sub>🤖 Built by [pr-demon](https://github.com/metapages/pr-demon)$( [ -n "$(run_url)" ] && echo " · [run log]($(run_url))" ). A human must approve before merge.</sub>"
+<sub>🤖 Built by [pr-demon](https://github.com/metapages/pr-demon)$(r="$(run_url)"; [ -z "$r" ] || echo " · [run log]($r)"). A human must approve before merge.</sub>"
   printf '%s' "$body" > "$out/pr-final.md"
 
   pr="$(pr_for_branch "$BRANCH")"
@@ -179,7 +179,7 @@ cmd_revise() {
 $CHECK_OUT
 \`\`\`"
   git -C "$WT" push -q origin "$BRANCH"
-  local shots; shots="$(upload_screenshots "$out/screenshots")"
+  local shots; shots="$(upload_screenshots "$out/screenshots" || log "screenshot upload failed")"
   gh pr comment "$pr" -R "$REPO" --body "🔁 **pr-demon** revised this PR. $status
 
 $summary
@@ -274,7 +274,7 @@ main() {
   local c="${1:-}"; shift || true
   case "$c" in
     auto|build|review|revise|teardown|reap|status) "cmd_$c" "$@" ;;
-    ""|-h|--help|help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+    ""|-h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) die "unknown command: $c (try --help)" ;;
   esac
 }
