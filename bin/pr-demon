@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# pr-demon — label an issue, get a pull request.
+#
+#   pr-demon auto                 pick the command from the GitHub Actions event
+#   pr-demon build    <issue>     branch → stack → agent → checks → PR → review
+#   pr-demon review   <pr>        fresh agent reviews the PR (no build context)
+#   pr-demon revise   <pr> [msg]  builder addresses feedback on an open PR
+#   pr-demon teardown <issue|pr>  stop the stack, remove the worktree
+#   pr-demon reap                 teardown every stack whose issue/PR is done
+#   pr-demon status               list local stacks
+#
+# Outside Actions, set PR_DEMON_REPO=owner/name and GH_TOKEN (or be `gh` logged in).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+
+need git gh jq perl claude
+
+# ---------------------------------------------------------------- build
+cmd_build() {
+  local n="${1:?usage: pr-demon build <issue-number>}"
+  init_repo; ensure_clone; ensure_labels
+
+  local issue title
+  issue="$(gh issue view "$n" -R "$REPO" --json number,title,body,state,url)"
+  title="$(jq -r .title <<<"$issue")"
+  [ "$(jq -r .state <<<"$issue")" = "OPEN" ] || die "issue #$n is not open"
+
+  ensure_worktree "$n" "$title"
+  local out="$OUT_ROOT/$BRANCH"; rm -rf "$out"; mkdir -p "$out/screenshots"
+  set_status_label "$n" "$LABEL_WORKING"
+  comment "$n" "🛠️ **pr-demon** is on it.
+- branch: \`$BRANCH\`
+- log: $(run_url || echo "local run")"
+
+  # Stack first. If it won't start, the agent's first job is to fix that.
+  if stack_up; then
+    STACK_NOTE="The stack for this branch is already running at $PREVIEW_URL. Restart it with \`$PR_DEMON_UP\` (idempotent) if you change something it depends on."
+  else
+    STACK_NOTE="WARNING: \`$PR_DEMON_UP\` FAILED before you started. Fix that first, then continue. Output:
+\`\`\`
+$STACK_ERR
+\`\`\`"
+  fi
+  ISSUE_URL="$(jq -r .url <<<"$issue")"
+  ISSUE_BODY="$(jq -r '.body // ""' <<<"$issue")"
+  export ISSUE_NUMBER="$n" ISSUE_TITLE="$title" ISSUE_URL ISSUE_BODY BRANCH OUT="$out" PREVIEW_URL REPO \
+         BASE="$PR_DEMON_BASE" UP_CMD="$PR_DEMON_UP" CHECK_CMD="$PR_DEMON_CHECK" STACK_NOTE
+
+  # Build → check → fix, until the project's own check passes.
+  local attempt=1 ok=0 summary
+  render "$ROOT/prompts/build.md" > "$out/prompt-build.md"
+  summary="$(agent "$out/prompt-build.md" "$out/agent-build-1.jsonl")"
+  while :; do
+    stack_up >/dev/null 2>&1 || true
+    if check; then ok=1; break; fi
+    [ "$attempt" -lt "$PR_DEMON_MAX_ATTEMPTS" ] || break
+    attempt=$((attempt + 1))
+    log "check failed; fix round $attempt"
+    export CHECK_OUT
+    render "$ROOT/prompts/fix.md" > "$out/prompt-fix-$attempt.md"
+    summary="$(agent "$out/prompt-fix-$attempt.md" "$out/agent-build-$attempt.jsonl")"
+  done
+
+  commit_leftovers
+  if [ "$(git -C "$WT" rev-list --count "origin/$PR_DEMON_BASE..HEAD")" = "0" ]; then
+    set_status_label "$n" "$LABEL_FAILED"
+    comment "$n" "😶 **pr-demon** finished without making any commits.
+
+<details><summary>agent summary</summary>
+
+$summary
+</details>"
+    exit 1
+  fi
+  git -C "$WT" push -q -u origin "$BRANCH"
+
+  if [ "$ok" = 0 ]; then
+    set_status_label "$n" "$LABEL_FAILED"
+    comment "$n" "❌ **pr-demon** pushed \`$BRANCH\` but \`$PR_DEMON_CHECK\` still fails after $attempt round(s). No PR opened.
+\`\`\`
+$CHECK_OUT
+\`\`\`"
+    exit 1
+  fi
+
+  local pr; pr="$(publish_pr "$n")"
+  set_status_label "$n" "$LABEL_REVIEW"
+  comment "$n" "✅ **pr-demon** opened #$pr. Preview: ${PREVIEW_URL:-n/a}"
+
+  cmd_review "$pr"
+}
+
+# Agents are told to commit; this catches anything they left behind.
+commit_leftovers() {
+  if [ -n "$(git -C "$WT" status --porcelain)" ]; then
+    git -C "$WT" add -A
+    git -C "$WT" commit -q -m "pr-demon: uncommitted agent changes" || true
+  fi
+}
+
+# publish_pr <issue> → prints the PR number. Creates or updates the PR.
+publish_pr() {
+  local n="$1" out="$OUT_ROOT/$BRANCH" title body shots pr
+  title="$(head -1 "$out/pr-title.txt" 2>/dev/null || true)"
+  [ -n "$title" ] || title="$(gh issue view "$n" -R "$REPO" --json title --jq .title)"
+  shots="$(upload_screenshots "$out/screenshots")"
+  body="$(cat "$out/pr-body.md" 2>/dev/null || echo "_The agent wrote no description._")
+
+## Try it
+
+- **Preview:** ${PREVIEW_URL:-_not running_}
+- Branch: \`$BRANCH\` · re-run the agent with a PR comment starting with \`/demon\`
+
+${shots:+## Screenshots
+
+$shots}
+Closes #$n
+
+---
+<sub>🤖 Built by [pr-demon](https://github.com/metapages/pr-demon)$( [ -n "$(run_url)" ] && echo " · [run log]($(run_url))" ). A human must approve before merge.</sub>"
+  printf '%s' "$body" > "$out/pr-final.md"
+
+  pr="$(pr_for_branch "$BRANCH")"
+  if [ -n "$pr" ]; then
+    gh pr edit "$pr" -R "$REPO" --title "$title" --body-file "$out/pr-final.md" >/dev/null
+  else
+    gh pr create -R "$REPO" --base "$PR_DEMON_BASE" --head "$BRANCH" \
+      --title "$title" --body-file "$out/pr-final.md" >/dev/null
+    pr="$(pr_for_branch "$BRANCH")"
+  fi
+  echo "$pr"
+}
+
+# ---------------------------------------------------------------- review
+cmd_review() {
+  local pr="${1:?usage: pr-demon review <pr-number>}"
+  init_repo; ensure_clone
+  local head; head="$(gh pr view "$pr" -R "$REPO" --json headRefName --jq .headRefName)"
+  ensure_worktree "${head%%-*}"
+  local out="$OUT_ROOT/$BRANCH/review"; rm -rf "$out"; mkdir -p "$out"
+  export PR_NUMBER="$pr" REPO OUT="$out" CHECK_CMD="$PR_DEMON_CHECK"
+  render "$ROOT/prompts/review.md" > "$out/prompt.md"
+  agent "$out/prompt.md" "$out/agent.jsonl" >/dev/null
+  [ -s "$out/review.md" ] || { log "reviewer wrote no review.md"; return 0; }
+  # A bot cannot approve or request changes on its own PR: always a COMMENT review.
+  gh pr review "$pr" -R "$REPO" --comment --body-file "$out/review.md" >/dev/null \
+    || gh pr comment "$pr" -R "$REPO" --body-file "$out/review.md" >/dev/null
+  log "review posted on #$pr"
+
+  if [ "$PR_DEMON_AUTO_REVISE" = 1 ] && [ "${2:-}" != no-revise ] \
+     && grep -qi '^VERDICT: *changes' "$out/review.md"; then
+    log "reviewer asked for changes; one automatic revise round"
+    cmd_revise "$pr" "$(cat "$out/review.md")"
+  fi
+}
+
+# ---------------------------------------------------------------- revise
+cmd_revise() {
+  local pr="${1:?usage: pr-demon revise <pr-number> [feedback]}" feedback="${2:-}"
+  init_repo; ensure_clone
+  local head n; head="$(gh pr view "$pr" -R "$REPO" --json headRefName --jq .headRefName)"
+  n="${head%%-*}"
+  ensure_worktree "$n"
+  local out="$OUT_ROOT/$BRANCH" round; mkdir -p "$out/screenshots"
+  round="$(date +%s)"
+  stack_up || true
+  export PR_NUMBER="$pr" ISSUE_NUMBER="$n" REPO BRANCH OUT="$out" PREVIEW_URL FEEDBACK="$feedback" \
+         UP_CMD="$PR_DEMON_UP" CHECK_CMD="$PR_DEMON_CHECK"
+  rm -f "$out"/screenshots/*.png
+  render "$ROOT/prompts/revise.md" > "$out/prompt-revise-$round.md"
+  local summary; summary="$(agent "$out/prompt-revise-$round.md" "$out/agent-revise-$round.jsonl")"
+  commit_leftovers
+  local status="✅ checks pass"
+  check || status="❌ \`$PR_DEMON_CHECK\` fails:
+\`\`\`
+$CHECK_OUT
+\`\`\`"
+  git -C "$WT" push -q origin "$BRANCH"
+  local shots; shots="$(upload_screenshots "$out/screenshots")"
+  gh pr comment "$pr" -R "$REPO" --body "🔁 **pr-demon** revised this PR. $status
+
+$summary
+${shots:+
+### Updated screenshots
+
+$shots}" >/dev/null
+}
+
+# ---------------------------------------------------------------- teardown
+cmd_teardown() {
+  local n="${1:?usage: pr-demon teardown <issue-or-pr-number>}"
+  init_repo
+  # A PR number maps to its branch's issue prefix.
+  local head; head="$(gh pr view "$n" -R "$REPO" --json headRefName --jq .headRefName 2>/dev/null || true)"
+  [ -z "$head" ] || n="${head%%-*}"
+  local wt; wt="$(find_worktree "$n")"
+  [ -n "$wt" ] || { log "no stack for #$n"; return 0; }
+  log "tearing down $wt"
+  run_in "$wt" "$PR_DEMON_DOWN" || log "down command failed (continuing)"
+  git -C "$REPO_DIR" worktree remove --force "$wt" || rm -rf "$wt"
+  git -C "$REPO_DIR" branch -D "$(basename "$wt")" >/dev/null 2>&1 || true
+  rm -rf "${OUT_ROOT:?}/$(basename "$wt")"
+  set_status_label "$n" ""
+}
+
+# ---------------------------------------------------------------- reap
+# A stack is dead when its issue is closed and no open PR uses its branch.
+cmd_reap() {
+  init_repo
+  local d br n state
+  for d in "$WT_ROOT"/*; do
+    [ -d "$d" ] || continue
+    br="$(basename "$d")"; n="${br%%-*}"
+    state="$(gh issue view "$n" -R "$REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
+    if [ "$state" = CLOSED ] && [ -z "$(pr_for_branch "$br")" ]; then
+      cmd_teardown "$n"
+    else
+      log "keeping $br (issue $state)"
+    fi
+  done
+}
+
+cmd_status() {
+  init_repo
+  local d
+  for d in "$WT_ROOT"/*; do
+    [ -d "$d" ] || continue
+    printf '%-50s %s\n' "$(basename "$d")" "$(run_in "$d" "$PR_DEMON_URL" 2>/dev/null | tail -1)"
+  done
+}
+
+# ---------------------------------------------------------------- auto
+# Map a GitHub Actions event to a command. The workflow's `if:` already
+# filtered out events we don't care about; this re-checks so a mis-copied
+# workflow does nothing rather than something surprising.
+cmd_auto() {
+  local ev="${GITHUB_EVENT_NAME:?not running in GitHub Actions}" p="${GITHUB_EVENT_PATH:?}"
+  local action; action="$(jq -r '.action // ""' "$p")"
+  case "$ev:$action" in
+    issues:labeled)
+      [ "$(jq -r .label.name "$p")" = "$PR_DEMON_LABEL" ] || { log "ignoring label"; return; }
+      cmd_build "$(jq -r .issue.number "$p")" ;;
+    issues:closed)        cmd_teardown "$(jq -r .issue.number "$p")" ;;
+    pull_request_target:closed|pull_request:closed) cmd_teardown "$(jq -r .pull_request.number "$p")" ;;
+    issue_comment:created)
+      local body assoc
+      body="$(jq -r .comment.body "$p")"; assoc="$(jq -r .comment.author_association "$p")"
+      [ "$(jq -r '.issue.pull_request != null' "$p")" = true ] || { log "not a PR comment"; return; }
+      [[ "$body" == /demon* ]] || { log "not a /demon comment"; return; }
+      case "$assoc" in OWNER|MEMBER|COLLABORATOR) ;; *) log "ignoring /demon from $assoc"; return ;; esac
+      cmd_revise "$(jq -r .issue.number "$p")" "${body#/demon}" ;;
+    schedule:*)           cmd_reap ;;
+    workflow_dispatch:*)
+      local c n
+      c="$(jq -r '.inputs.command // "reap"' "$p")"; n="$(jq -r '.inputs.number // ""' "$p")"
+      "cmd_$c" ${n:+"$n"} ;;
+    *) log "nothing to do for $ev:$action" ;;
+  esac
+}
+
+main() {
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) export PR_DEMON_REPO="$2"; shift 2 ;;
+      --repo=*) export PR_DEMON_REPO="${1#--repo=}"; shift ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${args[@]+"${args[@]}"}"
+  local c="${1:-}"; shift || true
+  case "$c" in
+    auto|build|review|revise|teardown|reap|status) "cmd_$c" "$@" ;;
+    ""|-h|--help|help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command: $c (try --help)" ;;
+  esac
+}
+
+main "$@"

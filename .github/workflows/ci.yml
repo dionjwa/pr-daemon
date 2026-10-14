@@ -1,0 +1,16 @@
+# This repo's own CI. It runs on GitHub-hosted runners ONLY: a public repo must
+# never run on a self-hosted runner (anyone's fork PR would run on your machine).
+name: ci
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -x bin/pr-demon lib/*.sh runner/*.sh
+      - name: hook allows pr-demon.yml on main, refuses everything else
+        run: |
+          GITHUB_WORKFLOW_REF=o/r/.github/workflows/pr-demon.yml@refs/heads/main bash runner/job-started.sh
+          ! GITHUB_WORKFLOW_REF=o/r/.github/workflows/pr-demon.yml@refs/heads/evil bash runner/job-started.sh
+          ! GITHUB_WORKFLOW_REF=o/r/.github/workflows/test.yml@refs/heads/main bash runner/job-started.sh

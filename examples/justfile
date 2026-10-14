@@ -1,0 +1,20 @@
+# The pr-demon contract: add these four recipes to your project's justfile.
+# pr-demon runs each one from the root of the branch's worktree, with a clean
+# developer-like environment (no GITHUB_*/CI variables).
+
+# Start THIS branch's full stack in the background and return once it answers.
+# Must be idempotent: already running → return immediately. Must not open a browser.
+pr-demon-up:
+    docker compose up -d --wait
+
+# Print the URL a human should open to try this branch (last line is used).
+pr-demon-url:
+    @echo "http://localhost:8080"
+
+# Stop this branch's stack and delete its data.
+pr-demon-down:
+    docker compose down -v --remove-orphans
+
+# The definition of "done": fast checks that must pass before a PR is opened.
+pr-demon-check:
+    just lint && just test

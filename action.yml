@@ -1,0 +1,41 @@
+name: pr-demon
+description: Label an issue, get a pull request. Runs a coding agent on your self-hosted runner.
+branding: { icon: git-pull-request, color: purple }
+
+inputs:
+  github-token:
+    description: Token for git + gh. github.token works; a GitHub App token also makes your CI run on the agent's pushes.
+    required: true
+  claude-oauth-token:
+    description: Optional. From `claude setup-token`. Leave empty to use the runner user's own `claude` login.
+    default: ""
+  anthropic-api-key:
+    description: Optional. Use an API key instead of a Claude subscription.
+    default: ""
+  label:
+    description: The issue label that starts a build (default pr-demon).
+    default: ""
+  model:
+    description: Optional Claude model for the agent (default = claude's default).
+    default: ""
+  max-turns:
+    description: Max turns per agent run (default 200).
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      # Inputs only override when set, so values in the runner's .env still apply.
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        IN_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-oauth-token }}
+        IN_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        IN_PR_DEMON_LABEL: ${{ inputs.label }}
+        IN_PR_DEMON_MODEL: ${{ inputs.model }}
+        IN_PR_DEMON_MAX_TURNS: ${{ inputs.max-turns }}
+      run: |
+        for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY PR_DEMON_LABEL PR_DEMON_MODEL PR_DEMON_MAX_TURNS; do
+          in="IN_$v"; [ -z "${!in}" ] || export "$v=${!in}"; unset "$in"
+        done
+        "$GITHUB_ACTION_PATH/bin/pr-demon" auto
