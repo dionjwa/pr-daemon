@@ -49,7 +49,7 @@ in a comment. Fix the issue text and re-add the `pr-demon` label to try again.
 
 ## Setup
 
-You do this once per machine (steps 1–3), and then once per project (steps 4–6).
+You do this once per machine (steps 1–4), and then once per project (steps 5–7).
 
 ### 1. Install the tools on the machine that will run the agent
 
@@ -86,7 +86,23 @@ This installs a **separate** GitHub Actions runner in
 
 Check it's online: repo (or org) → **Settings → Actions → Runners**.
 
-### 4. Teach your project four commands
+### 4. Give the runner a Claude login
+
+The runner runs as a background service, and it **can't use the `claude`
+login from your terminal**. That login lives in a keychain the service can't
+read. Make a long-lived token and put it on the machine:
+
+```bash
+claude setup-token                       # opens a browser, prints a token
+echo 'CLAUDE_CODE_OAUTH_TOKEN=<paste token>' >> ~/actions-runner-pr-demon/.env
+cd ~/actions-runner-pr-demon && ./svc.sh stop && ./svc.sh start
+```
+
+The token stays on your machine, and only the pr-demon runner can see it.
+Prefer a repo secret? Add it as `CLAUDE_CODE_OAUTH_TOKEN` instead; the
+example workflow passes it through.
+
+### 5. Teach your project four commands
 
 Add these recipes to your project's `justfile` (see
 [`examples/justfile`](examples/justfile)):
@@ -107,16 +123,20 @@ just pr-demon-up && just pr-demon-url && just pr-demon-check && just pr-demon-do
 Two branches' stacks must be able to run at the same time, so derive ports and
 container names from the branch name.
 
+`pr-demon-up` must keep the stack running after it returns. Start it with
+`nohup … &` or `docker compose up -d`. pr-demon clears the runner's
+process-tracking variable, so the job ending doesn't kill it.
+
 > Not using `just`? Set `PR_DEMON_UP`, `PR_DEMON_URL`, `PR_DEMON_DOWN` and
 > `PR_DEMON_CHECK` to any shell commands in the runner's `.env`.
 
-### 5. Add the workflow
+### 6. Add the workflow
 
 Copy [`examples/pr-demon.yml`](examples/pr-demon.yml) to
 `.github/workflows/pr-demon.yml` in your project and **merge it to `main`**.
 GitHub only runs issue-triggered workflows from the default branch.
 
-### 6. Let Actions open PRs
+### 7. Let Actions open PRs
 
 Repo → **Settings → Actions → General → Workflow permissions**:
 
@@ -125,17 +145,15 @@ Repo → **Settings → Actions → General → Workflow permissions**:
 
 You're done. Open an issue and add the `pr-demon` label.
 
+> **Try it before merging the workflow.** Run the whole flow from a terminal
+> against a branch that has the recipes: `PR_DEMON_REPO=org/repo
+> PR_DEMON_BASE=my-branch ~/pr-demon/bin/pr-demon build 42`. That's exactly
+> what the workflow runs. It uses your own `gh` login, so your normal CI also
+> runs on the agent's pushes.
+
 ---
 
 ## Optional
-
-**Claude login.** By default the agent uses the runner user's own `claude`
-login. To use a dedicated token instead, run `claude setup-token` and either:
-
-- add it to the runner's `.env` as `CLAUDE_CODE_OAUTH_TOKEN=…`, which keeps the
-  secret on the machine, or
-- add it as a repo secret named `CLAUDE_CODE_OAUTH_TOKEN`. The example
-  workflow already passes it.
 
 **Make your CI run on the agent's pushes.** GitHub doesn't trigger workflows
 from pushes made with the built-in `github.token`. Use a GitHub App token

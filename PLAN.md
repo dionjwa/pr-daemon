@@ -58,8 +58,16 @@ a command can use it, whatever its language or framework.
 - [x] prompts: build, fix, review, revise
 - [x] composite `action.yml` and an example caller workflow
 - [x] runner install with only the `pr-demon` label and the job-started hook
-- [ ] dogfood on `metapages/framejs.app`: contract recipes, runner, a real issue → PR
-- [ ] fix whatever that run teaches us
+- [x] dogfood on `metapages/framejs.app`: contract recipes, runner, a real issue → PR
+      (issue #96 → PR #97: built, checked, screenshots, review, auto-revise)
+- [x] runner refuses non-allowed workflows (verified with a throwaway workflow)
+- [x] fixes from the run: tracked-only leftover commits (the reviewer caught a
+      committed tool cache), agent stderr kept out of the JSON log, `set -e`
+      traps, scripts safe to update mid-run
+- [ ] runner service needs `CLAUDE_CODE_OAUTH_TOKEN` (keychain login isn't
+      visible to launchd): human step, documented in the README
+- [ ] merge `pr-demon.yml` to the default branch and run one issue fully through Actions
+- [ ] teardown on PR close, verified end to end
 
 ### Phase 2: reachable from the internet
 

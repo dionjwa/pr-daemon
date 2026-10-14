@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329  # cmd_* are dispatched indirectly via "cmd_$c"
 # pr-demon — label an issue, get a pull request.
 #
 #   pr-demon auto                 pick the command from the GitHub Actions event
@@ -93,12 +94,13 @@ $CHECK_OUT
   cmd_review "$pr"
 }
 
-# Agents are told to commit; this catches anything they left behind.
+# Agents are told to commit; this catches tracked edits they left behind.
+# Untracked files are NOT swept in: tool caches and logs land there too.
 commit_leftovers() {
-  if [ -n "$(git -C "$WT" status --porcelain)" ]; then
-    git -C "$WT" add -A
-    git -C "$WT" commit -q -m "pr-demon: uncommitted agent changes" || true
-  fi
+  git -C "$WT" add -u
+  git -C "$WT" diff --cached --quiet || git -C "$WT" commit -q -m "pr-demon: uncommitted agent changes"
+  local untracked; untracked="$(git -C "$WT" ls-files --others --exclude-standard)"
+  [ -z "$untracked" ] || log "left untracked (not committed): $(echo "$untracked" | tr '\n' ' ')"
 }
 
 # publish_pr <issue> → prints the PR number. Creates or updates the PR.
@@ -279,4 +281,6 @@ main() {
   esac
 }
 
-main "$@"
+# `; exit` on the same line: bash reads scripts lazily, so this stops it
+# reading past here if the file is updated (git pull) while a run is going.
+main "$@"; exit

@@ -182,8 +182,9 @@ agent() {
         --max-turns "$PR_DEMON_MAX_TURNS" --output-format stream-json --verbose)
   [ -z "$PR_DEMON_MODEL" ] || args+=(--model "$PR_DEMON_MODEL")
   log "agent run → $logf"
-  ( cd "$WT" && clean_env && claude "${args[@]}" ) > "$logf" 2>&1 || log "agent exited non-zero (see $logf)"
-  jq -r 'select(.type=="result") | .result // empty' "$logf" 2>/dev/null | tail -40 || true
+  ( cd "$WT" && clean_env && claude "${args[@]}" ) > "$logf" 2> "${logf%.jsonl}.stderr" \
+    || log "agent exited non-zero (see $logf)"
+  jq -rR 'fromjson? | select(.type=="result") | .result // empty' "$logf" 2>/dev/null | tail -40 || true
 }
 
 # ---------- stack ----------
