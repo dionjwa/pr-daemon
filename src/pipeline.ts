@@ -223,7 +223,7 @@ ${shots ? `\n## Screenshots\n\n${shots}` : ""}
 Closes #${o.n}
 
 ---
-<sub>🤖 Built by [pr-daemon](https://github.com/metapages/pr-daemon) · ${(tokens / 1e6).toFixed(2)}M tokens. A human must approve before merge.</sub>`;
+<sub>🤖 Built by [pr-daemon](https://github.com/dionjwa/pr-daemon) · ${(tokens / 1e6).toFixed(2)}M tokens. A human must approve before merge.</sub>`;
   writeFileSync(join(o.out, "pr-final.md"), body);
   const existing = await gh.openPrForBranch(repo.name, o.branch);
   if (existing) { await gh.editPr(repo.name, existing, { title, bodyFile: join(o.out, "pr-final.md") }); return existing; }

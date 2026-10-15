@@ -39,7 +39,7 @@ _help:
     echo -e ""
     echo -e "    Links:"
     echo -e "        status page:  {{ green }}http://localhost:{{ PAGE_PORT }}{{ normal }}"
-    echo -e "        github:       {{ green }}https://github.com/metapages/pr-daemon{{ normal }}"
+    echo -e "        github:       {{ green }}https://github.com/dionjwa/pr-daemon{{ normal }}"
     echo -e "        config:       {{ grey }}{{ PR_DAEMON_HOME }}/config.toml{{ normal }}"
     echo -e "        log:          {{ grey }}{{ PR_DAEMON_HOME }}/pr-daemon.log{{ normal }}"
     echo -e "        docs:         {{ grey }}README.md{{ normal }} (setup) · {{ grey }}CLAUDE.md{{ normal }} (how it works) · {{ grey }}journal.md{{ normal }} (history)"

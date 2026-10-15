@@ -382,7 +382,7 @@ The run cost about 2.8M tokens, around 94% of them cache reads.
    delete `base = "pr-demon-setup"` from the config.
 3. **Close or merge the trial PRs #97 and #100.** Closing one also verifies
    automatic teardown on PR close, end to end.
-4. **Decide when to make `metapages/pr-daemon` public.** It's written to be
+4. **Decide when to make `dionjwa/pr-daemon` public.** It's written to be
    safe for that.
 
 **Engineering**

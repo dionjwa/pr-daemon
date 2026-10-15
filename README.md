@@ -69,7 +69,7 @@ claude                            # log in once, then exit
 ### 2. Get pr-daemon
 
 ```bash
-git clone https://github.com/metapages/pr-daemon ~/pr-daemon
+git clone https://github.com/dionjwa/pr-daemon ~/pr-daemon
 cd ~/pr-daemon
 ln -s ~/pr-daemon/bin/pr-daemon /usr/local/bin/pr-daemon    # optional: put it on your PATH
 ```
