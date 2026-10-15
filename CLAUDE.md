@@ -1,6 +1,6 @@
 # pr-demon: context for agents working on this repo
 
-Read this first. It records the goals, the owner's decisions, how the code fits
+Read this first (then journal.md for the history and next steps). It records the goals, the owner's decisions, how the code fits
 together, and what we learned the hard way. User-facing docs are in README.md
 (keep that one simple and step-by-step); the roadmap is in PLAN.md.
 
