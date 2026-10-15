@@ -13,7 +13,7 @@ that is ready for a human to try and merge:
    running app.
 5. A separate review by a second agent that sees only the PR.
 6. A human merges. **pr-daemon never merges.**
-7. Automatic cleanup once the PR is merged or closed.
+7. Automatic cleanup (stack, worktree, branch) once the PR is merged or closed, or the label is removed.
 8. All of it within a token budget.
 
 It has to be **portable**. Any project that can start a per-branch stack from

@@ -8,6 +8,7 @@ import { DEFAULT_TOML, parseConfig } from "./config.ts";
 import { render } from "./pipeline.ts";
 import { openDb, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
+import { isListed, untrustedWriters } from "./gh.ts";
 
 test("human amounts", () => {
   assert.equal(parseAmount("40M"), 40_000_000);
@@ -212,4 +213,13 @@ test("caddy config routes each branch host to its local stack", () => {
   assert.equal(d.apps.http.servers.previews.routes[0].handle[0].upstreams[0].dial, "host.docker.internal:13536");
   assert.match(d.admin.listen, /^0\.0\.0\.0:/);
   assert.deepEqual(d.admin.origins, ["127.0.0.1:2019"]);
+});
+
+test("issue text must come from trusted users only", () => {
+  const p = { author: "Owner", editors: ["owner", "maintainer"], renamers: ["ghost"] };
+  assert.deepEqual(untrustedWriters(p, ["owner"]), ["maintainer", "ghost"]);  // logins match case-insensitively
+  assert.deepEqual(untrustedWriters(p, ["OWNER", "maintainer", "ghost"]), []);
+  assert.deepEqual(untrustedWriters({ author: "stranger", editors: [], renamers: [] }, ["owner"]), ["stranger"]);
+  assert.ok(isListed(["Alice"], "alice"));
+  assert.ok(!isListed([], "alice"));
 });

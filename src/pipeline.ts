@@ -47,7 +47,7 @@ export function render(template: string, vars: Record<string, string | number | 
 const prompt = (name: string, vars: Record<string, string | number | undefined>) =>
   render(readFileSync(join(PROMPTS, `${name}.md`), "utf8"), vars);
 
-function payload(job: Job): { feedback?: string; fromReview?: boolean } {
+function payload(job: Job): { feedback?: string; fromReview?: boolean; commentId?: number; deleteBranch?: boolean; closePr?: boolean; why?: string } {
   try { return JSON.parse(job.payload || "{}"); } catch { return {}; }
 }
 
@@ -138,6 +138,13 @@ export async function build(ctx: Ctx): Promise<void> {
   const n = job.number;
   const issue = await gh.issue(repo.name, n);
   if (issue.state !== "open") throw new FailError(`issue #${n} is closed`);
+  // Checked when the label was added, and again now: the text may have been edited since.
+  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
+  if (strangers.length) {
+    const why = gh.untrustedIssue(strangers);
+    await gh.comment(repo.name, n, `🚫 **pr-daemon** stopped: ${why}. ${gh.UNTRUSTED_HELP}`);
+    throw new FailError(why);
+  }
   const base = repo.base || (await gh.defaultBranch(repo.name));
   const resuming = !!job.session_id;
 
@@ -304,9 +311,12 @@ export async function revise(ctx: Ctx): Promise<void> {
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   const builder = store.stack(repo.name, branch)?.builder_session || "";
 
+  // Only words from trusted users reach the agent, never the whole thread.
+  const talk = await gh.trustedDiscussion(repo.name, job.number, await gh.trustedAuthors(ctx.cfg().allowedUsers), payload(job).commentId);
+  if (talk.dropped) store.event(`left ${talk.dropped} PR comment(s) from people not in allowed_users out of the prompt`, job.id);
   const text = prompt("revise", {
     PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: stackWhere(ctx.cfg(), branch, s),
-    FEEDBACK: payload(job).feedback ?? "", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
+    FEEDBACK: payload(job).feedback ?? "", DISCUSSION: talk.text || "(none)", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
     ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: join(out, `agent-revise-${job.id}.jsonl`), resume: job.session_id, issue: n }
@@ -343,6 +353,20 @@ export async function teardown(ctx: Ctx): Promise<void> {
   rmSync(git.outDir(repo.name, branch), { recursive: true, force: true });
   store.deleteStack(repo.name, branch);
   await gh.setStatus(repo.name, job.number, ctx.cfg().label, null);
+
+  // Automatic cleanup (PR or issue closed, label removed) also removes the
+  // branch from GitHub. The Tear down button doesn't: an open PR needs its branch.
+  const p = payload(job);
+  if (!p.deleteBranch) return;
+  // Only ever a branch pr-daemon named for this issue.
+  if (!branch.startsWith(`${job.number}-`)) { store.event(`not deleting ${branch}: not a pr-daemon branch for #${job.number}`, job.id, "warn"); return; }
+  if (p.closePr && s?.pr && (await gh.pr(repo.name, s.pr)).state === "open") {
+    await gh.closePr(repo.name, s.pr, `🧹 **pr-daemon** closed this: ${p.why ?? "the label was removed"}. The preview is shut down and the branch deleted (GitHub's "Restore branch" brings it back).`);
+  } else if (p.closePr) {
+    await gh.comment(repo.name, job.number, `🧹 **pr-daemon** stopped: ${p.why ?? "the label was removed"}. The preview is shut down and the branch \`${branch}\` deleted.`);
+  }
+  const r = await gh.deleteBranch(repo.name, branch);
+  store.event(r === "deleted" ? `deleted branch ${branch} on GitHub` : `branch ${branch} was already gone from GitHub`, job.id);
 }
 
 export async function restart(ctx: Ctx): Promise<void> {

@@ -208,24 +208,24 @@ before.
 **Swept out the first iteration's leftovers.** The GitHub repo description
 still advertised "a coding agent on your own self-hosted runner"; it now
 matches `package.json`. Gone from the docs: the stale note about the
-`mini2-pr-demon` runner, the launchd aside comparing pr-daemon to it, the
+old self-hosted runner, the launchd aside comparing pr-daemon to it, the
 "don't edit a running bash script" gotcha (there are no bash scripts any more),
 and "built by the old prototype" on trial #97. What stays on purpose: the
 dated journal entries that record the prototype and why it was dropped, the
 PLAN.md row explaining why not GitHub Actions, and one line in CLAUDE.md's
 decisions saying both were tried and shouldn't be reintroduced.
 
-The runner turned out to be more than a stale note: `mini2-pr-demon` was still
+The runner turned out to be more than a stale note: the old runner was still
 registered and **online** on framejs.app (label `pr-demon`, id 21). It's now
 deregistered, so that repo has no self-hosted runners. The runner *service* on
-mini2 is still installed and will keep failing to connect — finish it there
+that machine is still installed and will keep failing to connect — finish it there
 with `./svc.sh stop && ./svc.sh uninstall` (and `./config.sh remove`). Also retired
 the last of the just-only wording in PLAN.md and the code comments, since any
 shell command works.
 
 **The old installation is gone from this machine** (2026-10-15). An orphaned
 `pr-demon serve` from 07:47 was still holding port 7377 — killed. Then
-`~/dev/git/metapages/pr-demon/` (only a leftover `node_modules`, no `.git`)
+the old `pr-demon` checkout (only a leftover `node_modules`, no `.git`)
 and `~/.pr-demon/` (512MB) were deleted. Before deleting the state directory
 its one worktree's stack was torn down properly with `just pr-demon-down`:
 **17 containers had been running for 19 hours**, and deleting the worktree

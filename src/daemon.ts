@@ -5,7 +5,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
 import { parseConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
-import { AGENT_KINDS, openDb, Store, type Job } from "./db.ts";
+import { AGENT_KINDS, openDb, Store, type Job, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
@@ -28,6 +28,8 @@ export class Daemon {
   lastPollAt = 0;
   lastPollError = "";
   nextPollAt = 0;
+  /** The GitHub login gh is authenticated as: everything pr-daemon does on GitHub is done as this user. */
+  ghUser = "";
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
   private configWatcher: FSWatcher | null = null;
@@ -60,6 +62,7 @@ export class Daemon {
     if (process.platform === "darwin" && this.cfg.preventSleep) {
       spawn("caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore", detached: true }).unref();
     }
+    gh.viewer().then((u) => { this.ghUser = u; this.store.event(`acting on GitHub as @${u}`); }, () => {});
     this.schedulePoll(1000);
     setInterval(() => this.tick(), 2000).unref?.();
     this.proxy.start();
@@ -213,7 +216,13 @@ export class Daemon {
   }
 
   private async allowed(): Promise<string[]> {
-    return this.cfg.allowedUsers.length ? this.cfg.allowedUsers : [await gh.viewer()];
+    this.ghUser ||= await gh.viewer();
+    return gh.allowedUsers(this.cfg.allowedUsers);
+  }
+
+  /** Who may trigger work: allowed_users, or else only the gh user (empty until that's known). */
+  private allowedNow(): string[] {
+    return this.cfg.allowedUsers.length ? this.cfg.allowedUsers : this.ghUser ? [this.ghUser] : [];
   }
 
   private async pollRepo(repo: string): Promise<void> {
@@ -222,15 +231,28 @@ export class Daemon {
 
     // 1. Issues carrying the label → build. Keyed by the label event, so
     //    removing and re-adding the label starts a fresh build.
-    for (const issue of await gh.labeledIssues(repo, cfg.label)) {
+    const issues = await gh.labeledIssues(repo, cfg.label);
+    const labeled = new Set(issues.map((i) => i.number));
+    for (const issue of issues) {
       if (store.activeFor(repo, "build", issue.number)) continue;
       const ev = await gh.lastLabeled(repo, issue.number, cfg.label);
       if (!ev) continue;
       const key = `label:${repo}#${issue.number}:${ev.id}`;
       if (store.hasTrigger(key)) continue;
-      if (!allowed.includes(ev.actor)) {
+      if (!gh.isListed(allowed, ev.actor)) {
         store.enqueue({ repo, kind: "build", number: issue.number, trigger_key: key, state: "ignored", reason: `label added by @${ev.actor}, who isn't allowed` });
         store.event(`ignored ${repo}#${issue.number}: label added by @${ev.actor} (not in allowed_users)`, null, "warn");
+        continue;
+      }
+      // Who added the label isn't enough: the issue's text is the agent's
+      // instructions, so whoever wrote it (or edited it since) must be trusted too.
+      const strangers = gh.untrustedWriters(await gh.provenance(repo, issue.number), await gh.trustedAuthors(cfg.allowedUsers));
+      if (strangers.length) {
+        const why = gh.untrustedIssue(strangers);
+        if (store.enqueue({ repo, kind: "build", number: issue.number, trigger_key: key, state: "ignored", reason: why })) {
+          store.event(`ignored ${repo}#${issue.number}: ${why}`, null, "warn");
+          await gh.comment(repo, issue.number, `🚫 **pr-daemon** won't build this: ${why}. ${gh.UNTRUSTED_HELP}`);
+        }
         continue;
       }
       const id = store.enqueue({ repo, kind: "build", number: issue.number, trigger_key: key });
@@ -247,25 +269,36 @@ export class Daemon {
       const key = `comment:${repo}:${c.id}`;
       if (store.hasTrigger(key)) continue;
       const pr = Number(c.issue_url.split("/").pop());
-      if (!allowed.includes(c.user.login)) {
+      if (!gh.isListed(allowed, c.user.login)) {
         store.enqueue({ repo, kind: "revise", number: pr, trigger_key: key, state: "ignored", reason: `${COMMAND} from @${c.user.login}, who isn't allowed` });
         continue;
       }
       const branch = (await gh.pr(repo, pr)).head.ref;
-      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: body.slice(COMMAND.length).trim() } });
+      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: body.slice(COMMAND.length).trim(), commentId: c.id } });
       if (id) store.event(`queued revise for ${repo} PR #${pr} (${COMMAND} by @${c.user.login})`, id);
     }
     store.set(sinceKey, new Date(startedAt - 60e3).toISOString()); // overlap; ids dedupe
 
-    // 3. Stacks: clean up when their PR or issue is closed; keep them healthy.
+    // 3. The label came off: stop any work on that issue. The stack (if there
+    //    is one) is cleaned up below once nothing is running on it.
+    for (const j of store.jobs(200)) {
+      if (j.repo !== repo || j.kind !== "build" || !["queued", "running", "paused"].includes(j.state) || labeled.has(j.number)) continue;
+      if ((await this.unlabeled(repo, j.number)) === "removed") this.cancel(j.id, `the ${cfg.label} label was removed`);
+    }
+
+    // 4. Stacks: clean up when the PR or issue closes, or the label comes off;
+    //    keep them healthy otherwise.
     for (const s of store.stacks().filter((x) => x.repo === repo)) {
-      if (this.busy(repo, s.branch, s.issue)) continue;
-      let closed = false;
-      if (s.pr) closed = (await gh.pr(repo, s.pr)).state === "closed";
-      else closed = (await gh.issue(repo, s.issue)).state === "closed";
-      if (closed) {
-        const id = store.enqueue({ repo, kind: "teardown", number: s.issue, branch: s.branch, trigger_key: `teardown:${repo}:${s.branch}:${s.created_at}` });
-        if (id) store.event(`queued teardown of ${s.branch} (${s.pr ? `PR #${s.pr}` : `issue #${s.issue}`} closed)`, id);
+      const why = await this.cleanupReason(repo, s, labeled);
+      if (this.busy(repo, s.branch, s.issue)) {
+        // Revisions and reviews on an abandoned branch: stop them, tear down next poll.
+        if (why.labelRemoved) for (const j of this.activeFor(repo, s.branch, s.issue)) this.cancel(j.id, why.text);
+        continue;
+      }
+      if (why.text) {
+        const id = store.enqueue({ repo, kind: "teardown", number: s.issue, branch: s.branch, trigger_key: `teardown:${repo}:${s.branch}:${s.created_at}`,
+          payload: { deleteBranch: true, closePr: why.labelRemoved, why: why.text } });
+        if (id) store.event(`queued teardown of ${s.branch} (${why.text})`, id);
         continue;
       }
       if (s.url && Date.now() - (s.checked_at ?? 0) > cfg.stacks.healthEveryMs) {
@@ -280,9 +313,36 @@ export class Daemon {
     }
   }
 
+  /**
+   * Is an issue missing from the labeled list because it closed, or because
+   * the label came off? Asked of the issue itself before acting, so a list
+   * that lags behind can't tear anything down.
+   */
+  private async unlabeled(repo: string, n: number): Promise<"closed" | "removed" | null> {
+    const issue = await gh.issue(repo, n);
+    if (issue.state === "closed") return "closed";
+    return issue.labels.some((l) => l.name === this.cfg.label) ? null : "removed";
+  }
+
+  /** Why a stack should go, if it should: its PR (or, before there's a PR, its issue) closed, or the label was removed. */
+  private async cleanupReason(repo: string, s: Stack, labeled: Set<number>): Promise<{ text: string; labelRemoved: boolean }> {
+    const issue = labeled.has(s.issue) ? null : await this.unlabeled(repo, s.issue);
+    if (issue === "removed") return { text: `the ${this.cfg.label} label was removed from #${s.issue}`, labelRemoved: true };
+    if (s.pr) {
+      const pr = await gh.pr(repo, s.pr);
+      if (pr.state === "closed") return { text: `PR #${s.pr} ${pr.merged_at ? "merged" : "closed"}`, labelRemoved: false };
+    } else if (issue === "closed") {
+      return { text: `issue #${s.issue} closed`, labelRemoved: false };
+    }
+    return { text: "", labelRemoved: false };
+  }
+
   /** Is any job running or waiting for this branch/issue? (Don't tear down under a build.) */
   private busy(repo: string, branch: string, issue: number): boolean {
-    return this.store.jobs(200).some((j) => j.repo === repo && ["queued", "running", "paused"].includes(j.state)
+    return this.activeFor(repo, branch, issue).length > 0;
+  }
+  private activeFor(repo: string, branch: string, issue: number): Job[] {
+    return this.store.jobs(200).filter((j) => j.repo === repo && ["queued", "running", "paused"].includes(j.state)
       && j.kind !== "teardown" && (j.branch === branch || (j.kind === "build" && j.number === issue)));
   }
 
@@ -391,16 +451,18 @@ export class Daemon {
   }
 
   // ------------------------------------------------------------ actions from the page
-  cancel(id: number): void {
+  cancel(id: number, why = "cancelled by you"): void {
     const ctx = this.running.get(id);
     if (ctx) {
-      this.store.event("cancelled by you; stopping the agent", id, "warn");
+      if (ctx.cancelled) return;
+      this.store.update(id, { reason: why });
+      this.store.event(`${why}; stopping the agent`, id, "warn");
       ctx.cancelled = true; ctx.current?.kill("cancelled");
       return;
     }
     const j = this.store.job(id);
     if (j && ["queued", "paused"].includes(j.state)) {
-      this.store.update(id, { state: "cancelled", reason: "cancelled by you", finished_at: Date.now() });
+      this.store.update(id, { state: "cancelled", reason: why, finished_at: Date.now() });
       this.store.event(`cancelled ${j.kind} ${j.repo}#${j.number} before it started`, id, "warn");
     }
   }
@@ -451,6 +513,7 @@ export class Daemon {
       paths: paths(),
       repos: this.cfg.repos.map((r) => r.name),
       label: this.cfg.label,
+      github: { actingAs: this.ghUser, allowedUsers: this.allowedNow(), allowedFromConfig: this.cfg.allowedUsers.length > 0 },
       poll: { lastAt: this.lastPollAt, nextAt: this.nextPollAt, error: this.lastPollError, every: formatDuration(this.cfg.pollMs) },
       budget: {
         used: w.used, limit: w.limit, usedText: formatAmount(w.used), limitText: w.limit === null ? "unlimited" : formatAmount(w.limit),

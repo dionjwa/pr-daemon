@@ -14,7 +14,8 @@ pr-daemon, one process on **your own machine**, then:
 5. has a second agent, which sees only the PR, review it
 
 **You** try it, then merge it. Merging or closing the PR shuts the app copy
-down and cleans up. Everything runs within a **token budget** you set.
+down, deletes the branch and cleans up. Changed your mind? Remove the `agent`
+label and it stops and cleans up the same way. Everything runs within a **token budget** you set.
 
 ```
   you                         pr-daemon (one process on your machine)                  you
@@ -28,6 +29,17 @@ down and cleans up. Everything runs within a **token budget** you set.
 
 Status and settings are on a local web page: **http://localhost:7377**.
 
+> **pr-daemon acts as you.** It uses your own `gh` login, so every branch,
+> push, PR and comment it makes is made **as your GitHub user**, and the agent
+> runs on your machine with your permissions. Only the users in
+> `allowed_users` can make it do anything (by default, only you, the `gh`
+> user). It checks who added the `agent` label, who wrote and edited the
+> issue, and who wrote each `/pr-daemon` comment, and ignores everyone else.
+> The status page shows which GitHub user it's acting as and who is allowed.
+> It's built for **private repositories**. On public ones those checks keep
+> strangers' issues and comments away from the agent, but read
+> [Safety](#safety) first.
+
 ---
 
 ## Day to day
@@ -39,16 +51,20 @@ Status and settings are on a local web page: **http://localhost:7377**.
 | Wait. Watch at http://localhost:7377 if you like. | Builds, tests, opens a PR, reviews it, and labels the issue `agent:in-review`. |
 | Open the **Preview** link in the PR and try it. | Keeps the stack running and restarts it if it stops. |
 | Want changes? Comment on the PR: `/pr-daemon make the button blue`. | Makes the changes, pushes, and comments with a summary and new screenshots. |
-| Merge (or close) the PR. | Stops the stack and removes the worktree. |
+| Merge (or close) the PR. | Stops the stack, removes the worktree, and deletes the branch on GitHub. |
+| Changed your mind? Remove the **`agent`** label. | Stops any agent working on it, closes its PR, stops the stack, removes the worktree, and deletes the branch. |
 
 - **Out of budget?** The issue is labelled **`agent:paused`**. It resumes by
   itself when the budget window frees up, with the agent picking up where it
   stopped.
 - **Stuck?** The issue is labelled **`agent:failed`** with the reason in a
-  comment. Press **Retry** on the status page, or remove and re-add the
-  `agent` label.
+  comment. Press **Retry** on the status page. Or remove the `agent` label
+  (which cleans everything up) and add it again to start from scratch.
 - Only **you** can trigger builds and `/pr-daemon` (or the people you list in
-  `allowed_users`). pr-daemon checks who added the label.
+  `allowed_users`). pr-daemon checks who added the label and who wrote the
+  issue, and everything it does on GitHub is done as you. An issue someone
+  else wrote is refused with a comment: open your own issue that says the
+  same thing, and label that.
 
 ---
 
@@ -175,6 +191,9 @@ login.
 
 http://localhost:7377. It's only reachable from your own machine.
 
+- **Who:** the GitHub user pr-daemon acts as (your `gh` login), and the users
+  allowed to trigger work.
+
 - **Token budget:** tokens used in the current window, the limit, and when it
   frees up.
 - **Work:** every job (build, review, revise, teardown, restart) with its
@@ -182,7 +201,8 @@ http://localhost:7377. It's only reachable from your own machine.
   live. Buttons: **Cancel**, **Resume** (continue where it stopped) and
   **Retry** (start over).
 - **Preview stacks:** every running app copy, with a health dot. Buttons:
-  **Restart**, **Tear down**.
+  **Restart**, **Tear down** (stops the stack and removes the worktree, but
+  keeps the branch and any PR open).
 - **Events:** what happened, newest first.
 - **Pause:** stops new jobs from starting. Running ones finish.
 - **Config:** edit the config file in place. It's checked before saving, so
@@ -311,7 +331,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | Setting | Default | Meaning |
 |---|---|---|
 | `label` | `agent` | The issue label that starts a build |
-| `allowed_users` | `[]` (only you) | Who may trigger builds and `/pr-daemon` |
+| `allowed_users` | `[]` (only you) | Who may trigger builds and `/pr-daemon`, and whose issues and PR comments the agent may read |
 | `concurrency` | `1` | Agent runs at the same time |
 | `poll` | `60s` | How often to check GitHub |
 | `agent.max_attempts` | `3` | Build → check → fix rounds before giving up |
@@ -362,16 +382,59 @@ worktree before pr-daemon removes it.
 
 ## Safety
 
-- The agent has full control of this machine while it works. Run pr-daemon as
-  a dedicated user (or in a VM) if the machine holds anything you care about.
-- pr-daemon acts as **your** GitHub user, through `gh`. It **never merges**:
-  you do.
-- Only allowed users (by default, only you) can start work. pr-daemon checks
-  who added the label and who wrote each `/pr-daemon` comment.
-- Nothing from the internet connects to pr-daemon itself: it only polls GitHub.
-  The status page listens on 127.0.0.1 only and refuses requests from other
-  websites. With a preview domain set, Caddy serves **only the preview
-  stacks**, so anyone with a branch's URL can reach that preview. Treat
-  previews as public, or put access control in the app.
+pr-daemon is a tool for **your own** repositories. Read this before you point
+it at one.
+
+- **It acts as your GitHub user.** It has no bot account or GitHub App of its
+  own: it uses your `gh` login, so its branches, pushes, PRs, reviews and
+  comments all show up as you. It **never merges**: you do. (It can't approve
+  its own PR either, so the review is posted as a comment.)
+- **Only allowed users can direct it.** By default that's only you (the `gh`
+  user). List others in `allowed_users` (GitHub logins, any case). The status
+  page shows who it's acting as and who is allowed. Everything the agent is
+  told to do has to come from one of them:
+
+  | What | Checked | If someone else |
+  |---|---|---|
+  | The `agent` label | who added it | ignored (shown as `ignored` on the status page) |
+  | The issue's title and body | who wrote it, everyone who edited the body, everyone who renamed it: when the label is added, and again each time a build starts or resumes | refused, with a comment on the issue saying who and why |
+  | A `/pr-daemon` comment | who wrote it | ignored |
+  | The PR conversation given to a revision | each comment's and review's author | left out of the prompt (the event log says how many) |
+
+  Your own `gh` user's words always count as trusted, because pr-daemon's
+  PR descriptions and reviews are posted as you.
+
+  An issue from someone else is refused even if you add the label. To build
+  it, open a new issue in your own words and label that, or add the person
+  to `allowed_users`.
+- **The agent has your access.** It runs Claude Code with permission prompts
+  off, as your user, on your machine. It can run any command, read your files,
+  and use your `gh` and git logins, so it could push to or comment on any repo
+  you can. The prompts tell it not to; nothing technically stops it. Run
+  pr-daemon as a dedicated user, or in a VM, if the machine holds anything you
+  care about, and give that user a `gh` login with access to only the repos
+  you watch.
+- **What it reads is an instruction,** so the checks above decide what reaches
+  the agent. pr-daemon hands the agent the issue and the filtered PR
+  conversation itself, and the prompts tell it not to fetch comments on its
+  own. That last part is a prompt, not a guarantee: the agent has `gh`, so it
+  *could* read other issues and comments, and the project's own files (code,
+  READMEs, dependencies) reach it too. On a **private repository** everyone
+  who can write any of that is someone you already trust, which is why it's
+  the recommended setup. On a public one the checks keep strangers' issues and
+  comments out of the prompts; review what you merge as you would any
+  contributor's code.
+- **Keep CI out of reach.** If your `gh` login doesn't have the `workflow`
+  scope (`gh auth status` lists them), GitHub rejects any push that touches
+  `.github/workflows/`, so the agent can't rewrite your CI. Keep it that way.
+- **Nothing from the internet connects to pr-daemon itself:** it only polls
+  GitHub. The status page listens on 127.0.0.1 only and refuses requests from
+  other websites. With a preview domain set, Caddy serves **only the preview
+  stacks**, so anyone with a branch's URL can reach that preview, which runs
+  unreviewed code on your machine. Treat previews as public, or put access
+  control in the app.
+- **Secrets:** pr-daemon stores no GitHub or Claude tokens. The optional
+  Cloudflare token is passed to Caddy only, never to agents or project
+  commands.
 
 See [PLAN.md](PLAN.md) for the design and roadmap.

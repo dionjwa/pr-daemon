@@ -68,6 +68,7 @@
   .empty { padding: 18px 16px; color: var(--ink-3); }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } .hide-sm { display: none; } }
+  .who { margin-bottom: 10px; padding: 8px 10px; border-left: 3px solid currentColor; }
 </style>
 </head>
 <body>
@@ -190,15 +191,21 @@ function render() {
     <div class="small muted">new tokens ${amt(b.breakdown.input + b.breakdown.output + b.breakdown.cache_create)} · cache reads ${amt(b.breakdown.cache_read)} ${b.countCacheReads ? "(counted)" : "(not counted)"}</div>
     <div class="small muted">per-issue cap: ${b.perIssue ? esc(b.perIssue) : "none"}${b.freesAt ? ` · budget frees up in ${until(b.freesAt)}` : ""}</div>`;
 
-  $("howto").innerHTML = S.repos.length
+  // Who this acts as, and who can make it act: the two facts that matter most
+  // before labelling anything.
+  const g = S.github ?? {}, at = (u) => `<b>@${esc(u)}</b>`;
+  const who = `<div class="who">Acts on GitHub as ${g.actingAs ? at(g.actingAs) : "<i>(checking gh…)</i>"}: it pushes, opens PRs and comments as that user.
+       Only ${g.allowedUsers?.length ? g.allowedUsers.map(at).join(", ") : "<i>(checking gh…)</i>"} can start work${g.allowedFromConfig ? " (allowed_users)" : ""};
+       a label or <code>/pr-daemon</code> comment from anyone else is ignored.</div>`;
+  $("howto").innerHTML = who + (S.repos.length
     ? `Add the <span class="badge">${esc(S.label)}</span> label to an issue in ${S.repos.map((r) => `<a href="https://github.com/${esc(r)}/issues" target="_blank">${esc(r)}</a>`).join(", ")}.
-       Ask for changes with a PR comment starting <code>/pr-daemon</code>. Merge or close the PR to clean up.`
+       Ask for changes with a PR comment starting <code>/pr-daemon</code>. Merge or close the PR, or remove the label, to clean up (stack, worktree and branch).`
     : `<b>No repos configured yet.</b> Open <a href="#config">Config</a> and add one block per repository &mdash;
        the double brackets are what make it a list:<pre style="margin:8px 0">[[repos]]
 name = "your-org/api"
 
 [[repos]]
-name = "your-org/website"</pre>`;
+name = "your-org/website"</pre>`);
 
   const jobs = S.jobs;
   $("jobs").innerHTML = jobs.length ? `<table><thead><tr><th>State</th><th>Job</th><th>Issue / PR</th><th class="hide-sm">Branch</th><th>Tokens</th><th class="hide-sm">When</th><th></th></tr></thead><tbody>${

@@ -19,7 +19,10 @@ the owner's machine (`pr-daemon serve`):
 6. runs a **fresh** Claude session to review the PR (it sees only the PR), with
    one automatic revise round if the verdict is `changes`
 7. `/pr-daemon <feedback>` comments on the PR trigger further revisions
-8. when the PR or issue closes: `just pr-daemon-down`, remove the worktree, clear labels
+8. when the PR closes (or the issue, before there's a PR), or the `agent` label
+   is removed: `just pr-daemon-down`, remove the worktree, clear labels, and
+   delete the branch on GitHub. Removing the label also cancels running jobs
+   for the issue and closes its open PR. The page's Tear down button keeps the branch.
 9. with `[preview] domain` set: runs Caddy so each branch is at
    `https://<branch>.<domain>`
 
@@ -51,6 +54,15 @@ A human always merges.
   normal CI.
 - **Only allowed users trigger work**: the actor of the `labeled` event and the
   author of `/pr-daemon` comments must be in `allowed_users` (default: the gh user).
+  So must everyone who **wrote** the issue: author, body editors and title
+  renamers (`gh.provenance()`, GraphQL), checked at label time and again at
+  every build start. Revise prompts only get PR comments from trusted authors
+  (`gh.trustedDiscussion()`: allowed users plus the gh user). Agents are
+  told not to fetch comments themselves; don't reintroduce `--comments`.
+  The status page, `status` and `doctor` all name the gh user it acts as and
+  who is allowed (`status().github`); keep that visible. The README's Safety
+  section is the contract: recommended for private repos, because the issue
+  body and PR comments are agent input regardless of who added the label.
 - **Trigger label is `agent`.** Status labels are `agent:working`,
   `agent:in-review`, `agent:paused` and `agent:failed`.
 - **Budget:** optional tokens per rolling window (default `5h`, one Claude
@@ -233,8 +245,8 @@ just contract                 # print examples/justfile, the two recipes a proje
 ## Dogfood setup (the owner's machine)
 
 - **Target repo:** `metapages/framejs.app` (Deno Fresh worker plus nhost
-  backend; local checkout `../framejs-nhost3`). Its recipes live on branch
-  **`pr-demon-setup`** (not yet merged to `main`), so the owner's config has
+  backend). Its recipes live on branch **`pr-demon-setup`** (not yet merged
+  to `main`), so the owner's config has
   `base = "pr-demon-setup"` for that repo. Remove that line after the merge.
   **That branch still has the old `pr-demon-*` recipe names** (it predates the
   rename), so until they're renamed to `pr-daemon-*`, set `up` / `down` /

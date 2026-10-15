@@ -82,7 +82,8 @@ export const DEFAULT_TOML = `# pr-daemon configuration.
 port = 7377              # status page: http://localhost:<port> (localhost only)
 poll = "60s"             # how often to check GitHub
 label = "agent"          # add this label to an issue to start a build
-allowed_users = []       # who may trigger builds and /pr-daemon; [] = only you (the gh user)
+allowed_users = []       # who may direct the agent: add the label, write/edit labelled issues, and write
+                         # /pr-daemon and PR comments the agent reads. [] = only you (the gh user)
 concurrency = 1          # agent runs at the same time
 prevent_sleep = true     # macOS: keep the machine awake while pr-daemon runs
 

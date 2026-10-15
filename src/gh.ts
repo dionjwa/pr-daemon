@@ -18,11 +18,71 @@ export async function viewer(): Promise<string> {
   return viewerLogin;
 }
 
+/** Who may direct pr-daemon: `allowed_users`, or else only the gh user. */
+export async function allowedUsers(configured: string[]): Promise<string[]> {
+  return configured.length ? configured : [await viewer()];
+}
+
+/**
+ * Whose words may reach an agent: the allowed users plus the gh user (whose
+ * account pr-daemon itself writes with: PR bodies, reviews, summaries).
+ */
+export async function trustedAuthors(configured: string[]): Promise<string[]> {
+  return [...new Set([...(await allowedUsers(configured)), await viewer()])];
+}
+
+/** GitHub logins are case-insensitive. */
+export function isListed(users: string[], login: string): boolean {
+  const l = login.toLowerCase();
+  return users.some((u) => u.toLowerCase() === l);
+}
+
+/** Everyone whose words are in an issue's title or body: the author, body editors, title renamers. */
+export interface Provenance { author: string; editors: string[]; renamers: string[] }
+
+/** The writers of an issue's title and body who aren't trusted (deleted accounts show as "ghost"). */
+export function untrustedWriters(p: Provenance, trusted: string[]): string[] {
+  return [...new Set([p.author, ...p.editors, ...p.renamers])].filter((u) => !isListed(trusted, u));
+}
+
+/** Why an issue's text isn't safe to hand an agent, and what to do about it. */
+export const untrustedIssue = (who: string[]) =>
+  `its title or text was written or edited by ${who.map((u) => `@${u}`).join(", ")}, who ${who.length === 1 ? "isn't" : "aren't"} in allowed_users`;
+export const UNTRUSTED_HELP = "The issue is the agent's instructions, so only allowed users may write it. Open a new issue in your own words (or add them to allowed_users), then label that.";
+
+export async function provenance(repo: string, n: number): Promise<Provenance> {
+  const [owner, name] = repo.split("/");
+  const query = `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { issue(number: $n) {
+    author { login }
+    userContentEdits(last: 100) { nodes { editor { login } } }
+    timelineItems(last: 100, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { actor { login } } } } } } }`;
+  type Who = { login: string } | null;
+  const r = JSON.parse(await must("gh", ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `n=${n}`]));
+  const i = r.data.repository.issue as { author: Who; userContentEdits: { nodes: { editor: Who }[] }; timelineItems: { nodes: { actor?: Who }[] } };
+  const who = (w: Who | undefined) => w?.login ?? "ghost";
+  return { author: who(i.author), editors: i.userContentEdits.nodes.map((e) => who(e.editor)), renamers: i.timelineItems.nodes.map((e) => who(e.actor)) };
+}
+
+/** A PR's conversation (comments and review bodies), oldest first, from trusted authors only. */
+export async function trustedDiscussion(repo: string, pr: number, trusted: string[], skipCommentId?: number): Promise<{ text: string; dropped: number }> {
+  const [comments, reviews] = await Promise.all([
+    apiAll<{ id: number; body: string; user: { login: string } | null; created_at: string }>(`repos/${repo}/issues/${pr}/comments?per_page=100`),
+    apiAll<{ body: string; user: { login: string } | null; submitted_at: string }>(`repos/${repo}/pulls/${pr}/reviews?per_page=100`),
+  ]);
+  const all = [
+    ...comments.filter((c) => c.id !== skipCommentId).map((c) => ({ who: c.user?.login ?? "ghost", at: c.created_at, body: c.body })),
+    ...reviews.filter((r) => r.body?.trim()).map((r) => ({ who: r.user?.login ?? "ghost", at: r.submitted_at, body: r.body })),
+  ].sort((a, b) => a.at.localeCompare(b.at));
+  const kept = all.filter((c) => isListed(trusted, c.who));
+  const text = kept.map((c) => `--- @${c.who}, ${c.at}\n${c.body.trim()}`).join("\n\n").slice(-30_000);
+  return { text, dropped: all.length - kept.length };
+}
+
 export async function defaultBranch(repo: string): Promise<string> {
   return (await api<{ default_branch: string }>(`repos/${repo}`)).default_branch;
 }
 
-export interface Issue { number: number; title: string; body: string | null; state: string; html_url: string; pull_request?: unknown }
+export interface Issue { number: number; title: string; body: string | null; state: string; html_url: string; labels: { name: string }[]; pull_request?: unknown }
 
 export async function labeledIssues(repo: string, label: string): Promise<Issue[]> {
   const items = await apiAll<Issue>(`repos/${repo}/issues?state=open&per_page=100&labels=${encodeURIComponent(label)}`);
@@ -68,6 +128,23 @@ export async function createPr(repo: string, o: { base: string; head: string; ti
 
 export async function editPr(repo: string, n: number, o: { title: string; bodyFile: string }): Promise<void> {
   await must("gh", ["pr", "edit", String(n), "-R", repo, "--title", o.title, "--body-file", o.bodyFile]);
+}
+
+/** Close a PR, saying why. */
+export async function closePr(repo: string, n: number, why: string): Promise<void> {
+  await must("gh", ["pr", "close", String(n), "-R", repo, "--comment", why]);
+}
+
+/**
+ * Delete a branch on GitHub. "gone" when it isn't there (never pushed, or the
+ * repo deletes head branches on merge itself). A PR's commits stay reachable
+ * from the PR, and GitHub offers "Restore branch" on it.
+ */
+export async function deleteBranch(repo: string, branch: string): Promise<"deleted" | "gone"> {
+  const r = await run("gh", ["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`]);
+  if (r.code === 0) return "deleted";
+  if (/Reference does not exist|Not Found|\b(404|422)\b/i.test(r.stderr + r.stdout)) return "gone";
+  throw new Error(`deleting branch ${branch} failed: ${(r.stderr || r.stdout).trim().slice(-400)}`);
 }
 
 export async function comment(repo: string, n: number, body: string): Promise<void> {

@@ -79,6 +79,7 @@ async function status(): Promise<void> {
   try { s = await (await fetch(`http://localhost:${cfg.port}/api/status`)).json(); }
   catch { console.log(`pr-daemon isn't running (start it: pr-daemon serve, or pr-daemon install-service)`); return; }
   console.log(`${s.paused ? "PAUSED" : "running"} · budget ${s.budget.usedText} / ${s.budget.limitText} in last ${s.budget.window} · http://localhost:${cfg.port}`);
+  if (s.github) console.log(`  acting on GitHub as @${s.github.actingAs || "?"} · only ${s.github.allowedUsers.map((u: string) => `@${u}`).join(", ") || "?"} can trigger work`);
   for (const j of s.jobs.filter((x: any) => ["running", "queued", "paused"].includes(x.state)))
     console.log(`  ${j.state.padEnd(8)} ${j.kind.padEnd(8)} ${j.repo}#${j.number}  ${j.tokensText}  ${j.reason}`);
   for (const st of s.stacks) console.log(`  stack   ${st.branch.padEnd(40)} ${st.url}`);
@@ -154,7 +155,8 @@ async function doctor(): Promise<void> {
   const ghv = /gh version (\d+)\.(\d+)/.exec((await run("gh", ["--version"])).stdout);
   ok(!!ghv && (+ghv[1] > 2 || (+ghv[1] === 2 && +ghv[2] >= 73)), `gh ≥ 2.73 (have ${ghv ? `${ghv[1]}.${ghv[2]}` : "none"})`, "brew upgrade gh");
   const auth = await run("gh", ["auth", "status"]);
-  ok(auth.code === 0, "gh is logged in", "gh auth login");
+  const login = auth.code === 0 ? (await run("gh", ["api", "user", "--jq", ".login"])).stdout.trim() : "";
+  ok(auth.code === 0, `gh is logged in${login ? ` as @${login}: pr-daemon pushes, opens PRs and comments as this user` : ""}`, "gh auth login");
   const c = await run("claude", ["-p", "Reply with exactly: ok", "--max-turns", "1"], { timeoutMs: 90_000 });
   ok(c.code === 0 && /ok/i.test(c.stdout), "claude works headless", c.stdout.trim() || c.stderr.trim() || "claude (log in), or set CLAUDE_CODE_OAUTH_TOKEN");
   const docker = await run("docker", ["info"], { timeoutMs: 20_000 });
