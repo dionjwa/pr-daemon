@@ -148,6 +148,13 @@ just contract                 # print examples/justfile, the two recipes a proje
 - **launchd:** `claude` works headless when HOME and PATH are set (the plist
   does this; no OAuth token needed). `AbandonProcessGroup` plus starting
   stacks `detached` means preview stacks survive pr-daemon restarting.
+- **`stop` can't rely on the API.** `pr-daemon stop` POSTs `/api/shutdown`,
+  but anything older than that endpoint (or wedged) won't answer — the
+  pre-rename build 403s it, since its write check wants `X-PR-Demon`. So
+  `stop` falls back to `lsof -t` on the status port and SIGTERMs that pid,
+  **only** when its command line matches `(cli.ts|bin/pr-daemon)\s+serve`.
+  Matching a pr-daemon *path* isn't enough: an editor or shell sitting in the
+  checkout would match, and a test caught exactly that.
 - **Caddy is tied to the process:** `serve` traps SIGINT/SIGTERM and calls
   `Daemon.shutdown()` → `Proxy.shutdown()`, which stops the Caddy it manages
   (admin `/stop`, or `docker rm -f`) and sets a `stopped` flag so `tick()`

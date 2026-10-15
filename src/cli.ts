@@ -90,34 +90,60 @@ async function status(): Promise<void> {
  */
 async function stop(): Promise<void> {
   const cfg = loadConfig();
-  let did = false;
+  const url = `http://localhost:${cfg.port}`;
   if (process.platform === "darwin" && existsSync(plistPath)) {
     await run("launchctl", ["bootout", `gui/${process.getuid!()}/${LABEL}`]);
-    console.log(`Stopped the service. It starts again at login, or now with: pr-daemon install-service`);
-    did = true;
+    console.log("Stopped the service. It starts again at login, or now with: pr-daemon install-service");
   } else if (process.platform !== "darwin" && existsSync(unitPath)) {
     await run("systemctl", ["--user", "stop", LABEL]);
     console.log(`Stopped the service. Start it again with: systemctl --user start ${LABEL}`);
-    did = true;
   }
-  try {
-    await fetch(`http://localhost:${cfg.port}/api/shutdown`, { method: "POST", headers: { "x-pr-daemon": "1" }, signal: AbortSignal.timeout(3000) });
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 250));
-      if (!(await alive(cfg.port))) break;
-    }
-    console.log(await alive(cfg.port)
-      ? `It's still answering on http://localhost:${cfg.port}. Give it a moment, or stop it where you started it.`
-      : "Stopped. Preview stacks keep running; Caddy stopped with it. Start again: pr-daemon serve (or just start).");
-  } catch {
-    if (!did) console.log(`Nothing is answering on http://localhost:${cfg.port}: it isn't running.`);
+
+  const who = await listener(cfg.port);
+  if (!who && !(await alive(cfg.port))) return console.log(`Nothing is listening on ${url}: it isn't running.`);
+
+  // Ask politely first: a clean exit stops Caddy and re-queues running jobs.
+  await fetch(`${url}/api/shutdown`, { method: "POST", headers: { "x-pr-daemon": "1" }, signal: AbortSignal.timeout(3000) }).catch(() => {});
+  if (await gone(cfg.port)) return console.log(stopped());
+
+  // Still there. An older build (or anything wedged) won't answer that
+  // request, so fall back to the process holding the port — but only if its
+  // command line is our entrypoint. Being in a pr-daemon directory isn't
+  // enough: an editor or a shell sitting there would match that.
+  if (!who) return console.log(`${url} is still answering but nothing holds the port. Stop it where you started it.`);
+  if (!/(cli\.ts|bin\/pr-da?emon)\s+serve\b/.test(who.command)) {
+    return console.log(`Something else is on ${url} — pid ${who.pid}, left alone:\n  ${who.command}`);
   }
+  try { process.kill(who.pid, "SIGTERM"); } catch { /* already gone */ }
+  console.log(await gone(cfg.port)
+    ? `${stopped()}\n(It didn't answer the shutdown request, so pid ${who.pid} was asked to quit instead.)`
+    : `pid ${who.pid} is still holding ${url}. Stop it where it was started, or: kill -9 ${who.pid}`);
+}
+
+const stopped = () => "Stopped. Preview stacks keep running; Caddy stopped with it. Start again: pr-daemon serve (or just start).";
+
+/** Wait up to 10s for the port to go quiet. */
+async function gone(port: number): Promise<boolean> {
+  for (let i = 0; i < 40; i++) {
+    if (!(await alive(port))) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return !(await alive(port));
 }
 
 const alive = async (port: number): Promise<boolean> => {
-  try { return (await fetch(`http://localhost:${port}/api/status`, { signal: AbortSignal.timeout(1500) })).ok; }
+  try { await fetch(`http://localhost:${port}/api/status`, { signal: AbortSignal.timeout(1500) }); return true; }
   catch { return false; }
 };
+
+/** The process listening on a port, with its command line, so we can see whose it is. */
+async function listener(port: number): Promise<{ pid: number; command: string } | null> {
+  const r = await run("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { timeoutMs: 5000 });
+  const pid = Number(r.stdout.split("\n")[0]?.trim());
+  if (!pid) return null;
+  const ps = await run("ps", ["-o", "command=", "-p", String(pid)], { timeoutMs: 5000 });
+  return { pid, command: ps.stdout.trim() };
+}
 
 async function doctor(): Promise<void> {
   let bad = 0;

@@ -26,6 +26,24 @@ One wrinkle worth knowing: under `just dev` the `node --watch` parent survives
 `just stop` and will start a new daemon on the next edit to `src/`. Ctrl-C the
 watcher, or kill that pid. The `dev` recipe says so now.
 
+**Then `just stop` met something it couldn't stop.** A process had been
+holding 7377 since 07:47 — the *old* build, run from the pre-rename checkout
+`…/pr-demon/src/cli.ts` against `~/.pr-demon/`, orphaned to launchd when its
+terminal closed. It has no `/api/shutdown` (that endpoint is hours younger)
+and its write check still wants `X-PR-Demon`, so the polite request came back
+`403` and `stop` could only report that it was still answering. Asking nicely
+is not a plan when the thing on the port predates the question.
+
+`stop` now falls back to the process holding the port: `lsof -t`, then
+`SIGTERM`, but only when its command line matches our entrypoint
+(`cli.ts serve` or `bin/pr-daemon … serve`). Two bugs fell out of testing
+that, both fixed: the first gate matched any command mentioning a pr-daemon
+path, so it killed an unrelated process whose script merely lived in this
+directory; and with nothing running at all, `stop` printed "Stopped" because a
+failed status fetch read as "it exited". Four cases are covered now — clean
+shutdown, a build that won't answer, a stranger on the port (reported, left
+alone), and nothing running.
+
 ---
 
 ## 2026-10-15: preview stacks were leaking docker networks
@@ -204,6 +222,21 @@ mini2 is still installed and will keep failing to connect — finish it there
 with `./svc.sh stop && ./svc.sh uninstall` (and `./config.sh remove`). Also retired
 the last of the just-only wording in PLAN.md and the code comments, since any
 shell command works.
+
+**The old installation is gone from this machine** (2026-10-15). An orphaned
+`pr-demon serve` from 07:47 was still holding port 7377 — killed. Then
+`~/dev/git/metapages/pr-demon/` (only a leftover `node_modules`, no `.git`)
+and `~/.pr-demon/` (512MB) were deleted. Before deleting the state directory
+its one worktree's stack was torn down properly with `just pr-demon-down`:
+**17 containers had been running for 19 hours**, and deleting the worktree
+first would have orphaned them and their networks, which is most likely where
+the leaked `framejs-nhost-frontend-*_default` networks came from. Nothing was
+lost: the worktree was clean and fully pushed (PR #100 is open on the same
+commit), `repos/` was a re-clonable cache, and `caddy/` regenerates.
+
+One setting worth knowing was discarded with the old config: it had
+`tokens = "40M"` and `per_issue = "10M"` under `[budget]`, and
+`base = "pr-demon-setup"` for framejs.app. The current config has neither.
 
 **Migrating a machine that already ran pr-demon** (nothing to do on a fresh
 one — there was no state in this checkout):
