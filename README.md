@@ -2,7 +2,7 @@
 
 **Label an issue. Get a pull request.**
 
-You write a feature request as a GitHub issue and add the `pr-demon` label. An
+You write a feature request as a GitHub issue and add the `agent` label. An
 AI agent running on **your own machine** then:
 
 1. creates a branch, e.g. `42-dark-mode-toggle`
@@ -36,14 +36,14 @@ app copy down and cleans up.
 | You do | pr-demon does |
 |---|---|
 | Open an issue and describe the feature. | — |
-| Add the label **`pr-demon`**. | Labels the issue `pr-demon:working` and comments with the branch and a log link. |
-| Wait. | Builds, tests, opens a PR, reviews it, and labels the issue `pr-demon:in-review`. |
+| Add the label **`agent`**. | Labels the issue `agent:working` and comments with the branch and a log link. |
+| Wait. | Builds, tests, opens a PR, reviews it, and labels the issue `agent:in-review`. |
 | Open the **Preview** link in the PR and try it. | Keeps the stack running. |
 | Want changes? Comment on the PR: `/demon make the button blue`. | Makes the changes, pushes, and comments with a summary and new screenshots. |
 | Approve and merge (or close). | Stops the stack and removes the worktree. |
 
-If it gets stuck, the issue is labelled **`pr-demon:failed`** with the reason
-in a comment. Fix the issue text and re-add the `pr-demon` label to try again.
+If it gets stuck, the issue is labelled **`agent:failed`** with the reason
+in a comment. Fix the issue text and re-add the `agent` label to try again.
 
 ---
 
@@ -143,7 +143,7 @@ Repo → **Settings → Actions → General → Workflow permissions**:
 - choose **Read and write permissions**
 - tick **Allow GitHub Actions to create and approve pull requests**
 
-You're done. Open an issue and add the `pr-demon` label.
+You're done. Open an issue and add the `agent` label.
 
 > **Try it before merging the workflow.** Run the whole flow from a terminal
 > against a branch that has the recipes: `PR_DEMON_REPO=org/repo
@@ -164,6 +164,7 @@ CI checks to run on pr-demon's PRs.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `PR_DEMON_LABEL` | `agent` | The issue label that starts a build. If you change it, also change `'agent'` in your `pr-demon.yml` |
 | `PR_DEMON_HOME` | `~/.pr-demon` | Where clones, worktrees and logs live |
 | `PR_DEMON_MAX_ATTEMPTS` | `3` | Build → check → fix rounds before giving up |
 | `PR_DEMON_MAX_TURNS` | `200` | Turns per agent run |

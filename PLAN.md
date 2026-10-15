@@ -35,7 +35,7 @@ a command can use it, whatever its language or framework.
 | **One automatic revise round** if the reviewer says `VERDICT: changes`. After that, a human drives with `/demon <feedback>` comments on the PR. | Cheap fixes happen without you, and there's no endless agent ping-pong. |
 | **Screenshots are committed to an orphan `pr-demon-assets` branch** and linked from the PR. | GitHub has no API for attaching images to PRs. |
 | **Cleanup has three triggers**: PR closed, issue closed, and a nightly reaper. | Missed events don't leave stacks running for ever. |
-| **Labels show state**: `pr-demon` → `pr-demon:working` → `pr-demon:in-review` (or `pr-demon:failed`). | You can see what's happening from the issue list. |
+| **Labels show state**: `agent` → `agent:working` → `agent:in-review` (or `agent:failed`). | You can see what's happening from the issue list. |
 | **The repo is public-safe**: no secrets, hostnames or paths in it. Its own CI runs only on GitHub-hosted runners. | Secrets live in the calling repo or on the runner machine. Callers pin a SHA. |
 
 ## Security model

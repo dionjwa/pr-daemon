@@ -25,7 +25,7 @@ jobs:
   demon:
     # Filter here so unrelated events never wait for (or wake) the runner.
     if: >-
-      (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'pr-demon')) ||
+      (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'agent')) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/demon') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       github.event_name == 'pull_request_target' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

@@ -13,7 +13,7 @@ inputs:
     description: Optional. Use an API key instead of a Claude subscription.
     default: ""
   label:
-    description: The issue label that starts a build (default pr-demon).
+    description: The issue label that starts a build (default agent).
     default: ""
   model:
     description: Optional Claude model for the agent (default = claude's default).

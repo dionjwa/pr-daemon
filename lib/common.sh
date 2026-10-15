@@ -3,7 +3,7 @@
 
 # ---------- config (all overridable via env) ----------
 PR_DEMON_HOME="${PR_DEMON_HOME:-$HOME/.pr-demon}"
-PR_DEMON_LABEL="${PR_DEMON_LABEL:-pr-demon}"          # the label you put on an issue
+PR_DEMON_LABEL="${PR_DEMON_LABEL:-agent}"             # the label you put on an issue
 PR_DEMON_BASE="${PR_DEMON_BASE:-}"                     # base branch; default = repo default branch
 PR_DEMON_MAX_TURNS="${PR_DEMON_MAX_TURNS:-200}"        # per agent run
 PR_DEMON_MAX_ATTEMPTS="${PR_DEMON_MAX_ATTEMPTS:-3}"    # build → check → fix rounds
@@ -148,7 +148,7 @@ ensure_worktree() {
 
 # ---------- GitHub ----------
 ensure_labels() {
-  gh label create "$PR_DEMON_LABEL" -R "$REPO" --color 5319e7 --description "pr-demon: an agent builds this issue" 2>/dev/null || true
+  gh label create "$PR_DEMON_LABEL" -R "$REPO" --color 5319e7 --description "An agent builds this issue (pr-demon)" 2>/dev/null || true
   gh label create "$LABEL_WORKING"  -R "$REPO" --color fbca04 --description "pr-demon is working on this" 2>/dev/null || true
   gh label create "$LABEL_REVIEW"   -R "$REPO" --color 0e8a16 --description "pr-demon opened a PR; waiting for a human" 2>/dev/null || true
   gh label create "$LABEL_FAILED"   -R "$REPO" --color d93f0b --description "pr-demon gave up; see the issue comments" 2>/dev/null || true
