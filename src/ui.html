@@ -80,6 +80,7 @@
   <span id="poll" class="muted small"></span>
   <button id="poll-now" title="Check GitHub for new labels and comments now">Check GitHub now</button>
   <button id="pause"></button>
+  <button id="shutdown" class="danger" title="Stop pr-daemon on this machine. Preview stacks keep running; Caddy stops with it.">Shut down</button>
 </header>
 
 <main id="view-status">
@@ -203,6 +204,9 @@ name = "your-org/website"</pre>`;
   $("jobs").innerHTML = jobs.length ? `<table><thead><tr><th>State</th><th>Job</th><th>Issue / PR</th><th class="hide-sm">Branch</th><th>Tokens</th><th class="hide-sm">When</th><th></th></tr></thead><tbody>${
     jobs.map((j) => {
       const isPr = j.kind === "review" || j.kind === "revise";
+      // Stack chores are not agent runs: name them so a queued "restart" row
+      // doesn't read as a second build.
+      const kindLabel = { restart: "restart stack", teardown: "tear down stack" }[j.kind] ?? j.kind;
       const when = j.state === "running" ? `for ${dur(Date.now() - j.started_at)}` : j.finished_at ? ago(j.finished_at) : ago(j.created_at);
       const btns = [
         ["running", "queued", "paused"].includes(j.state) && btn(`cancel-${j.id}`, "Cancel", "danger"),
@@ -211,7 +215,7 @@ name = "your-org/website"</pre>`;
       ].filter(Boolean).join("");
       const row = `<tr class="job" data-job="${j.id}" id="job-${j.id}">
         <td><span class="badge s-${j.state}">${j.state}</span></td>
-        <td>${esc(j.kind)}</td>
+        <td>${esc(kindLabel)}${kindLabel !== j.kind ? `<div class="muted" style="font-size:11px">no agent, no tokens</div>` : ""}</td>
         <td>${link(j.repo, j.number, isPr)}${j.pr && j.kind === "build" ? ` → ${link(j.repo, j.pr, true)}` : ""}
           ${j.reason ? `<div class="reason">${esc(j.reason)}${j.resume_after ? ` · resumes in ${until(j.resume_after)}` : ""}</div>` : ""}</td>
         <td class="hide-sm small">${esc(j.branch)}</td>
@@ -229,8 +233,10 @@ name = "your-org/website"</pre>`;
       <td class="small">${esc(s.branch)}<div class="muted" style="font-size:11px">${esc(s.worktree)}</div></td>
       <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
       <td><span class="dot ${s.healthy === 1 ? "ok" : s.healthy === 0 ? "bad" : ""}"></span>${
-        s.public_url ? `<a href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ""}${
-        s.url ? `<div class="${s.public_url ? "small muted" : ""}">${s.public_url ? "local: " : ""}<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></div>` : `<span class="muted">no URL</span>`}</td>
+        s.url && s.public_url ? `<a href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ""}${
+        s.url ? `<div class="${s.public_url ? "small muted" : ""}">${s.public_url ? "local: " : ""}<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></div>`
+              : `<span class="muted">not running</span>`}${
+        s.error ? `<div class="reason" style="margin-top:6px">${esc(s.error)}</div>` : ""}</td>
       <td class="hide-sm small muted">${ago(s.checked_at)}</td>
       <td class="actions">${btn(`restart|${s.repo}|${s.branch}`, "Restart")}${btn(`teardown|${s.repo}|${s.branch}`, "Tear down", "danger")}</td></tr>`).join("")}</tbody></table>`
     : `<div class="empty">No preview stacks running.</div>`;
@@ -276,6 +282,22 @@ document.addEventListener("click", async (ev) => {
 });
 
 $("pause").onclick = async () => { await api("/api/pause", "POST", { paused: !S?.paused }); refresh(); };
+
+// Shutting down is the one action you can't undo from this page, so it takes
+// two clicks (no browser dialogs anywhere in here).
+let shutTimer = null;
+$("shutdown").onclick = async () => {
+  const b = $("shutdown");
+  if (!shutTimer) {
+    b.textContent = "Click again to stop";
+    shutTimer = setTimeout(() => { shutTimer = null; b.textContent = "Shut down"; }, 3000);
+    return;
+  }
+  clearTimeout(shutTimer); shutTimer = null;
+  b.textContent = "Stopping…"; b.disabled = true;
+  try { await api("/api/shutdown", "POST"); } catch {}
+  setTimeout(refresh, 1500);   // the refresh loop reports it as not running
+};
 $("poll-now").onclick = async () => { await api("/api/poll", "POST"); setTimeout(refresh, 1500); };
 
 // ---------- setup tab ----------

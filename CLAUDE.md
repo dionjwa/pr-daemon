@@ -71,7 +71,7 @@ A human always merges.
 
 | File | Responsibility |
 |---|---|
-| `cli.ts` | Commands: `serve`, `status`, `doctor`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
+| `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
 | `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
@@ -110,6 +110,7 @@ just test                     # node --test src/*.test.ts (pure logic: amounts, 
 just ci                       # both, what .github/workflows/ci.yml runs
 just doctor                   # tools, logins, config, preview proxy
 just run build owner/repo 42  # one job inline, no daemon needed
+just stop                     # shut it down, however it was started
 just restart                  # restart the installed service after code changes (launchd / systemd)
 just logs                     # tail -f ~/.pr-daemon/pr-daemon.log
 just db 'select * from jobs limit 5;'
@@ -153,6 +154,16 @@ just contract                 # print examples/justfile, the two recipes a proje
   can't start another. So a restart costs a few seconds of preview downtime.
   Caddy still runs `detached`, so a signal can't kill it mid-request; if
   pr-daemon is SIGKILLed, the surviving Caddy is adopted on the next start.
+- **Watching config.toml means watching its DIRECTORY.** `saveConfigText`
+  writes `config.toml.tmp` and renames it over the real file, and a watch on a
+  path follows the inode it was opened on — a file watch would survive exactly
+  one save and then go silently deaf. `Daemon.watchConfig()` watches the
+  directory and filters on the basename, debounces 250ms (a save is several
+  events, and reading too early catches a half-written file), ignores text
+  identical to what it last wrote (so the Config page's own save doesn't
+  announce twice), and on a parse error logs once and keeps the running config.
+  `port` and `prevent_sleep` are fixed at startup, so `apply()` says so instead
+  of pretending they changed.
 - **Caddy admin API vs Node `fetch`:** undici sends `Sec-Fetch-Mode: cors`, and
   Caddy then refuses requests without an allowed `Origin`. `proxy.ts` sends
   `Origin: http://<admin>` and lists it in `admin.origins`.
@@ -162,6 +173,17 @@ just contract                 # print examples/justfile, the two recipes a proje
   (image pull).
 - **Unhandled promise rejections crash Node.** Handlers that call GitHub use
   `.catch(() => {})`, and `serve` logs any stray rejection instead of dying.
+- **Docker's address pool runs out at about 31 bridge networks.** Each preview
+  stack takes one or two, and a teardown that skips `down` (the worktree is
+  already gone, or the project's `down` command doesn't exist) used to leak
+  them until every later `up` died with "all predefined address pools have
+  been fully subnetted". `stack.up()` now diffs `docker network ls` around the
+  command and records what it created in `stacks.networks`; `teardown` removes
+  exactly those, and only while nothing is attached. Networks pr-daemon didn't
+  create are never touched — `docker network prune` would take out the
+  machine's other stacks. `doctor` counts bridge networks and the idle ones,
+  and `poolHint()` adds the explanation to the stack error when Docker says
+  the pool is full.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
 - **`up` / `down` / `check` are arbitrary shell command lines**, run as

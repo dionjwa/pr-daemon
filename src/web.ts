@@ -42,6 +42,7 @@ export function serve(d: Daemon): void {
         catch (e) { return send(res, 400, { error: (e as Error).message }); }
       }
       if (m === "POST" && url.pathname === "/api/pause") { d.setPaused(Boolean((await body(req)).paused)); return send(res, 200, { ok: true }); }
+      if (m === "POST" && url.pathname === "/api/shutdown") { d.requestShutdown(); return send(res, 200, { ok: true }); }
       if (m === "POST" && url.pathname === "/api/poll") { void d.poll(); return send(res, 200, { ok: true }); }
 
       const job = /^\/api\/jobs\/(\d+)\/(cancel|resume|retry)$/.exec(url.pathname);

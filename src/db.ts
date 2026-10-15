@@ -38,6 +38,8 @@ export interface Stack {
   pr: number | null;
   builder_session: string;
   healthy: number;         // 1 / 0 / -1 unknown
+  error: string;           // why `up` last failed; "" when it's fine
+  networks: string;        // docker network ids this stack's `up` created, space separated
   checked_at: number | null;
   created_at: number;
 }
@@ -73,7 +75,8 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
       repo TEXT NOT NULL, branch TEXT NOT NULL, issue INTEGER NOT NULL,
       worktree TEXT NOT NULL, url TEXT NOT NULL DEFAULT '', pr INTEGER,
       builder_session TEXT NOT NULL DEFAULT '',
-      healthy INTEGER NOT NULL DEFAULT -1, checked_at INTEGER, created_at INTEGER NOT NULL,
+      healthy INTEGER NOT NULL DEFAULT -1, error TEXT NOT NULL DEFAULT '',
+      networks TEXT NOT NULL DEFAULT '', checked_at INTEGER, created_at INTEGER NOT NULL,
       PRIMARY KEY (repo, branch)
     );
     CREATE TABLE IF NOT EXISTS events (
@@ -82,6 +85,11 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
     );
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
+  // Columns added after the first release: ALTER is the whole migration story.
+  for (const [table, col, def] of [["stacks", "error", "TEXT NOT NULL DEFAULT ''"], ["stacks", "networks", "TEXT NOT NULL DEFAULT ''"]]) {
+    const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === col);
+    if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  }
   return db;
 }
 

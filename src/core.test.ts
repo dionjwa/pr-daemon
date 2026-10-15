@@ -66,6 +66,19 @@ test("the repos list: several blocks, and the mistakes people make with TOML", (
   assert.throws(() => parseConfig(`[[repos]]\nname = "o/r"\n[[repos]]\nname = "o/r"`), /two \[\[repos\]\] blocks/);
 });
 
+test("docker networks: what a stack owns, and the pool-exhaustion hint", () => {
+  // Remembered across several `up`s, deduped, and empty when nothing was created.
+  assert.equal(withNetworks("", ["a", "b"]), "a b");
+  assert.equal(withNetworks("a b", ["b", "c"]), "a b c");
+  assert.equal(withNetworks(undefined, []), "");
+
+  const real = "failed to create network app_default: Error response from daemon: " +
+    "could not find an available, non-overlapping IPv4 address pool among the defaults to assign to the network";
+  assert.match(poolHint(real), /Docker has no address space left/);
+  assert.match(poolHint("all predefined address pools have been fully subnetted"), /docker network ls/);
+  assert.equal(poolHint("just: command not found"), "");
+});
+
 test("budget window, per-issue cap, and when it frees up", () => {
   const dir = mkdtempSync(join(tmpdir(), "prd-"));
   const store = new Store(openDb(join(dir, "t.db")));
@@ -92,10 +105,12 @@ test("budget window, per-issue cap, and when it frees up", () => {
 });
 
 import { caddyConfig, hostLabel, publicUrl } from "./proxy.ts";
+import { poolHint } from "./stack.ts";
+import { withNetworks } from "./pipeline.ts";
 import type { Stack } from "./db.ts";
 
 const stackOf = (branch: string, url: string, repo = "o/r"): Stack => ({
-  repo, branch, issue: Number(branch.split("-")[0]), worktree: "/w", url, pr: null, builder_session: "", healthy: 1, checked_at: null, created_at: 0,
+  repo, branch, issue: Number(branch.split("-")[0]), worktree: "/w", url, pr: null, builder_session: "", healthy: 1, error: "", networks: "", checked_at: null, created_at: 0,
 });
 
 test("branch → DNS label", () => {

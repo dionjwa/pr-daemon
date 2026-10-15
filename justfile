@@ -49,9 +49,13 @@ _help:
 @start: _ensure_node_modules
     ./bin/pr-daemon serve
 
-# Like start, but restart on every change to src/. Caddy and the status page come back with it
+# Like start, but restart on every change to src/ (Ctrl-C stops it; `just stop` only stops the daemon)
 @dev: _ensure_node_modules
     node --watch --no-warnings=ExperimentalWarning src/cli.ts serve
+
+# Shut it down, however it was started (and stop the service, if one is installed)
+@stop:
+    ./bin/pr-daemon stop
 
 # What's running, queued and paused, plus the live preview stacks
 @status: _ensure_node_modules

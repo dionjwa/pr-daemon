@@ -164,6 +164,11 @@ Open **http://localhost:7377**, then label an issue `agent`.
 
 > Prefer a terminal? `pr-daemon serve` runs it in the foreground instead.
 
+To shut it down: `pr-daemon stop`, or the **Shut down** button on the status
+page (it asks twice). Preview stacks keep running on their local ports; Caddy
+stops with it. `uninstall-service` is the one that stops it coming back at
+login.
+
 ---
 
 ## The status page
@@ -275,6 +280,7 @@ pr-daemon serve                      # the process (install-service runs this fo
 pr-daemon status                     # running, queued and paused jobs, and stacks
 pr-daemon doctor                     # check tools, logins, config
 pr-daemon run build your-org/repo 42 # one job now, in this terminal (build|review|revise|teardown|restart)
+pr-daemon stop                       # shut it down (stops the service too, if one is installed)
 pr-daemon install-service | uninstall-service
 ```
 

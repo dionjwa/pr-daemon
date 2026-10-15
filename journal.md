@@ -5,6 +5,95 @@ system works see CLAUDE.md; for the roadmap see PLAN.md.
 
 ---
 
+## 2026-10-15: there was no way to stop it
+
+You could start pr-daemon four ways and stop it none: Ctrl-C if it had a
+terminal, `uninstall-service` if it didn't, and nothing at all for a process
+started in the background. Now:
+
+- **`pr-daemon stop`** (`just stop`). A service is stopped first — launchd's
+  `KeepAlive` would restart the process the moment it exited — then whatever
+  still answers on the status port is asked to quit, and it waits for the port
+  to go quiet before reporting. Run twice, it says nothing is running.
+- **A "Shut down" button** in the status page header, two clicks to confirm
+  (no dialogs here, as ever).
+- Both go through `POST /api/shutdown` → `Daemon.requestShutdown()`, which
+  answers the request first and then exits exactly like SIGTERM does: Caddy
+  stops with it, running jobs are re-queued and resume their Claude session
+  next start. Preview stacks keep running on their local ports.
+
+One wrinkle worth knowing: under `just dev` the `node --watch` parent survives
+`just stop` and will start a new daemon on the next edit to `src/`. Ctrl-C the
+watcher, or kill that pid. The `dev` recipe says so now.
+
+---
+
+## 2026-10-15: preview stacks were leaking docker networks
+
+Feedback from setting up a fourth repo: the first `up` failed with **"all
+predefined address pools have been fully subnetted"**. The machine had 32
+bridge networks, 21 attached to nothing, 13 of them
+`framejs-nhost-frontend-<branch>_default` from branches that no longer exist.
+Removing the 13 empty ones fixed it. Docker's default pool fits about 31
+bridge networks and each preview takes one or two, so with four repos
+registered this was a standing hazard, not a one-off.
+
+Nothing pruned them, because several routes skip `down`: teardown when the
+worktree is already gone, and `down` itself when the project's command names a
+recipe that doesn't exist (which is exactly what the `pr-demon-*` →
+`pr-daemon-*` rename caused for a while).
+
+`stack.up()` now diffs `docker network ls` around the command and returns the
+ids that appeared; they accumulate in a new `stacks.networks` column across
+every `up` of that branch. `teardown` removes exactly those, and only the ones
+with no containers attached — `docker network rm` refuses in-use networks
+anyway, and a blanket `docker network prune` would take out the machine's
+other stacks (caddy, jupyter, marimo, instantreview), which is why it isn't
+used. Verified end to end: an `up` that creates two networks records both,
+teardown removes the idle one, and the one with a container attached is left
+alone.
+
+Two more hands on the problem: `doctor` reports `docker bridge networks: N, M
+with nothing attached` and names the idle ones once the count passes 24, and
+`poolHint()` appends an explanation to the stack error when Docker says the
+pool is full (it matches both phrasings Docker uses — unit-tested, because the
+first regex I wrote matched neither). `docs/setup.md` now tells projects to
+use `down -v --remove-orphans`.
+
+---
+
+## 2026-10-15: the phantom preview stack
+
+Dogfooding #99 a second time turned up a confusing state: the page showed a
+preview stack with no URL, and pressing Restart added what looked like another
+build. Four things were wrong, all now fixed.
+
+1. **`up` ran once and was never re-run.** The branch for #99 already existed
+   from the first trial, so the worktree was that branch — which predated the
+   `pr-demon-*` → `pr-daemon-*` rename, so `missingRecipe()` short-circuited
+   `up` with "no such recipe" before running anything. The agent was told to
+   fix it and did, but nothing re-ran `up`, so the row stayed empty and the PR
+   would have shipped with "_not running_" as its preview. `build()` now calls
+   `restartStack()` after the agent step and after each fix round (the loop
+   already re-ran `up` but threw the result away), refreshing the row, the
+   `PREVIEW_URL` the fix prompt sees, and the link in the PR.
+2. **A failed `up` left a phantom row with no reason.** The error lived only
+   in the agent's prompt file. `stacks` has an `error` column now (migrated
+   with an `ALTER` on open), written by build, revise, restart and the health
+   poll, and the page shows "not running" plus the error instead of a grey dot
+   and a bare "no URL". `restart` on a stack whose worktree is gone now says
+   so on the row and fails, rather than finishing instantly.
+3. **Stack chores looked like builds.** Restart and Tear down enqueue jobs, so
+   they appear in Work; they now read "restart stack" / "tear down stack ·
+   no agent, no tokens". A queued job also says why it is waiting
+   ("waiting: build #1 is running on this branch", or the agent-slot limit),
+   and pressing the button twice no longer queues a duplicate — it logs that
+   one is already queued or running.
+4. **Cancelling left no trace.** `cancel()` writes an event and sets
+   "cancelled by you" as the reason.
+
+---
+
 ## 2026-10-15: renamed pr-demon → pr-daemon
 
 The name is now the ordinary word for what it is. Everything moved: the package

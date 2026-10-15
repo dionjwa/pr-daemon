@@ -60,6 +60,14 @@ Stop this branch's services and delete its volumes and data. It runs when the
 PR or the issue is closed, and before the worktree is removed. It must be safe
 to run when nothing is up.
 
+With docker compose, use `down -v --remove-orphans` so volumes **and the
+project's networks** go with it. Docker's default address pool only fits about
+31 bridge networks, and each preview takes one or two: leftovers eventually
+make every `up` fail with "all predefined address pools have been fully
+subnetted". pr-daemon removes the networks it watched your `up` create, but
+only the ones nothing is attached to — a `down` that cleans up after itself is
+still the first line of defence.
+
 ### `check` — the definition of done (optional)
 
 Whatever must be green before a pull request is opened: type check, lint, unit
@@ -142,7 +150,7 @@ Then start a second branch's stack at the same time and confirm both answer.
 - [ ] `up` prints the local URL as the very last line of stdout
 - [ ] `up` returns once the app answers, and is idempotent
 - [ ] ports, container names and volumes derive from the branch name
-- [ ] `down` deletes the branch's data and is safe when nothing runs
+- [ ] `down` deletes the branch's data, networks included, and is safe when nothing runs
 - [ ] `check` (if any) is green on a clean checkout
 - [ ] nothing prompts, and nothing opens a browser
 - [ ] `PR_DAEMON_PUBLIC_URL` is used as the public origin, if previews are on

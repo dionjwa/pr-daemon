@@ -61,6 +61,9 @@ export interface Config {
 
 export const DEFAULT_TOML = `# pr-daemon configuration.
 # Edit here or in the web page (http://localhost:7377 → Config). Saved as-is.
+# Changes apply live either way — pr-daemon watches this file. A file that
+# doesn't parse is reported and ignored; it keeps running the last good one.
+# Two settings still need a restart: "port" and "prevent_sleep".
 #
 # Everything pr-daemon keeps is under ~/.pr-daemon (or $PR_DAEMON_HOME), and
 # it's all ordinary files you can open and inspect:

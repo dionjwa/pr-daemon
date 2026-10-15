@@ -14,6 +14,7 @@ const HELP = `pr-daemon — label an issue, get a pull request.
 
   pr-daemon serve                         run the process: poll GitHub, run agents, serve the status page
   pr-daemon status                        what's running, queued and paused
+  pr-daemon stop                          shut it down (and stop the service, if one is installed)
   pr-daemon doctor                        check tools, logins and config
   pr-daemon setup                         print what a project must do to take part (also at /setup)
   pr-daemon run <kind> <owner/repo> <n> [feedback]
@@ -50,6 +51,7 @@ async function main(argv: string[]): Promise<void> {
       return new Promise(() => {}); // run forever
     }
     case "status": return status();
+    case "stop": return stop();
     case "doctor": return doctor();
     case "setup": console.log(setupDoc(loadConfig(), "/pr-daemon")); return;
     case "run": {
@@ -81,6 +83,42 @@ async function status(): Promise<void> {
   for (const st of s.stacks) console.log(`  stack   ${st.branch.padEnd(40)} ${st.url}`);
 }
 
+/**
+ * Shut the process down, however it was started. A service is stopped first:
+ * launchd's KeepAlive would otherwise restart it the moment it exits. Then
+ * whatever still answers on the status port is asked to quit.
+ */
+async function stop(): Promise<void> {
+  const cfg = loadConfig();
+  let did = false;
+  if (process.platform === "darwin" && existsSync(plistPath)) {
+    await run("launchctl", ["bootout", `gui/${process.getuid!()}/${LABEL}`]);
+    console.log(`Stopped the service. It starts again at login, or now with: pr-daemon install-service`);
+    did = true;
+  } else if (process.platform !== "darwin" && existsSync(unitPath)) {
+    await run("systemctl", ["--user", "stop", LABEL]);
+    console.log(`Stopped the service. Start it again with: systemctl --user start ${LABEL}`);
+    did = true;
+  }
+  try {
+    await fetch(`http://localhost:${cfg.port}/api/shutdown`, { method: "POST", headers: { "x-pr-daemon": "1" }, signal: AbortSignal.timeout(3000) });
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (!(await alive(cfg.port))) break;
+    }
+    console.log(await alive(cfg.port)
+      ? `It's still answering on http://localhost:${cfg.port}. Give it a moment, or stop it where you started it.`
+      : "Stopped. Preview stacks keep running; Caddy stopped with it. Start again: pr-daemon serve (or just start).");
+  } catch {
+    if (!did) console.log(`Nothing is answering on http://localhost:${cfg.port}: it isn't running.`);
+  }
+}
+
+const alive = async (port: number): Promise<boolean> => {
+  try { return (await fetch(`http://localhost:${port}/api/status`, { signal: AbortSignal.timeout(1500) })).ok; }
+  catch { return false; }
+};
+
 async function doctor(): Promise<void> {
   let bad = 0;
   const ok = (good: boolean, what: string, fix = "") => { console.log(`${good ? "✓" : "✗"} ${what}${good || !fix ? "" : `\n    → ${fix}`}`); if (!good) bad++; };
@@ -91,6 +129,7 @@ async function doctor(): Promise<void> {
   ok(c.code === 0 && /ok/i.test(c.stdout), "claude works headless", c.stdout.trim() || c.stderr.trim() || "claude (log in), or set CLAUDE_CODE_OAUTH_TOKEN");
   const docker = await run("docker", ["info"], { timeoutMs: 20_000 });
   ok(docker.code === 0, "docker is running", "start Docker Desktop");
+  if (docker.code === 0) await dockerNetworks(ok);
   try {
     const cfg = loadConfig();
     ok(true, `config is valid (${CONFIG_PATH})`);
@@ -115,6 +154,26 @@ async function doctor(): Promise<void> {
     }
   } catch (e) { ok(false, "config is valid", (e as Error).message); }
   process.exit(bad ? 1 : 0);
+}
+
+/**
+ * Docker's default address pool fits roughly 31 bridge networks, and each
+ * preview stack takes one or two. Leftovers from branches that are long gone
+ * fill it up, and then every `up` fails with "all predefined address pools
+ * have been fully subnetted". pr-daemon removes the networks it created when
+ * it tears a stack down; this counts what's there, and never deletes anything.
+ */
+async function dockerNetworks(ok: (good: boolean, what: string, fix?: string) => void): Promise<void> {
+  const ids = (await run("docker", ["network", "ls", "-q", "--filter", "driver=bridge"], { timeoutMs: 20_000 }))
+    .stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!ids.length) return;
+  const info = await run("docker", ["network", "inspect", ...ids, "--format", "{{.Name}} {{len .Containers}}"], { timeoutMs: 30_000 });
+  const lines = info.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  const idle = lines.filter((l) => l.endsWith(" 0"));
+  const crowded = ids.length >= 24;    // the pool runs out at about 31
+  ok(!crowded, `docker bridge networks: ${ids.length}, ${idle.length} with nothing attached`,
+    `the address pool is nearly full; the next preview may fail to start.\n      Empty ones to consider removing (docker network rm <name>):\n      ${
+      idle.slice(0, 12).map((l) => l.replace(/ 0$/, "")).join("\n      ")}`);
 }
 
 // ---------- service ----------
