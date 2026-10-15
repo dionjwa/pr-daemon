@@ -53,7 +53,7 @@ You do this once per machine (steps 1â€“4), and then once per project (steps 5â€
 
 ### 1. Install the tools on the machine that will run the agent
 
-You need `git`, `gh`, `jq`, `perl`, `just`, `docker` and Claude Code (`claude`).
+You need `git`, `gh`, `jq`, `just`, `docker` and Claude Code (`claude`).
 
 ```bash
 brew install git gh jq just      # macOS; use your package manager on Linux

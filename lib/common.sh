@@ -172,7 +172,18 @@ pr_for_branch() {
 
 # ---------- the agent ----------
 # render <template> — replace {{NAME}} with $NAME from the environment.
-render() { perl -pe 's/\{\{(\w+)\}\}/exists $ENV{$1} ? $ENV{$1} : ""/ge' "$1"; }
+# Single pass, left to right: text substituted in (an issue body, say) is
+# never re-scanned, so a literal "{{X}}" inside it stays as written.
+render() {
+  local rest out="" name
+  rest="$(cat "$1"; printf x)"; rest="${rest%x}"   # the x keeps trailing newlines
+  while [[ $rest =~ \{\{([A-Za-z_][A-Za-z0-9_]*)\}\} ]]; do
+    name="${BASH_REMATCH[1]}"
+    out+="${rest%%"{{$name}}"*}${!name-}"
+    rest="${rest#*"{{$name}}"}"
+  done
+  printf '%s' "$out$rest"
+}
 
 # agent <prompt-file> <log-file> — one headless Claude Code run in $WT.
 # Raw stream-json goes to the log; the final message is printed.

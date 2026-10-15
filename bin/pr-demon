@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/common.sh source-path=SCRIPTDIR/..
 source "$ROOT/lib/common.sh"
 
-need git gh jq perl claude
+need git gh jq claude
 
 # ---------------------------------------------------------------- build
 cmd_build() {
