@@ -1,9 +1,9 @@
 {
-  "name": "pr-demon",
+  "name": "pr-daemon",
   "version": "0.2.0",
   "description": "Label an issue, get a pull request: a coding agent supervised by one process on your own machine.",
   "type": "module",
-  "bin": { "pr-demon": "./bin/pr-demon" },
+  "bin": { "pr-daemon": "./bin/pr-daemon" },
   "engines": { "node": ">=23.6" },
   "scripts": {
     "check": "tsc --noEmit",

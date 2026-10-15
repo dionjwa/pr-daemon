@@ -15,7 +15,7 @@ answer questions: make reasonable decisions and note them in the PR description.
   the source of truth for how to build, run and test this project.
 - `gh` is authenticated for {{REPO}} if you need to read issues or code
   elsewhere in the repo. Do NOT push, open PRs, comment, or change labels:
-  pr-demon does that after you finish.
+  pr-daemon does that after you finish.
 
 # How to work
 
@@ -23,12 +23,12 @@ answer questions: make reasonable decisions and note them in the PR description.
    that fully solves it.
 2. Implement it. Add or update tests that prove it works.
 3. Run `{{CHECK_CMD}}` and the tests relevant to your change. Iterate until
-   they pass. `{{CHECK_CMD}}` passing is the bar: pr-demon re-runs it and will
+   they pass. `{{CHECK_CMD}}` passing is the bar: pr-daemon re-runs it and will
    not open a PR if it fails.
 4. Exercise the feature in the running stack the way a user would.
 5. Commit your work on `{{BRANCH}}` with clear messages (several commits is fine).
 
-# Deliverables (pr-demon reads these files)
+# Deliverables (pr-daemon reads these files)
 
 - `{{OUT}}/pr-title.txt` — one line, a conventional PR title.
 - `{{OUT}}/pr-body.md` — the PR description, for a human reviewer:

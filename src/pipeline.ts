@@ -52,6 +52,12 @@ function payload(job: Job): { feedback?: string; fromReview?: boolean } {
 }
 
 const issueOf = (branch: string) => Number(branch.split("-")[0]);
+/** Docker networks this stack has created so far, as one space-separated field. */
+export const withNetworks = (existing: string | undefined, created: string[]): string =>
+  [...new Set([...(existing ?? "").split(" ").filter(Boolean), ...created])].join(" ");
+
+/** The last line that says something, for one-line event messages. */
+const lastLine = (s: string) => s.trim().split("\n").filter((l) => l.trim()).pop()?.slice(0, 200) ?? "";
 
 // ---------------------------------------------------------------- the agent step
 /**
@@ -126,13 +132,15 @@ export async function build(ctx: Ctx): Promise<void> {
   mkdirSync(join(out, "screenshots"), { recursive: true });
 
   await gh.setStatus(repo.name, n, cfg.label, "working");
-  if (!resuming) await gh.comment(repo.name, n, `🛠️ **pr-demon** is on it.\n- branch: \`${branch}\`\n- status: ${ctx.statusUrl} (on the pr-demon machine)`);
+  if (!resuming) await gh.comment(repo.name, n, `🛠️ **pr-daemon** is on it.\n- branch: \`${branch}\`\n- status: ${ctx.statusUrl} (on the pr-daemon machine)`);
 
   // Stack first. If it won't start, the agent's first job is to fix that.
   const pub = publicUrl(cfg, branch);
   const s = await stack.up(repo.up, wt, pub);
-  const url = s.ok ? s.url : "";
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: s.ok ? 1 : 0, checked_at: Date.now() });
+  let url = s.ok ? s.url : "";
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error,
+    networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
+  if (!s.ok) store.event(`\`${repo.up}\` failed; the agent has been told to fix it first`, job.id, "warn");
   const stackNote = s.ok
     ? `The stack for this branch is already running at ${url || "(no URL printed)"}${pub ? ` (publicly: ${pub})` : ""}. Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
     : `WARNING: \`${repo.up}\` FAILED before you started. Fix that first, then continue. Output:\n\`\`\`\n${s.error}\n\`\`\``;
@@ -146,8 +154,25 @@ export async function build(ctx: Ctx): Promise<void> {
   // Build → check → fix, until the project's own check passes. Fix rounds
   // resume the same session: the agent keeps its context (and the cache).
   let summary = await agentStep(ctx, resuming
-    ? { prompt: "pr-demon paused you (token budget or a restart). Continue the task from where you left off.", log: join(out, "agent-build.jsonl"), resume: job.session_id, issue: n }
+    ? { prompt: "pr-daemon paused you (token budget or a restart). Continue the task from where you left off.", log: join(out, "agent-build.jsonl"), resume: job.session_id, issue: n }
     : { prompt: readFileSync(join(out, "prompt-build.md"), "utf8"), log: join(out, "agent-build.jsonl"), issue: n });
+
+  // The agent may have changed what the stack needs — or fixed an `up` that
+  // was broken when we started, which is exactly what it was asked to do.
+  // `up` is idempotent by contract, so re-run it and keep the stack row, the
+  // preview link and the screenshots honest.
+  let down = !s.ok;
+  const restartStack = async (): Promise<void> => {
+    const r = await stack.up(repo.up, wt, pub);
+    url = r.ok ? r.url || url : "";
+    vars.PREVIEW_URL = url;
+    store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error,
+      networks: withNetworks(store.stack(repo.name, branch)?.networks, r.networks), checked_at: Date.now() });
+    if (r.ok && down) store.event(`the stack is up now${url ? ` at ${url}` : ""}`, job.id);
+    if (!r.ok) store.event(`\`${repo.up}\` still fails: ${lastLine(r.error)}`, job.id, "warn");
+    down = !r.ok;
+  };
+  await restartStack();
 
   let result = await stack.check(repo.check, wt);
   for (let attempt = 2; !result.ok && attempt <= cfg.agent.maxAttempts; attempt++) {
@@ -156,7 +181,7 @@ export async function build(ctx: Ctx): Promise<void> {
       prompt: prompt("fix", { ...vars, CHECK_OUT: result.output }),
       log: join(out, "agent-build.jsonl"), resume: store.job(job.id)!.session_id, issue: n,
     });
-    await stack.up(repo.up, wt, pub);
+    await restartStack();
     result = await stack.check(repo.check, wt);
   }
 
@@ -164,13 +189,13 @@ export async function build(ctx: Ctx): Promise<void> {
   if (untracked.length) store.event(`left untracked (not committed): ${untracked.join(" ")}`, job.id, "warn");
   if ((await git.commitsAhead(wt, base)) === 0) {
     await gh.setStatus(repo.name, n, cfg.label, "failed");
-    await gh.comment(repo.name, n, `😶 **pr-demon** finished without making any commits.\n\n<details><summary>agent summary</summary>\n\n${summary}\n</details>`);
+    await gh.comment(repo.name, n, `😶 **pr-daemon** finished without making any commits.\n\n<details><summary>agent summary</summary>\n\n${summary}\n</details>`);
     throw new FailError("no commits");
   }
   await git.push(wt, branch);
   if (!result.ok) {
     await gh.setStatus(repo.name, n, cfg.label, "failed");
-    await gh.comment(repo.name, n, `❌ **pr-demon** pushed \`${branch}\` but \`${repo.check}\` still fails after ${cfg.agent.maxAttempts} round(s). No PR opened.\n\`\`\`\n${result.output}\n\`\`\``);
+    await gh.comment(repo.name, n, `❌ **pr-daemon** pushed \`${branch}\` but \`${repo.check}\` still fails after ${cfg.agent.maxAttempts} round(s). No PR opened.\n\`\`\`\n${result.output}\n\`\`\``);
     throw new FailError("check still failing");
   }
 
@@ -178,7 +203,7 @@ export async function build(ctx: Ctx): Promise<void> {
   store.update(job.id, { pr: prNumber });
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, pr: prNumber, builder_session: store.job(job.id)!.session_id });
   await gh.setStatus(repo.name, n, cfg.label, "in-review");
-  await gh.comment(repo.name, n, `✅ **pr-demon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
+  await gh.comment(repo.name, n, `✅ **pr-daemon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
   store.enqueue({ repo: repo.name, kind: "review", number: prNumber, branch, trigger_key: `review:${repo.name}#${prNumber}:job${job.id}` });
 }
 
@@ -192,13 +217,13 @@ async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string;
 
 ## Try it
 
-${o.pub ? `- **Preview:** ${o.pub}\n- Local: ${o.url || "_not running_"} (on the pr-demon machine)` : `- **Preview:** ${o.url || "_not running_"} (on the pr-demon machine)`}
-- Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/demon\`
+${o.pub ? `- **Preview:** ${o.pub}\n- Local: ${o.url || "_not running_"} (on the pr-daemon machine)` : `- **Preview:** ${o.url || "_not running_"} (on the pr-daemon machine)`}
+- Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/pr-daemon\`
 ${shots ? `\n## Screenshots\n\n${shots}` : ""}
 Closes #${o.n}
 
 ---
-<sub>🤖 Built by [pr-demon](https://github.com/metapages/pr-demon) · ${(tokens / 1e6).toFixed(2)}M tokens. A human must approve before merge.</sub>`;
+<sub>🤖 Built by [pr-daemon](https://github.com/metapages/pr-daemon) · ${(tokens / 1e6).toFixed(2)}M tokens. A human must approve before merge.</sub>`;
   writeFileSync(join(o.out, "pr-final.md"), body);
   const existing = await gh.openPrForBranch(repo.name, o.branch);
   if (existing) { await gh.editPr(repo.name, existing, { title, bodyFile: join(o.out, "pr-final.md") }); return existing; }
@@ -226,7 +251,7 @@ export async function review(ctx: Ctx): Promise<void> {
   const out = join(git.outDir(repo.name, branch), `review-${job.id}`);
   mkdirSync(out, { recursive: true });
   const text = job.session_id
-    ? "pr-demon paused you. Continue the review from where you left off."
+    ? "pr-daemon paused you. Continue the review from where you left off."
     : prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)" });
   await agentStep(ctx, { prompt: text, log: join(out, "agent.jsonl"), resume: job.session_id || undefined, issue: n });
   const file = join(out, "review.md");
@@ -256,7 +281,8 @@ export async function revise(ctx: Ctx): Promise<void> {
   const pub = publicUrl(ctx.cfg(), branch);
   const s = await stack.up(repo.up, wt, pub);
   const url = s.ok ? s.url : "";
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, pr: job.number, healthy: s.ok ? 1 : 0, checked_at: Date.now() });
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, pr: job.number, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error,
+    networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   const builder = store.stack(repo.name, branch)?.builder_session || "";
 
   const text = prompt("revise", {
@@ -264,14 +290,14 @@ export async function revise(ctx: Ctx): Promise<void> {
     FEEDBACK: payload(job).feedback ?? "", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
-    ? { prompt: "pr-demon paused you. Continue addressing the feedback from where you left off.", log: join(out, `agent-revise-${job.id}.jsonl`), resume: job.session_id, issue: n }
+    ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: join(out, `agent-revise-${job.id}.jsonl`), resume: job.session_id, issue: n }
     : { prompt: text, log: join(out, `agent-revise-${job.id}.jsonl`), resume: builder || undefined, issue: n });
 
   await git.commitLeftovers(wt);
   const result = await stack.check(repo.check, wt);
   await git.push(wt, branch);
   const shots = await uploadShots(ctx, branch, out);
-  await gh.comment(repo.name, job.number, `🔁 **pr-demon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
+  await gh.comment(repo.name, job.number, `🔁 **pr-daemon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
 
 ${summary}
 ${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`);
@@ -289,6 +315,12 @@ export async function teardown(ctx: Ctx): Promise<void> {
     if (!d.ok) store.event(`down failed (continuing): ${d.output}`, job.id, "warn");
     await git.removeWorktree(repo.name, wt, branch);
   }
+  // Whatever `down` left behind: the networks this stack's `up` created, but
+  // only the ones nothing is attached to. Docker's address pool is small, and
+  // a route that skips `down` (no worktree, no down command) would otherwise
+  // leak two networks per preview until every later `up` fails.
+  const left = await stack.removeNetworks((s?.networks ?? "").split(" ").filter(Boolean));
+  if (left.length) store.event(`removed ${left.length} docker network(s) this stack created: ${left.join(", ")}`, job.id);
   rmSync(git.outDir(repo.name, branch), { recursive: true, force: true });
   store.deleteStack(repo.name, branch);
   await gh.setStatus(repo.name, job.number, ctx.cfg().label, null);
@@ -297,9 +329,17 @@ export async function teardown(ctx: Ctx): Promise<void> {
 export async function restart(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const s = store.stackForIssue(repo.name, job.number);
-  if (!s || !existsSync(s.worktree)) return;
+  if (!s) return;
+  // A row whose worktree is gone can never come back: say so on the row
+  // instead of finishing instantly and looking like nothing happened.
+  if (!existsSync(s.worktree)) {
+    store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, healthy: 0,
+      error: `the worktree is gone (${s.worktree}); tear this down`, checked_at: Date.now() });
+    throw new FailError(`the worktree ${s.worktree} no longer exists`);
+  }
   const r = await stack.up(repo.up, s.worktree, publicUrl(ctx.cfg(), s.branch));
-  store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, healthy: r.ok ? 1 : 0, checked_at: Date.now() });
+  store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url,
+    healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now() });
   if (!r.ok) throw new Error(`restart failed: ${r.error}`);
 }
 

@@ -1,16 +1,21 @@
 // The single long-running process: polls GitHub, queues jobs, runs them under
 // the token budget, watches stacks, and serves the status page.
 import { spawn } from "node:child_process";
+import { watch, type FSWatcher } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
-import { loadConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
+import { parseConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
 import { AGENT_KINDS, openDb, Store, type Job } from "./db.ts";
 import * as gh from "./gh.ts";
+import * as git from "./git.ts";
 import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl } from "./proxy.ts";
+import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { formatAmount, formatDuration } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
+const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
 
 export class Daemon {
   store: Store;
@@ -23,9 +28,18 @@ export class Daemon {
   nextPollAt = 0;
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
+  private configWatcher: FSWatcher | null = null;
+  private configTimer: NodeJS.Timeout | null = null;
+  /** The exact text of the config we are running, so our own writes aren't re-read as edits. */
+  private configOnDisk = "";
+  /** The last parse error announced, so one broken save doesn't repeat in the event log. */
+  private configError = "";
 
   constructor() {
-    this.cfg = loadConfig();
+    // Keep the text, not just the parsed config: the file watcher compares
+    // against it to tell a real edit from the write we just made ourselves.
+    this.configOnDisk = readConfigText();
+    this.cfg = parseConfig(this.configOnDisk);
     this.store = new Store(openDb());
     this.proxy = new Proxy(this.store, () => this.cfg);
   }
@@ -37,25 +51,127 @@ export class Daemon {
 
   start(): void {
     const n = this.store.recoverRunning();
-    if (n) this.store.event(`${n} job(s) were running when pr-demon stopped; re-queued to resume`);
-    this.store.event(`pr-demon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
+    if (n) this.store.event(`${n} job(s) were running when pr-daemon stopped; re-queued to resume`);
+    this.store.event(`pr-daemon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
     if (process.platform === "darwin" && this.cfg.preventSleep) {
       spawn("caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore", detached: true }).unref();
     }
     this.schedulePoll(1000);
     setInterval(() => this.tick(), 2000).unref?.();
     this.proxy.start();
+    this.watchConfig();
+  }
+
+  /**
+   * Asked to quit from the status page or `pr-daemon stop`. Reply first, then
+   * exit the way a signal would: Caddy stops with us, running jobs are
+   * re-queued and resume their Claude session on the next start.
+   */
+  requestShutdown(): void {
+    this.store.event("shutdown requested", null, "warn");
+    setTimeout(() => {
+      const done = (): never => process.exit(0);
+      setTimeout(done, 10_000).unref();
+      this.shutdown().then(done, done);
+    }, 100);
+  }
+
+  /** Stop polling and take the preview proxy down with us. Running jobs are re-queued on the next start. */
+  async shutdown(): Promise<void> {
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.configTimer) clearTimeout(this.configTimer);
+    this.configWatcher?.close();
+    this.configWatcher = null;
+    this.store.event("pr-daemon is shutting down");
+    await this.proxy.shutdown();
   }
 
   // ------------------------------------------------------------ config
   saveConfig(text: string): Config {
-    const before = this.cfg;
-    this.cfg = saveConfigText(text);
-    this.store.event("config saved");
-    if (before.pollMs !== this.cfg.pollMs) this.schedulePoll(1000);
-    return this.cfg;
+    const cfg = saveConfigText(text);
+    // Remember what we wrote, so the watcher sees this as "already running".
+    this.configOnDisk = text;
+    this.configError = "";
+    return this.apply(cfg, "config saved");
   }
   configText(): string { return readConfigText(); }
+
+  /** Swap in a new config and do the things that don't pick it up by themselves. */
+  private apply(cfg: Config, why: string): Config {
+    const before = this.cfg;
+    this.cfg = cfg;
+    this.store.event(why);
+    // Most readers call cfg() or this.cfg per use, so they just follow. These
+    // two are fixed at startup and cannot be changed under a running process.
+    if (before.port !== cfg.port) {
+      this.store.event(`port ${before.port} -> ${cfg.port} takes effect when pr-daemon restarts`, null, "warn");
+    }
+    if (before.preventSleep !== cfg.preventSleep) {
+      this.store.event(`prevent_sleep ${before.preventSleep} -> ${cfg.preventSleep} takes effect when pr-daemon restarts`, null, "warn");
+    }
+    if (before.pollMs !== cfg.pollMs) this.schedulePoll(1000);
+    return this.cfg;
+  }
+
+  /**
+   * Watch config.toml so an edit made OUTSIDE the status page applies live too.
+   *
+   * Config changes are meant to apply live, but that was only true of the
+   * Config page (which calls saveConfig). A hand edit of the file — or an edit
+   * by an agent — sat there unread until the process restarted, and restarting
+   * re-queues whatever was running. The symptom was silent: `doctor` reads the
+   * file and said the preview proxy was configured while the running daemon
+   * still had the old value and no proxy.
+   *
+   * Watch the DIRECTORY, not the file. saveConfigText writes `<config>.tmp` and
+   * renames it over config.toml, and a watch on a path follows the inode it was
+   * opened on — a file watch would survive exactly one save and then go deaf.
+   */
+  private watchConfig(): void {
+    const name = basename(CONFIG_PATH);
+    try {
+      this.configWatcher = watch(dirname(CONFIG_PATH), (_type, filename) => {
+        // The .tmp file lands in this directory too; only the real one counts.
+        if (filename && filename !== name) return;
+        // One save produces several events (a rename is a write then a rename,
+        // and editors add their own), so settle first: reading immediately can
+        // catch a half-written file, which then fails to parse for no reason.
+        if (this.configTimer) clearTimeout(this.configTimer);
+        this.configTimer = setTimeout(() => this.reloadConfig(), 250);
+        this.configTimer.unref?.();
+      });
+      this.configWatcher.unref?.();
+    } catch (e) {
+      this.store.event(`cannot watch ${CONFIG_PATH} (${(e as Error).message}); edits need a restart`, null, "warn");
+    }
+  }
+
+  /** Re-read config.toml after an edit. A file that no longer parses is ignored, not applied. */
+  private reloadConfig(): void {
+    let text: string;
+    try { text = readConfigText(); } catch { return; } // caught mid-rename; another event follows
+    if (text === this.configOnDisk) return;            // our own save, or a touch that changed nothing
+    let cfg: Config;
+    try {
+      cfg = parseConfig(text);
+    } catch (e) {
+      // Keep running the config we have. Announce each distinct error once:
+      // an editor that saves on every keystroke would otherwise flood the log
+      // while the file is briefly incomplete.
+      const msg = (e as Error).message;
+      if (msg !== this.configError) {
+        this.configError = msg;
+        this.store.event(`config.toml is invalid, still running the previous config: ${msg}`, null, "error");
+      }
+      return;
+    }
+    this.configOnDisk = text;
+    this.configError = "";
+    this.apply(cfg, `config reloaded: ${CONFIG_PATH} changed on disk`);
+  }
+
+  /** The contract a project has to meet, with this machine's paths filled in: GET /setup. */
+  setupDoc(): string { return setupDoc(this.cfg, COMMAND); }
 
   // ------------------------------------------------------------ polling
   schedulePoll(inMs = this.cfg.pollMs): void {
@@ -107,22 +223,23 @@ export class Daemon {
       if (id) store.event(`queued build for ${repo}#${issue.number} "${issue.title}" (label by @${ev.actor})`, id);
     }
 
-    // 2. "/demon …" comments on PRs → revise.
+    // 2. "/pr-daemon …" comments on PRs → revise.
     const sinceKey = `comments-since:${repo}`;
     const since = store.get(sinceKey) ?? new Date(Date.now() - 10 * 60e3).toISOString(); // first run: don't replay history
     const startedAt = Date.now();
     for (const c of await gh.commentsSince(repo, since)) {
-      if (!c.body.trimStart().startsWith("/demon") || !c.html_url.includes("/pull/")) continue;
+      const body = c.body.trimStart();
+      if (!body.startsWith(COMMAND) || !c.html_url.includes("/pull/")) continue;
       const key = `comment:${repo}:${c.id}`;
       if (store.hasTrigger(key)) continue;
       const pr = Number(c.issue_url.split("/").pop());
       if (!allowed.includes(c.user.login)) {
-        store.enqueue({ repo, kind: "revise", number: pr, trigger_key: key, state: "ignored", reason: `/demon from @${c.user.login}, who isn't allowed` });
+        store.enqueue({ repo, kind: "revise", number: pr, trigger_key: key, state: "ignored", reason: `${COMMAND} from @${c.user.login}, who isn't allowed` });
         continue;
       }
       const branch = (await gh.pr(repo, pr)).head.ref;
-      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: c.body.trimStart().slice("/demon".length).trim() } });
-      if (id) store.event(`queued revise for ${repo} PR #${pr} (/demon by @${c.user.login})`, id);
+      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: body.slice(COMMAND.length).trim() } });
+      if (id) store.event(`queued revise for ${repo} PR #${pr} (${COMMAND} by @${c.user.login})`, id);
     }
     store.set(sinceKey, new Date(startedAt - 60e3).toISOString()); // overlap; ids dedupe
 
@@ -139,7 +256,8 @@ export class Daemon {
       }
       if (s.url && Date.now() - (s.checked_at ?? 0) > cfg.stacks.healthEveryMs) {
         const ok = await stack.healthy(s.url);
-        store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree, healthy: ok ? 1 : 0, checked_at: Date.now() });
+        store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree, healthy: ok ? 1 : 0,
+          error: ok ? "" : `${s.url} stopped answering`, checked_at: Date.now() });
         if (!ok && cfg.stacks.autoRestart) {
           const id = store.enqueue({ repo, kind: "restart", number: s.issue, branch: s.branch, trigger_key: `restart:${repo}:${s.branch}:${Math.floor(Date.now() / cfg.stacks.healthEveryMs)}` });
           if (id) store.event(`stack ${s.branch} isn't answering; queued restart`, id, "warn");
@@ -176,9 +294,17 @@ export class Daemon {
       const repo = this.cfg.repos.find((r) => r.name === job.repo);
       if (!repo) { this.store.update(job.id, { state: "failed", reason: "repo is not in the config", finished_at: Date.now() }); continue; }
       const isAgent = AGENT_KINDS.includes(job.kind);
-      if (isAgent ? agents >= this.cfg.concurrency : chores >= MAX_HOUSEKEEPING) continue;
+      if (isAgent ? agents >= this.cfg.concurrency : chores >= MAX_HOUSEKEEPING) {
+        this.waiting(job, isAgent ? `waiting: ${agents} of ${this.cfg.concurrency} agent slot(s) in use` : "waiting: other chores are running");
+        continue;
+      }
       const lock = this.lockKey(job);
-      if (locks.has(lock)) continue;
+      if (locks.has(lock)) {
+        // One job per branch at a time: a restart can't run under its build.
+        const holder = runningJobs.find((j) => this.lockKey(j) === lock);
+        this.waiting(job, `waiting: ${holder ? `${holder.kind} #${holder.id}` : "another job"} is running on this branch`);
+        continue;
+      }
       if (isAgent) {
         const g = gate(this.store, this.cfg, job.repo, this.issueOf(job));
         if (!g.ok) {
@@ -191,6 +317,11 @@ export class Daemon {
       if (isAgent) agents++; else chores++;
       this.launch(job, repo);
     }
+  }
+
+  /** Why a queued job isn't starting, shown on the page. Written only when it changes. */
+  private waiting(job: Job, reason: string): void {
+    if (job.state === "queued" && job.reason !== reason) this.store.update(job.id, { reason });
   }
 
   /** Run one job now, in this process, and wait for it (the `run` CLI command). */
@@ -226,7 +357,7 @@ export class Daemon {
           const when = e.retryAt ? `It resumes on its own in about ${formatDuration(e.retryAt - Date.now())}.` : `Press Resume on the status page when you're ready: ${this.statusUrl(job.id)}`;
           this.store.event(`paused: ${e.message}`, job.id, "warn");
           await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "paused").catch(() => {});
-          await gh.comment(job.repo, job.number, `⏸️ **pr-demon** paused: ${e.message}. ${when}`);
+          await gh.comment(job.repo, job.number, `⏸️ **pr-daemon** paused: ${e.message}. ${when}`);
         } else if (e instanceof CancelError || ctx.cancelled) {
           this.store.update(job.id, { state: "cancelled", finished_at: Date.now() });
           this.store.event("cancelled", job.id, "warn");
@@ -238,7 +369,7 @@ export class Daemon {
           this.store.event(`error: ${e.message.slice(0, 500)}`, job.id, "error");
           if (AGENT_KINDS.includes(job.kind)) {
             if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
-            await gh.comment(job.repo, job.number, `❌ **pr-demon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-demon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
+            await gh.comment(job.repo, job.number, `❌ **pr-daemon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-daemon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
           }
         }
       })
@@ -248,9 +379,16 @@ export class Daemon {
   // ------------------------------------------------------------ actions from the page
   cancel(id: number): void {
     const ctx = this.running.get(id);
-    if (ctx) { ctx.cancelled = true; ctx.current?.kill("cancelled"); return; }
+    if (ctx) {
+      this.store.event("cancelled by you; stopping the agent", id, "warn");
+      ctx.cancelled = true; ctx.current?.kill("cancelled");
+      return;
+    }
     const j = this.store.job(id);
-    if (j && ["queued", "paused"].includes(j.state)) this.store.update(id, { state: "cancelled", finished_at: Date.now() });
+    if (j && ["queued", "paused"].includes(j.state)) {
+      this.store.update(id, { state: "cancelled", reason: "cancelled by you", finished_at: Date.now() });
+      this.store.event(`cancelled ${j.kind} ${j.repo}#${j.number} before it started`, id, "warn");
+    }
   }
   /** Continue where it left off (same Claude session). */
   resume(id: number): void {
@@ -268,14 +406,24 @@ export class Daemon {
       this.tick();
     }
   }
-  teardownStack(repo: string, branch: string): void {
+  teardownStack(repo: string, branch: string): void { this.stackAction("teardown", repo, branch); }
+  restartStack(repo: string, branch: string): void { this.stackAction("restart", repo, branch); }
+
+  /**
+   * Queue one stack chore. Pressing the button again while the first is still
+   * queued (behind a build, say) used to pile up identical jobs, which read
+   * like something had gone wrong.
+   */
+  private stackAction(kind: "teardown" | "restart", repo: string, branch: string): void {
     const s = this.store.stack(repo, branch);
-    if (s) this.store.enqueue({ repo, kind: "teardown", number: s.issue, branch, trigger_key: `teardown:${repo}:${branch}:manual:${Date.now()}` });
-    this.tick();
-  }
-  restartStack(repo: string, branch: string): void {
-    const s = this.store.stack(repo, branch);
-    if (s) this.store.enqueue({ repo, kind: "restart", number: s.issue, branch, trigger_key: `restart:${repo}:${branch}:manual:${Date.now()}` });
+    if (!s) return;
+    const pending = this.store.jobs(200).find((j) => j.repo === repo && j.branch === branch && j.kind === kind
+      && ["queued", "running"].includes(j.state));
+    if (pending) {
+      this.store.event(`${kind} of ${branch} is already ${pending.state}`, pending.id, "warn");
+      return;
+    }
+    this.store.enqueue({ repo, kind, number: s.issue, branch, trigger_key: `${kind}:${repo}:${branch}:manual:${Date.now()}` });
     this.tick();
   }
 
@@ -286,6 +434,7 @@ export class Daemon {
       now: Date.now(),
       paused: this.paused,
       configPath: CONFIG_PATH,
+      paths: paths(),
       repos: this.cfg.repos.map((r) => r.name),
       label: this.cfg.label,
       poll: { lastAt: this.lastPollAt, nextAt: this.nextPollAt, error: this.lastPollError, every: formatDuration(this.cfg.pollMs) },
@@ -301,6 +450,8 @@ export class Daemon {
         tokensText: formatAmount(j.tokens),
         issueTokensText: j.kind === "build" ? formatAmount(issueUsed(this.store, this.cfg, j.repo, j.number)) : undefined,
         activity: this.activity.get(j.id)?.slice(-40) ?? [],
+        out: j.branch ? git.outDir(j.repo, j.branch) : "",
+        worktree: j.branch ? join(git.worktreeRoot(j.repo), j.branch) : "",
       })),
       stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch) })),
       proxy: this.proxy.status,

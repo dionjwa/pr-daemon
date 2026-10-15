@@ -48,7 +48,7 @@ export function formatDuration(ms: number): string {
 // ---------- child processes ----------
 // The agent and the stack must behave as if a developer were at a terminal:
 // drop CI=… (projects switch into "CI mode") and the markers of an enclosing
-// Claude Code session (pr-demon may be started from one; the agent must not
+// Claude Code session (pr-daemon may be started from one; the agent must not
 // think it's nested inside it).
 const DROP_ENV = new Set(["CI", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]);
 
@@ -67,7 +67,7 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   shell?: boolean;
   timeoutMs?: number;
-  /** Own process group: background children (a preview stack) survive pr-demon restarting. */
+  /** Own process group: background children (a preview stack) survive pr-daemon restarting. */
   detached?: boolean;
 }
 
@@ -88,7 +88,7 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
   });
 }
 
-/** Run a shell command line (a project's recipe) in a directory. */
+/** Run a shell command line (a project's up/down/check) in a directory. */
 export function sh(line: string, cwd: string, o: { timeoutMs?: number; detached?: boolean; env?: Record<string, string> } = {}): Promise<RunResult> {
   return run("bash", ["-lc", line], { cwd, timeoutMs: o.timeoutMs, detached: o.detached, env: cleanEnv(o.env) });
 }
@@ -112,5 +112,5 @@ export function slugify(s: string): string {
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function log(msg: string): void {
-  process.stderr.write(`[pr-demon ${new Date().toISOString().slice(11, 19)}] ${msg}\n`);
+  process.stderr.write(`[pr-daemon ${new Date().toISOString().slice(11, 19)}] ${msg}\n`);
 }

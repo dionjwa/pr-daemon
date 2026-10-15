@@ -74,7 +74,7 @@ export async function ensureWorktree(repo: string, n: number, base: string, titl
 export async function commitLeftovers(wt: string): Promise<string[]> {
   await git(wt, "add", "-u");
   const staged = await run("git", ["-C", wt, "diff", "--cached", "--quiet"]);
-  if (staged.code !== 0) await git(wt, "commit", "-q", "-m", "pr-demon: uncommitted agent changes");
+  if (staged.code !== 0) await git(wt, "commit", "-q", "-m", "pr-daemon: uncommitted agent changes");
   return (await git(wt, "ls-files", "--others", "--exclude-standard")).split("\n").filter(Boolean);
 }
 
@@ -105,7 +105,7 @@ export async function removeWorktree(repo: string, wt: string, branch: string): 
 // ---------- screenshots ----------
 // GitHub has no API to attach images to a PR, so they're committed to an
 // orphan branch and linked. In a private repo they render for anyone who can see the PR.
-export async function uploadScreenshots(repo: string, branch: string, files: string[], assetsBranch = "pr-demon-assets"): Promise<string> {
+export async function uploadScreenshots(repo: string, branch: string, files: string[], assetsBranch = "pr-daemon-assets"): Promise<string> {
   if (!files.length) return "";
   const dir = join(HOME, "assets", key(repo));
   if (!existsSync(join(dir, ".git"))) {
