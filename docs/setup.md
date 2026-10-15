@@ -44,7 +44,9 @@ command that exits non-zero is a failure.
 1. **Print the local URL as the last line of stdout**, on its own:
    `http://localhost:8080` or `https://app.localhost`. That line is how
    pr-daemon learns the URL — it takes the last line that is nothing but a URL.
-   Send everything else to stderr if that's easier.
+   Send everything else to stderr if that's easier. With a preview domain, also
+   print a `PR_DAEMON_ROUTE` line for each backend the browser calls (see
+   [Public preview URLs](#public-preview-urls)).
 2. **Return only when the app answers.** Start services in the background, then
    wait (`--wait`, a `curl` loop, whatever fits). Don't exit before the app is
    up, and don't block forever in the foreground. Timeout: 30 minutes.
@@ -79,18 +81,82 @@ this machine). Keep it fast and deterministic. Leave it out, or set `check = ""`
 
 Preview domain on this machine: {{PREVIEW}}
 
-When one is set, every branch is also served at `https://<branch>.<domain>`,
-and `up` receives two more environment variables. The app should use them as
-its public origin (auth redirects, CORS, cookies, printed links):
+When one is set, each branch is served publicly, and **that is the only
+address its stack is used at**: by the agent, in screenshots, and by reviewers
+from the PR's Preview link. A stack is wired for one origin, so when a domain
+is set, wire it for the public one. The local URL you print becomes the
+address pr-daemon's proxy forwards to, and nobody opens it directly.
 
-    PR_DAEMON_PUBLIC_URL    e.g. https://42-dark-mode.preview.example.com
-    PR_DAEMON_PUBLIC_HOST   e.g. 42-dark-mode.preview.example.com
+### Every address the browser calls must be public too
 
-They are empty when no domain is set. Keep printing the **local** URL as the
-last line either way: pr-daemon maps the public host to it.
+Browsers block a page on a public origin from calling loopback or private
+addresses (Chrome's Local Network Access). The error looks like this:
+
+    Access to fetch at 'https://local.auth.local.nhost.run:11536/…' from origin
+    'https://42-dark-mode.preview.example.com' has been blocked by CORS policy:
+    Permission was denied for this request to access the `loopback` address space.
+
+So the app's own URL isn't enough. Any backend that **browser code** calls
+directly (auth, GraphQL, storage, an API on a different port, websockets) needs
+a public address as well. pr-daemon gives every branch a family of hosts:
+
+    https://<branch>.<domain>              the app (the last URL line `up` prints)
+    https://<branch>--<service>.<domain>   each service `up` declares
+
+To declare a service, `up` prints one line per service to stdout, anywhere
+before the final URL:
+
+    PR_DAEMON_ROUTE <service> <local-url>
+
+`<service>` is 1–12 lowercase letters or digits. For example:
+
+    PR_DAEMON_ROUTE auth https://local.auth.local.nhost.run:11536
+    PR_DAEMON_ROUTE graphql https://local.graphql.local.nhost.run:11536
+    https://framejs-app.localhost:13536
+
+pr-daemon forwards `https://<branch>--auth.<domain>` to
+`https://local.auth.local.nhost.run:11536`, and gets HTTPS certificates for
+every one of these hosts. Requests reach the service with its **local** Host
+header (gateways such as Traefik, or nhost's local proxy, route on it), and its
+self-signed certificate is accepted. Calls made between services on the server
+side can keep using local addresses. Only what the browser calls needs a public
+route.
+
+### What `up` receives
+
+    PR_DAEMON_PUBLIC_URL            https://42-dark-mode.preview.example.com
+    PR_DAEMON_PUBLIC_HOST           42-dark-mode.preview.example.com
+    PR_DAEMON_SERVICE_URL_TEMPLATE  https://42-dark-mode--{service}.preview.example.com
+
+Put a service name in place of `{service}` to get its public URL, e.g. in bash:
+
+    AUTH_URL="${PR_DAEMON_SERVICE_URL_TEMPLATE/\{service\}/auth}"
+
+All three are empty when no domain is set. Then run exactly as you do locally.
+
+### Wiring checklist for public mode
+
+When `PR_DAEMON_PUBLIC_URL` is set, `up` must configure the stack so that:
+
+- the app's own origin is `PR_DAEMON_PUBLIC_URL`: links it prints, auth
+  redirect and callback URLs, cookie domains, `allowedHosts` and the like
+- browser code calls each backend through its public service URL, never
+  `localhost`, `127.0.0.1`, `*.localhost` or a hostname that resolves to them
+  (`*.local.nhost.run` does). Pass the URLs in at build or start time, since
+  most frameworks bake them into the browser bundle
+- each of those backends allows `PR_DAEMON_PUBLIC_URL` as a CORS origin and as
+  an allowed redirect URL, and builds its own absolute URLs (email links, OAuth
+  callbacks) from its public service URL
+- `up` prints a `PR_DAEMON_ROUTE` line for each of those backends
 
 If the app rejects unknown Host headers, set `proxy_host = "upstream"` for the
-repo and it will see its local host instead of the public one.
+repo and the app will see its local host instead of the public one. Services
+always see their local host.
+
+Test it from outside: open `PR_DAEMON_PUBLIC_URL` in a browser, use the
+feature that talks to each backend (sign in, load data), and check the
+console. There should be no CORS, Local Network Access or mixed-content
+errors, and no request to a local address in the network tab.
 
 ## Where to put the commands
 
@@ -153,7 +219,9 @@ Then start a second branch's stack at the same time and confirm both answer.
 - [ ] `down` deletes the branch's data, networks included, and is safe when nothing runs
 - [ ] `check` (if any) is green on a clean checkout
 - [ ] nothing prompts, and nothing opens a browser
-- [ ] `PR_DAEMON_PUBLIC_URL` is used as the public origin, if previews are on
+- [ ] if previews are on: the app uses `PR_DAEMON_PUBLIC_URL` as its origin, every
+      backend the browser calls is declared with `PR_DAEMON_ROUTE` and reached at
+      its public service URL, and the public URL works in a browser with a clean console
 - [ ] the repo is listed in {{CONFIG_PATH}} as a `[[repos]]` block
 - [ ] `pr-daemon doctor` is all ✓
 

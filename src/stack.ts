@@ -1,6 +1,7 @@
 // A project's preview stack, driven by its own commands. Each is an arbitrary
 // shell command line (see sh()); the `just pr-daemon-*` defaults are only a
 // convention, and the one just-aware bit is missingRecipe() below.
+import { SERVICE_NAME } from "./proxy.ts";
 import { run, sh, tail } from "./util.ts";
 
 const UP_TIMEOUT = 30 * 60e3;
@@ -54,24 +55,43 @@ async function missingRecipe(cmd: string, wt: string): Promise<boolean> {
   return (await run("just", ["--show", m[1]], { cwd: wt })).code !== 0;
 }
 
-export type UpResult = ({ ok: true; url: string } | { ok: false; error: string }) & { networks: string[] };
+export type UpResult = ({ ok: true; url: string; routes: Record<string, string> } | { ok: false; error: string }) & { networks: string[] };
 
 /**
- * Start the stack (idempotent). The last line of output that looks like a URL
- * is the local URL. The command gets the branch's public URL (when a preview
- * domain is set) so the app can use it as its origin.
+ * What `up` printed: the last line that is nothing but a URL is the app's
+ * local URL, and each `PR_DAEMON_ROUTE <service> <local-url>` line declares a
+ * service the browser talks to, published as <branch>--<service>.<domain>.
+ * Exported for the test.
  */
-export async function up(cmd: string, wt: string, publicUrl = ""): Promise<UpResult> {
+export function parseUp(stdout: string): { url: string; routes: Record<string, string> } | { error: string } {
+  const lines = stdout.split("\n").map((l) => l.trim());
+  const routes: Record<string, string> = {};
+  for (const l of lines.filter((l) => l.startsWith("PR_DAEMON_ROUTE"))) {
+    const m = /^PR_DAEMON_ROUTE\s+(\S+)\s+(https?:\/\/\S+)$/.exec(l);
+    if (!m || !SERVICE_NAME.test(m[1])) {
+      return { error: `bad route line: "${l}"\nexpected: PR_DAEMON_ROUTE <service> <local-url>, the service 1-12 lowercase letters or digits` };
+    }
+    routes[m[1]] = m[2];
+  }
+  return { url: lines.filter((l) => /^https?:\/\/\S+$/.test(l)).pop() ?? "", routes };
+}
+
+/**
+ * Start the stack (idempotent). `env` says where it is served publicly (see
+ * publicEnv()): when a domain is set the app must use those addresses as its
+ * origin and for every service its browser code calls.
+ */
+export async function up(cmd: string, wt: string, env: Record<string, string>): Promise<UpResult> {
   if (await missingRecipe(cmd, wt)) return { ok: false, error: `\`${cmd}\`: no such recipe in this project`, networks: [] };
-  const env = { PR_DAEMON_PUBLIC_URL: publicUrl, PR_DAEMON_PUBLIC_HOST: publicUrl ? new URL(publicUrl).host : "" };
   const before = await networkIds();
   const r = await sh(cmd, wt, { timeoutMs: UP_TIMEOUT, detached: true, env });
   // What this `up` added, so teardown can take exactly those away again.
   const networks = before ? ((await networkIds()) ?? []).filter((id) => !before.includes(id)) : [];
   const out = `${r.stdout}\n${r.stderr}`;
   if (r.code !== 0) return { ok: false, error: tail(out, 60) + poolHint(out), networks };
-  const url = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^https?:\/\/\S+$/.test(l)).pop() ?? "";
-  return { ok: true, url, networks };
+  const parsed = parseUp(r.stdout);
+  if ("error" in parsed) return { ok: false, error: parsed.error, networks };
+  return { ok: true, ...parsed, networks };
 }
 
 export async function down(cmd: string, wt: string): Promise<{ ok: boolean; output: string }> {

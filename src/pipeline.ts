@@ -11,7 +11,7 @@ import type { Config, RepoConfig } from "./config.ts";
 import type { Job, Store } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
-import { publicUrl } from "./proxy.ts";
+import { publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
@@ -53,6 +53,25 @@ function payload(job: Job): { feedback?: string; fromReview?: boolean } {
 
 const issueOf = (branch: string) => Number(branch.split("-")[0]);
 /** Docker networks this stack has created so far, as one space-separated field. */
+/** The routes column for a successful `up`. */
+const routesOf = (r: stack.UpResult): { routes?: string } => (r.ok ? { routes: JSON.stringify(r.routes) } : {});
+
+/**
+ * Where the agent should reach the running stack. With a preview domain the
+ * stack is wired for its public origin, so the public URLs are the only ones
+ * that work in a browser: its local URL is just what the proxy forwards to.
+ */
+export function stackWhere(cfg: Config, branch: string, r: stack.UpResult): string {
+  const pub = publicUrl(cfg, branch);
+  const url = r.ok ? r.url : "";
+  if (!pub) return url || "(no URL printed)";
+  const services = r.ok ? Object.keys(r.routes) : [];
+  return `${pub} — use ONLY this address (and the service addresses below) in a browser, Playwright, curl and screenshots. ` +
+    `The app is configured for this public origin; its local address (${url || "none printed"}) is only what pr-daemon's proxy forwards to, ` +
+    `and the app breaks there because browsers block a public page from calling local addresses.` +
+    (services.length ? ` Its services: ${services.map((n) => `${n} → ${serviceUrl(cfg, branch, n)}`).join(", ")}.` : "");
+}
+
 export const withNetworks = (existing: string | undefined, created: string[]): string =>
   [...new Set([...(existing ?? "").split(" ").filter(Boolean), ...created])].join(" ");
 
@@ -136,18 +155,19 @@ export async function build(ctx: Ctx): Promise<void> {
 
   // Stack first. If it won't start, the agent's first job is to fix that.
   const pub = publicUrl(cfg, branch);
-  const s = await stack.up(repo.up, wt, pub);
+  const env = publicEnv(cfg, branch);
+  const s = await stack.up(repo.up, wt, env);
   let url = s.ok ? s.url : "";
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error,
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   if (!s.ok) store.event(`\`${repo.up}\` failed; the agent has been told to fix it first`, job.id, "warn");
   const stackNote = s.ok
-    ? `The stack for this branch is already running at ${url || "(no URL printed)"}${pub ? ` (publicly: ${pub})` : ""}. Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
+    ? `The stack for this branch is already running at ${stackWhere(cfg, branch, s)} Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
     : `WARNING: \`${repo.up}\` FAILED before you started. Fix that first, then continue. Output:\n\`\`\`\n${s.error}\n\`\`\``;
 
   const vars = {
     REPO: repo.name, BRANCH: branch, BASE: base, ISSUE_NUMBER: n, ISSUE_TITLE: issue.title, ISSUE_URL: issue.html_url,
-    ISSUE_BODY: issue.body ?? "", OUT: out, PREVIEW_URL: url, UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)", STACK_NOTE: stackNote,
+    ISSUE_BODY: issue.body ?? "", OUT: out, PREVIEW_URL: stackWhere(cfg, branch, s), UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)", STACK_NOTE: stackNote,
   };
   writeFileSync(join(out, "prompt-build.md"), prompt("build", vars));
 
@@ -163,12 +183,12 @@ export async function build(ctx: Ctx): Promise<void> {
   // preview link and the screenshots honest.
   let down = !s.ok;
   const restartStack = async (): Promise<void> => {
-    const r = await stack.up(repo.up, wt, pub);
+    const r = await stack.up(repo.up, wt, env);
     url = r.ok ? r.url || url : "";
-    vars.PREVIEW_URL = url;
-    store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error,
+    vars.PREVIEW_URL = stackWhere(cfg, branch, r);
+    store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
       networks: withNetworks(store.stack(repo.name, branch)?.networks, r.networks), checked_at: Date.now() });
-    if (r.ok && down) store.event(`the stack is up now${url ? ` at ${url}` : ""}`, job.id);
+    if (r.ok && down) store.event(`the stack is up now${pub || url ? ` at ${pub || url}` : ""}`, job.id);
     if (!r.ok) store.event(`\`${repo.up}\` still fails: ${lastLine(r.error)}`, job.id, "warn");
     down = !r.ok;
   };
@@ -217,7 +237,7 @@ async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string;
 
 ## Try it
 
-${o.pub ? `- **Preview:** ${o.pub}\n- Local: ${o.url || "_not running_"} (on the pr-daemon machine)` : `- **Preview:** ${o.url || "_not running_"} (on the pr-daemon machine)`}
+${o.pub ? `- **Preview:** ${o.pub}` : `- **Preview:** ${o.url || "_not running_"} (on the pr-daemon machine)`}
 - Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/pr-daemon\`
 ${shots ? `\n## Screenshots\n\n${shots}` : ""}
 Closes #${o.n}
@@ -278,15 +298,14 @@ export async function revise(ctx: Ctx): Promise<void> {
   const shotsDir = join(out, "screenshots");
   rmSync(shotsDir, { recursive: true, force: true });
   mkdirSync(shotsDir, { recursive: true });
-  const pub = publicUrl(ctx.cfg(), branch);
-  const s = await stack.up(repo.up, wt, pub);
+  const s = await stack.up(repo.up, wt, publicEnv(ctx.cfg(), branch));
   const url = s.ok ? s.url : "";
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, pr: job.number, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error,
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, pr: job.number, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   const builder = store.stack(repo.name, branch)?.builder_session || "";
 
   const text = prompt("revise", {
-    PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: pub ? `${url} (publicly: ${pub})` : url,
+    PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: stackWhere(ctx.cfg(), branch, s),
     FEEDBACK: payload(job).feedback ?? "", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
@@ -337,8 +356,8 @@ export async function restart(ctx: Ctx): Promise<void> {
       error: `the worktree is gone (${s.worktree}); tear this down`, checked_at: Date.now() });
     throw new FailError(`the worktree ${s.worktree} no longer exists`);
   }
-  const r = await stack.up(repo.up, s.worktree, publicUrl(ctx.cfg(), s.branch));
-  store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url,
+  const r = await stack.up(repo.up, s.worktree, publicEnv(ctx.cfg(), s.branch));
+  store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, ...routesOf(r),
     healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now() });
   if (!r.ok) throw new Error(`restart failed: ${r.error}`);
 }

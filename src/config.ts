@@ -24,6 +24,7 @@ export interface PreviewConfig {
   domain: string;                         // "" = local URLs only
   proxy: "auto" | "binary" | "docker" | "off";
   tls: "auto" | "internal" | "off";
+  dns: "" | "cloudflare";                 // set = one wildcard certificate via DNS-01, instead of one per host
   email: string;
   httpPort: number;
   httpsPort: number;
@@ -109,6 +110,11 @@ auto_restart = true      # restart a preview stack that stopped answering
 # domain = "preview.example.com"   # unset = local URLs only, no proxy
 proxy = "auto"           # auto (caddy binary if installed, else Docker) | binary | docker | off
 tls = "auto"             # auto = Let's Encrypt per branch host (needs 80+443 reachable) | internal = Caddy's own CA (testing) | off = plain http
+# dns = "cloudflare"               # with tls = "auto": ONE wildcard certificate for *.<domain>, proved through your
+#                                  # DNS provider's API: instant HTTPS for new previews, no per-host rate limits,
+#                                  # branch names stay out of public certificate logs. Needs an API token
+#                                  # (Zone > DNS > Edit) in $CLOUDFLARE_API_TOKEN or ~/.pr-daemon/cloudflare-token,
+#                                  # and Caddy with the module: caddy add-package github.com/caddy-dns/cloudflare
 # email = "you@example.com"        # for Let's Encrypt expiry notices
 http_port = 80
 https_port = 443
@@ -184,7 +190,7 @@ function bool(v: unknown, d: boolean, name: string): boolean {
 }
 function oneOf<T extends string>(v: unknown, options: readonly T[], d: T, name: string): T {
   if (v === undefined) return d;
-  if (typeof v !== "string" || !options.includes(v as T)) throw new Error(`${name} must be one of: ${options.join(", ")}`);
+  if (typeof v !== "string" || !options.includes(v as T)) throw new Error(`${name} must be one of: ${options.map((o) => o || '""').join(", ")}`);
   return v as T;
 }
 function dur(v: unknown, d: string, name: string): number {
@@ -242,6 +248,7 @@ export function parseConfig(text: string): Config {
       domain: str(pv.domain, "").trim().replace(/^\*?\./, "").toLowerCase(),
       proxy: oneOf(pv.proxy, ["auto", "binary", "docker", "off"], "auto", "preview.proxy"),
       tls: oneOf(pv.tls, ["auto", "internal", "off"], "auto", "preview.tls"),
+      dns: oneOf(pv.dns, ["", "cloudflare"], "", "preview.dns"),
       email: str(pv.email, ""),
       httpPort: num(pv.http_port, 80, "preview.http_port"),
       httpsPort: num(pv.https_port, 443, "preview.https_port"),
@@ -268,6 +275,7 @@ export function parseConfig(text: string): Config {
   if (cfg.preview.domain && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(cfg.preview.domain)) {
     throw new Error(`preview.domain "${cfg.preview.domain}" isn't a domain name (e.g. "preview.example.com")`);
   }
+  if (cfg.preview.dns && cfg.preview.tls !== "auto") throw new Error(`preview.dns only applies to tls = "auto" (Let's Encrypt); remove it or set tls = "auto"`);
   if (!/^[\w.[\]:-]+:\d+$/.test(cfg.preview.admin)) throw new Error('preview.admin must be host:port, e.g. "127.0.0.1:2019"');
   if (cfg.pollMs < 10_000) throw new Error("poll must be at least 10s (GitHub rate limits)");
   const dup = cfg.repos.map((r) => r.name).find((n, i, all) => all.indexOf(n) !== i);

@@ -60,7 +60,7 @@ You need Node 23.6 or newer, `git`, `gh`, `just`, `docker`, and Claude Code
 (`claude`).
 
 ```bash
-brew install node git gh just     # macOS; use your package manager on Linux
+brew install node git gh just     # macOS; use your package manager on Linux (gh ≥ 2.73)
 npm install -g @anthropic-ai/claude-code
 gh auth login                     # pr-daemon acts as you, through gh
 claude                            # log in once, then exit
@@ -202,25 +202,75 @@ email = "you@example.com"        # optional, for Let's Encrypt notices
 - Point `*.preview.example.com` at this machine with a wildcard DNS record.
 - Forward ports **80** and **443** to it, e.g. on your router.
 
+**Check the routing before any preview exists:** open
+`https://pr-daemon.preview.example.com`. Caddy answers it itself with
+"pr-daemon: the preview proxy is working." If that loads, DNS, the port
+forwards and certificates all work, and any remaining problem is in the
+preview's own stack. `just doctor` checks the same address.
+
 **pr-daemon's part:**
 - It runs **Caddy**: the `caddy` binary if it's installed (`brew install caddy`), otherwise a Docker container. You can force either with `proxy = "binary"` or `proxy = "docker"`.
 - It keeps Caddy's routes equal to the running stacks: a new branch gets a route, and a torn-down one loses it.
 - It gets an HTTPS certificate per branch host from Let's Encrypt automatically.
 - If Caddy dies it's restarted. When pr-daemon stops, Caddy stops with it, so the preview URLs are down for a few seconds across a restart. (Preview stacks themselves keep running.) If pr-daemon is killed outright, the Caddy that's still running is adopted on the next start.
 
-The PR's **Preview** link becomes the public URL, and the status page shows
-both the public and the local address.
+**With a domain, the public URL is the only one that's used.** The agent
+tests there, screenshots come from there, and the PR's **Preview** link points
+there. The local URL is just what Caddy forwards to.
 
-**Your app needs to know its public address.** `pr-daemon-up` receives:
+**Your app has to be wired for its public address,** and so does every backend
+its browser code calls. Browsers block a public page from calling local
+addresses (`localhost`, or names like `local.auth.local.nhost.run` that resolve
+to 127.0.0.1), so each of those backends gets a public host too:
+`https://<branch>--<service>.<domain>`. `pr-daemon-up` declares them by
+printing `PR_DAEMON_ROUTE <service> <local-url>` lines, and receives:
 
 | Variable | Example |
 |---|---|
 | `PR_DAEMON_PUBLIC_URL` | `https://94-my-new-feature.preview.example.com` |
 | `PR_DAEMON_PUBLIC_HOST` | `94-my-new-feature.preview.example.com` |
+| `PR_DAEMON_SERVICE_URL_TEMPLATE` | `https://94-my-new-feature--{service}.preview.example.com` |
 
-Use them for anything that builds absolute URLs: auth redirect URLs, CORS
-origins, cookie domains, and links to other services. Both are empty when no
-domain is set.
+Use them for auth redirect URLs, CORS origins, cookie domains, and every
+backend URL the browser uses. All are empty when no domain is set. The
+[project setup doc](docs/setup.md#public-preview-urls) has the full checklist.
+
+### One wildcard certificate (recommended)
+
+By default each host gets its own Let's Encrypt certificate. That means a wait
+of a few seconds for each new host, a limit of 50 a week per registered domain
+(a branch with four services uses five), an hour-long lockout for a host after
+5 failed attempts, and every branch name published in the public certificate
+logs. If your DNS is on Cloudflare, use one wildcard certificate for
+`*.<domain>` instead:
+
+1. Create an API token at dash.cloudflare.com → My Profile → API Tokens, with
+   **Zone → DNS → Edit** on just your zone.
+2. Save it where pr-daemon reads it (or set `CLOUDFLARE_API_TOKEN` in its
+   environment instead):
+
+   ```bash
+   (umask 077; pbpaste > ~/.pr-daemon/cloudflare-token)   # or paste it in with an editor
+   ```
+
+3. Give Caddy the Cloudflare module (Docker mode builds its own image instead):
+
+   ```bash
+   caddy add-package github.com/caddy-dns/cloudflare   # again after each caddy upgrade
+   ```
+
+4. Set it in the config:
+
+   ```toml
+   [preview]
+   dns = "cloudflare"
+   ```
+
+5. Run `just doctor`. It checks the token, the zone and the module.
+
+Caddy then proves control of the domain with a DNS record, so port 80 is no
+longer needed for certificates. pr-daemon hands the token only to Caddy: it
+isn't written to Caddy's config file or passed to agents or project commands.
 
 If the app's dev server only accepts its local host name (Vite's
 `allowedHosts`, for example), set `proxy_host = "upstream"` on the repo.

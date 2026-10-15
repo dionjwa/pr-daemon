@@ -49,8 +49,9 @@ export function formatDuration(ms: number): string {
 // The agent and the stack must behave as if a developer were at a terminal:
 // drop CI=… (projects switch into "CI mode") and the markers of an enclosing
 // Claude Code session (pr-daemon may be started from one; the agent must not
-// think it's nested inside it).
-const DROP_ENV = new Set(["CI", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]);
+// think it's nested inside it). The DNS token is only for Caddy: agents and
+// project commands never need it.
+const DROP_ENV = new Set(["CI", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "CLOUDFLARE_API_TOKEN"]);
 
 export function cleanEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};

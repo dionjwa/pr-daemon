@@ -10,13 +10,23 @@
 # REQUIRED. Start THIS branch's whole stack in the background, wait until it
 # answers, then print its URL as the last line. Must be idempotent: if it's
 # already running, just print the URL. Must not open a browser.
-# With a preview domain configured, pr-daemon also passes PR_DAEMON_PUBLIC_URL
-# (e.g. https://42-dark-mode.preview.example.com) and PR_DAEMON_PUBLIC_HOST:
-# use them as the app's public origin (auth redirects, CORS, cookies).
+# With a preview domain configured, the stack is used ONLY at its public URL,
+# so wire it for that: pr-daemon passes PR_DAEMON_PUBLIC_URL (the app's origin)
+# and PR_DAEMON_SERVICE_URL_TEMPLATE (https://<branch>--{service}.<domain>).
+# Every backend the browser calls must be declared with a PR_DAEMON_ROUTE line
+# and used at its public URL: browsers block public pages from calling local
+# addresses. All of these are empty without a domain.
 pr-daemon-up:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ -n "${PR_DAEMON_PUBLIC_URL:-}" ]; then
+        export APP_ORIGIN="$PR_DAEMON_PUBLIC_URL"
+        export API_URL="${PR_DAEMON_SERVICE_URL_TEMPLATE/\{service\}/api}"
+    else
+        export APP_ORIGIN="http://localhost:8080" API_URL="http://localhost:8081"
+    fi
     docker compose -p "app-$(git rev-parse --abbrev-ref HEAD | tr -c 'a-z0-9\n' '-')" up -d --wait >&2
+    echo "PR_DAEMON_ROUTE api http://localhost:8081"
     echo "http://localhost:8080"
 
 # REQUIRED. Stop this branch's stack and delete its data.

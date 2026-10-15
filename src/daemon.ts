@@ -9,7 +9,7 @@ import { AGENT_KINDS, openDb, Store, type Job } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
-import { Proxy, publicUrl } from "./proxy.ts";
+import { Proxy, publicUrl, serviceUrl, stackRoutes } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { formatAmount, formatDuration } from "./util.ts";
@@ -453,7 +453,8 @@ export class Daemon {
         out: j.branch ? git.outDir(j.repo, j.branch) : "",
         worktree: j.branch ? join(git.worktreeRoot(j.repo), j.branch) : "",
       })),
-      stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch) })),
+      stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
+        services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) })),
       proxy: this.proxy.status,
       events: this.store.events(120),
     };

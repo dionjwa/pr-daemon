@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
 import { Daemon } from "./daemon.ts";
+import { caddyHasDns, CHECK_BODY, CHECK_LABEL, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
 import type { JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
 import { run } from "./util.ts";
@@ -149,6 +150,9 @@ async function doctor(): Promise<void> {
   let bad = 0;
   const ok = (good: boolean, what: string, fix = "") => { console.log(`${good ? "✓" : "✗"} ${what}${good || !fix ? "" : `\n    → ${fix}`}`); if (!good) bad++; };
   for (const t of ["git", "gh", "just", "docker", "claude", "curl"]) ok((await run("which", [t])).code === 0, `${t} installed`);
+  // gh < 2.73 asks for the sunset Projects (classic) fields on `gh pr edit` and fails (cli/cli#10942).
+  const ghv = /gh version (\d+)\.(\d+)/.exec((await run("gh", ["--version"])).stdout);
+  ok(!!ghv && (+ghv[1] > 2 || (+ghv[1] === 2 && +ghv[2] >= 73)), `gh ≥ 2.73 (have ${ghv ? `${ghv[1]}.${ghv[2]}` : "none"})`, "brew upgrade gh");
   const auth = await run("gh", ["auth", "status"]);
   ok(auth.code === 0, "gh is logged in", "gh auth login");
   const c = await run("claude", ["-p", "Reply with exactly: ok", "--max-turns", "1"], { timeoutMs: 90_000 });
@@ -171,15 +175,53 @@ async function doctor(): Promise<void> {
       const usable = p.proxy === "binary" ? hasCaddy : p.proxy === "docker" ? docker.code === 0 : hasCaddy || docker.code === 0;
       ok(usable, `preview proxy for *.${p.domain} (${p.proxy}${p.proxy === "auto" ? `: ${hasCaddy ? "caddy binary" : "docker"}` : ""})`,
         "brew install caddy, or start Docker");
+      if (p.dns) await wildcardChecks(ok, p.domain, p.dns, p.proxy === "docker" || (p.proxy === "auto" && !hasCaddy));
       const example = `${cfg.repos[0] ? "42-example" : "x"}.${p.domain}`;
-      const dns = await run("dig", ["+short", example]);
-      ok(!!dns.stdout.trim() || /\.localhost$/.test(p.domain), `DNS: ${example} resolves${dns.stdout.trim() ? ` (${dns.stdout.trim().split("\n")[0]})` : ""}`,
-        `point *.${p.domain} at this machine (a wildcard A record), and forward ports ${p.httpPort} and ${p.httpsPort} to it`);
+      // +short prints any CNAME chain first; only an address at the end means it resolves
+      // (a CNAME to a dead name, e.g. "home." instead of "home.example.com.", prints just the name).
+      const answers = (await run("dig", ["+short", example])).stdout.trim().split("\n").filter(Boolean);
+      const ip = answers.find((a) => /^[\d.]+$|:/.test(a));
+      ok(!!ip || /\.localhost$/.test(p.domain), `DNS: ${example} resolves${ip ? ` (${ip})` : answers.length ? ` (no: ${answers.join(" → ")} has no address)` : ""}`,
+        `point *.${p.domain} at this machine (a wildcard A record, or a CNAME to its full name), and forward ports ${p.httpPort} and ${p.httpsPort} to it`);
+      // The proxy's own page: DNS, port forward, Caddy and TLS together, no preview stack involved.
+      const url = `${publicUrl(cfg, CHECK_LABEL)}/`;
+      const hello = await run("curl", ["-sS", "-m", "15", ...(p.tls === "internal" ? ["-k"] : []), url]);
+      ok(hello.stdout === CHECK_BODY, `preview proxy answers at ${url}`,
+        hello.stderr.trim() || hello.stdout.trim() || "no answer: is pr-daemon serving? check DNS, the port forwards and ~/.pr-daemon/caddy/caddy.log (certificates)");
     } else {
       console.log(`· no preview domain: previews use local URLs (set [preview] domain to get https://<branch>.<domain>)`);
     }
   } catch (e) { ok(false, "config is valid", (e as Error).message); }
   process.exit(bad ? 1 : 0);
+}
+
+/** preview.dns: the token works and sees the zone, and Caddy can use it. */
+async function wildcardChecks(ok: (good: boolean, what: string, fix?: string) => void, domain: string, provider: string, docker: boolean): Promise<void> {
+  const token = dnsToken();
+  ok(!!token, `${provider} API token for the wildcard certificate`,
+    `create one at dash.cloudflare.com/profile/api-tokens with Zone > DNS > Edit on just this zone, then put it in ${DNS_TOKEN_FILE} (chmod 600) or $${DNS_TOKEN_ENV}`);
+  if (!token) return;
+  // The header goes through stdin so the token never appears in a process list.
+  const api = async (path: string) => {
+    const r = await run("curl", ["-sS", "-m", "15", "-H", "@-", `https://api.cloudflare.com/client/v4${path}`], { input: `Authorization: Bearer ${token}\n` });
+    try { return JSON.parse(r.stdout); } catch { return { success: false, errors: [{ message: r.stderr.trim() || r.stdout.trim() }] }; }
+  };
+  const v = await api("/user/tokens/verify");
+  ok(v.success && v.result?.status === "active", `${provider} accepts the token`, v.errors?.[0]?.message ?? "the token was rejected");
+  if (!v.success) return;
+  // The zone is the domain or one of its parents (home.example.com → example.com).
+  const labels = domain.split(".");
+  let zone = "";
+  for (let i = 0; i < labels.length - 1 && !zone; i++) {
+    const z = await api(`/zones?name=${labels.slice(i).join(".")}`);
+    if (z.success && z.result?.length) zone = z.result[0].name;
+  }
+  ok(!!zone, `the token can see the DNS zone for ${domain}${zone ? ` (${zone})` : ""}`, "give the token Zone > DNS > Edit on that zone");
+  if (!docker) {
+    ok(await caddyHasDns(provider), `caddy has the ${provider} DNS module`, `caddy add-package ${DNS_MODULE}   (redo after upgrading caddy)`);
+  } else {
+    console.log(`· Docker mode builds a Caddy image with the ${provider} DNS module on first start`);
+  }
 }
 
 /**

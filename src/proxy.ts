@@ -10,7 +10,7 @@
 // the rest.
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HOME, type Config, type RepoConfig } from "./config.ts";
 import type { Stack, Store } from "./db.ts";
@@ -20,55 +20,137 @@ const CADDY_DIR = join(HOME, "caddy");
 const CONTAINER = "pr-daemon-caddy";
 const IMAGE = "caddy:2";
 
-export type ProxyMode = "binary" | "docker";
+// ---------------------------------------------------------------- wildcard certificate
+// With [preview] dns set, Caddy gets ONE certificate for *.<domain> through the
+// DNS-01 challenge (Let's Encrypt only issues wildcards that way): it writes a
+// TXT record through the DNS provider's API. Every branch and service host is
+// one label under the domain, so that one certificate covers them all: new
+// previews get HTTPS instantly, there are no per-host rate limits, and branch
+// names stay out of the public Certificate Transparency logs. Stock Caddy has
+// no DNS providers, so the binary needs `caddy add-package`, and Docker mode
+// builds its own image.
 
-/** A branch name as a DNS label: lowercase letters, digits and hyphens, at most 63 characters. */
-export function hostLabel(branch: string): string {
-  return branch.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").slice(0, 63).replace(/^-+|-+$/g, "");
+/** Where the DNS provider's API token comes from: the environment, then a file. */
+export const DNS_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
+export const DNS_TOKEN_FILE = join(HOME, "cloudflare-token");
+export const DNS_MODULE = "github.com/caddy-dns/cloudflare";
+const DNS_IMAGE = "pr-daemon-caddy-cloudflare";
+const DNS_DOCKERFILE = `FROM caddy:2-builder AS builder
+RUN xcaddy build --with ${DNS_MODULE}
+FROM caddy:2
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+`;
+
+/** The DNS API token, or "" when there's none. */
+export function dnsToken(): string {
+  const env = process.env[DNS_TOKEN_ENV]?.trim();
+  if (env) return env;
+  try { return readFileSync(DNS_TOKEN_FILE, "utf8").trim(); } catch { return ""; }
 }
 
-/** The public URL for a branch, or "" when no domain is configured. */
-export function publicUrl(cfg: Config, branch: string): string {
+/** Whether the installed caddy binary has the DNS provider module. */
+export async function caddyHasDns(provider: string): Promise<boolean> {
+  return (await run("caddy", ["list-modules"])).stdout.includes(`dns.providers.${provider}`);
+}
+
+export type ProxyMode = "binary" | "docker";
+
+// A stack is wired for ONE origin. When a domain is set, the app's browser code
+// runs on https://<branch>.<domain>, and browsers refuse to let a public page
+// call loopback addresses (Local Network Access): so every service the browser
+// talks to needs a public host too. Each branch gets a family of hosts, one
+// label deep so the single wildcard record covers them all:
+//
+//   https://<branch>.<domain>             the app
+//   https://<branch>--<service>.<domain>  each service `up` declares
+//
+// A branch label never contains "--" (hostLabel collapses hyphens), so the two
+// can't collide. The branch part is capped at 48 characters so the longest
+// service name still fits in a 63-character DNS label.
+
+/** Service names a stack may declare: they become part of a DNS label. */
+export const SERVICE_NAME = /^[a-z0-9]{1,12}$/;
+
+/** A branch name as a DNS label: lowercase letters, digits and hyphens, at most 48 characters. */
+export function hostLabel(branch: string): string {
+  return branch.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").slice(0, 48).replace(/^-+|-+$/g, "");
+}
+
+/** <scheme>://<label>.<domain>[:port], or "" when no domain is configured. */
+function origin(cfg: Config, label: string): string {
   const p = cfg.preview;
   if (!p.domain || p.proxy === "off") return "";
   const scheme = p.tls === "off" ? "http" : "https";
   const port = p.publicPort ?? (p.tls === "off" ? p.httpPort : p.httpsPort);
   const standard = (scheme === "https" && port === 443) || (scheme === "http" && port === 80);
-  return `${scheme}://${hostLabel(branch)}.${p.domain}${standard ? "" : `:${port}`}`;
+  return `${scheme}://${label}.${p.domain}${standard ? "" : `:${port}`}`;
 }
+
+/** The public URL for a branch, or "" when no domain is configured. */
+export function publicUrl(cfg: Config, branch: string): string {
+  return origin(cfg, hostLabel(branch));
+}
+
+/** The public URL of one of a branch's services, e.g. https://42-x--auth.<domain>. */
+export function serviceUrl(cfg: Config, branch: string, service: string): string {
+  return origin(cfg, `${hostLabel(branch)}--${service}`);
+}
+
+/** What `up` is told about its public addresses. All empty when no domain is set. */
+export function publicEnv(cfg: Config, branch: string): Record<string, string> {
+  const url = publicUrl(cfg, branch);
+  return {
+    PR_DAEMON_PUBLIC_URL: url,
+    PR_DAEMON_PUBLIC_HOST: url ? new URL(url).host : "",
+    // Put a service name in place of {service}: "${PR_DAEMON_SERVICE_URL_TEMPLATE/\{service\}/auth}"
+    PR_DAEMON_SERVICE_URL_TEMPLATE: url ? serviceUrl(cfg, branch, "{service}") : "",
+  };
+}
+
+/** A stack's declared services (name → local URL), from the stacks table's JSON column. */
+export function stackRoutes(s: Pick<Stack, "routes">): Record<string, string> {
+  try { return s.routes ? JSON.parse(s.routes) : {}; } catch { return {}; }
+}
+
+/** pr-daemon.<domain> is answered by Caddy itself, no stack needed: it proves DNS, port forwards and TLS on their own. */
+export const CHECK_LABEL = "pr-daemon";
+
+/** The body served there; `doctor` looks for it. */
+export const CHECK_BODY = "pr-daemon: the preview proxy is working.\n";
 
 /** Caddy JSON config for these stacks. Pure: unit-tested. */
 export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): object {
   const p = cfg.preview;
   const routes: object[] = [];
   for (const s of stacks) {
-    if (!s.url) continue;
-    let up: URL;
-    try { up = new URL(s.url); } catch { continue; }
     const repo: RepoConfig | undefined = cfg.repos.find((r) => r.name === s.repo);
-    const port = up.port || (up.protocol === "https:" ? "443" : "80");
-    // Local dev hosts (*.localhost, 127.0.0.1) are dialed by address; from inside
-    // Docker the host machine is host.docker.internal.
-    const local = /(^|\.)localhost$/.test(up.hostname) || up.hostname === "127.0.0.1";
-    const host = local ? (mode === "docker" ? "host.docker.internal" : "127.0.0.1") : up.hostname;
-    const handler: Record<string, unknown> = { handler: "reverse_proxy", upstreams: [{ dial: `${host}:${port}` }] };
-    if (up.protocol === "https:") {
-      // Local stacks use self-signed (mkcert) certs: skip verification, keep the SNI they expect.
-      handler.transport = { protocol: "http", tls: { insecure_skip_verify: true, server_name: up.hostname } };
+    const app = s.url ? proxyTo(s.url, mode, (repo?.proxyHost ?? "public") === "upstream") : null;
+    if (app) routes.push({ match: [{ host: [`${hostLabel(s.branch)}.${p.domain}`] }], handle: [app], terminal: true });
+    // Services always get their local Host: they usually sit behind a gateway
+    // that routes on it (nhost's local.<svc>.local.nhost.run, a Traefik, …).
+    for (const [name, url] of Object.entries(stackRoutes(s))) {
+      const handler = SERVICE_NAME.test(name) ? proxyTo(url, mode, true) : null;
+      if (handler) routes.push({ match: [{ host: [`${hostLabel(s.branch)}--${name}.${p.domain}`] }], handle: [handler], terminal: true });
     }
-    if ((repo?.proxyHost ?? "public") === "upstream") {
-      // The app sees the Host it's used to locally (e.g. a dev server that rejects unknown hosts).
-      handler.headers = { request: { set: { Host: [up.host] } } };
-    }
-    routes.push({ match: [{ host: [`${hostLabel(s.branch)}.${p.domain}`] }], handle: [handler], terminal: true });
   }
+  // The proxy's own page, so routing can be checked before any preview exists.
+  routes.push({ match: [{ host: [`${CHECK_LABEL}.${p.domain}`] }], handle: [{ handler: "static_response", status_code: 200, body: CHECK_BODY }], terminal: true });
   // Anything else on the domain: a plain 404 instead of a connection error.
   routes.push({ handle: [{ handler: "static_response", status_code: 404, body: "pr-daemon: no preview is running for this address.\n" }] });
 
   const listen = p.tls === "off" ? [`:${p.httpPort}`] : [`:${p.httpsPort}`];
   const tls: Record<string, unknown> = {};
+  const acme = { module: "acme", ...(p.email ? { email: p.email } : {}) };
+  const wildcard = p.tls === "auto" && !!p.dns;
   if (p.tls === "internal") tls.automation = { policies: [{ issuers: [{ module: "internal" }] }] };
-  else if (p.tls === "auto" && p.email) tls.automation = { policies: [{ issuers: [{ module: "acme", email: p.email }] }] };
+  else if (wildcard) {
+    // The token stays out of caddy.json: Caddy reads it from its environment.
+    // Propagation is checked against a public resolver, not this machine's
+    // (which may be a VPN's, or have cached the name's absence).
+    const dns = { provider: { name: p.dns, api_token: `{env.${DNS_TOKEN_ENV}}` }, resolvers: ["1.1.1.1:53"] };
+    tls.automation = { policies: [{ subjects: [`*.${p.domain}`], issuers: [{ ...acme, challenges: { dns } }] }, { issuers: [acme] }] };
+    tls.certificates = { automate: [`*.${p.domain}`] };
+  } else if (p.tls === "auto" && p.email) tls.automation = { policies: [{ issuers: [acme] }] };
 
   return {
     // Inside Docker the admin API must listen on all interfaces (it's published
@@ -78,6 +160,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
     apps: {
       http: {
         http_port: p.httpPort, https_port: p.httpsPort,
+        // Caddy ≥ 2.10 serves hosts covered by a managed wildcard from it rather than getting their own.
         servers: { previews: { listen, routes, ...(p.tls === "off" ? { automatic_https: { disable: true } } : {}) } },
       },
       ...(Object.keys(tls).length ? { tls } : {}),
@@ -85,6 +168,26 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
       pki: { certificate_authorities: { local: { install_trust: false } } },
     },
   };
+}
+
+/** A reverse_proxy handler for a local URL, or null if it isn't one. */
+function proxyTo(url: string, mode: ProxyMode, keepHost: boolean): Record<string, unknown> | null {
+  let up: URL;
+  try { up = new URL(url); } catch { return null; }
+  const port = up.port || (up.protocol === "https:" ? "443" : "80");
+  // Stacks run on this machine: from inside Docker that's host.docker.internal.
+  // The binary dials *.localhost and 127.0.0.1 by address, and anything else by
+  // name (e.g. local.auth.local.nhost.run, whose public DNS says 127.0.0.1).
+  const local = /(^|\.)localhost$/.test(up.hostname) || up.hostname === "127.0.0.1";
+  const host = mode === "docker" ? "host.docker.internal" : local ? "127.0.0.1" : up.hostname;
+  const handler: Record<string, unknown> = { handler: "reverse_proxy", upstreams: [{ dial: `${host}:${port}` }] };
+  if (up.protocol === "https:") {
+    // Local stacks use self-signed (mkcert) certs: skip verification, keep the SNI they expect.
+    handler.transport = { protocol: "http", tls: { insecure_skip_verify: true, server_name: up.hostname } };
+  }
+  // The upstream sees the Host it's used to locally (e.g. a dev server that rejects unknown hosts).
+  if (keepHost) handler.headers = { request: { set: { Host: [up.host] } } };
+  return handler;
 }
 
 function adminPort(cfg: Config): string {
@@ -168,7 +271,9 @@ export class Proxy {
       const mode = enabled ? await this.resolveMode() : null;
       // What Caddy was started with. Ports and the admin address are fixed at
       // launch (Docker publishes them), so a change means stop + start again.
-      const launchKey = mode ? `${mode} ${cfg.preview.httpPort} ${cfg.preview.httpsPort} ${cfg.preview.admin} ${cfg.preview.tls}` : "";
+      // The DNS token is handed to Caddy at launch, so a new one means a relaunch too (only a fingerprint is stored).
+      const token = cfg.preview.dns ? createHash("sha1").update(dnsToken()).digest("hex").slice(0, 8) : "";
+      const launchKey = mode ? `${mode} ${cfg.preview.httpPort} ${cfg.preview.httpsPort} ${cfg.preview.admin} ${cfg.preview.tls} ${cfg.preview.dns} ${token}` : "";
       const launchedWith = this.store.get("proxy:launched") ?? "";
 
       if (managed && (managed !== mode || (launchedWith && launchedWith !== launchKey))) {
@@ -217,6 +322,24 @@ export class Proxy {
 
   private async launch(mode: ProxyMode): Promise<void> {
     const cfg = this.cfg().preview;
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    let image = IMAGE;
+    if (cfg.dns) {
+      const token = dnsToken();
+      if (!token) throw new Error(`preview.dns = "${cfg.dns}" needs an API token (Zone > DNS > Edit): put it in ${DNS_TOKEN_FILE} or $${DNS_TOKEN_ENV}`);
+      env[DNS_TOKEN_ENV] = token;
+      if (mode === "binary" && !(await caddyHasDns(cfg.dns))) {
+        throw new Error(`this caddy has no ${cfg.dns} DNS module: run \`caddy add-package ${DNS_MODULE}\` (redo it after upgrading caddy), or set proxy = "docker"`);
+      }
+      if (mode === "docker") {
+        image = DNS_IMAGE;
+        if ((await run("docker", ["image", "inspect", DNS_IMAGE])).code !== 0) {
+          this.store.event(`building the ${DNS_IMAGE} Docker image (Caddy with the ${cfg.dns} DNS module); this takes a few minutes once`);
+          const b = await run("docker", ["build", "-t", DNS_IMAGE, "-"], { input: DNS_DOCKERFILE, timeoutMs: 15 * 60e3 });
+          if (b.code !== 0) throw new Error(`docker build ${DNS_IMAGE} failed: ${b.stderr.trim().slice(-400)}`);
+        }
+      }
+    }
     if (mode === "binary") {
       const log = join(CADDY_DIR, "caddy.log");
       // Its own process group, so a Ctrl-C or a signal to pr-daemon doesn't
@@ -224,7 +347,7 @@ export class Proxy {
       // instead. If pr-daemon dies without that (SIGKILL, a crash), Caddy
       // keeps serving and the next pr-daemon adopts it on the admin port.
       this.child = spawn("bash", ["-c", `exec caddy run --config "${join(CADDY_DIR, "caddy.json")}" >> "${log}" 2>&1`],
-        { detached: true, stdio: "ignore", env: { ...process.env, XDG_DATA_HOME: join(CADDY_DIR, "data") } });
+        { detached: true, stdio: "ignore", env: { ...env, XDG_DATA_HOME: join(CADDY_DIR, "data") } });
       this.child.unref();
       return;
     }
@@ -235,7 +358,9 @@ export class Proxy {
       "--add-host", "host.docker.internal:host-gateway",
       ...ports.flatMap((p) => ["-p", `${p}:${p}`]), "-p", `127.0.0.1:${port}:${port}`,
       "-v", `${CADDY_DIR}:/etc/pr-daemon:ro`, "-v", "pr-daemon-caddy-data:/data",
-      IMAGE, "caddy", "run", "--config", "/etc/pr-daemon/caddy.json"], { timeoutMs: 180_000 });
+      // `-e NAME` alone takes the value from this process's env, so the token isn't on the command line.
+      ...(cfg.dns ? ["-e", DNS_TOKEN_ENV] : []),
+      image, "caddy", "run", "--config", "/etc/pr-daemon/caddy.json"], { timeoutMs: 180_000, env });
     if (r.code !== 0) throw new Error(`docker run failed: ${r.stderr.trim().slice(-400)}`);
   }
 

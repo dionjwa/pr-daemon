@@ -234,8 +234,12 @@ name = "your-org/website"</pre>`;
       <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
       <td><span class="dot ${s.healthy === 1 ? "ok" : s.healthy === 0 ? "bad" : ""}"></span>${
         s.url && s.public_url ? `<a href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ""}${
-        s.url ? `<div class="${s.public_url ? "small muted" : ""}">${s.public_url ? "local: " : ""}<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></div>`
+        // With a domain the stack is wired for its public origin: the local address is only the proxy's upstream.
+        s.url ? (s.public_url ? `<div class="small muted">upstream: ${esc(s.url)}</div>`
+                              : `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>`)
               : `<span class="muted">not running</span>`}${
+        (s.services ?? []).map((v) => `<div class="small muted">${esc(v.name)}: ${v.url
+          ? `<a href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a>` : esc(v.upstream)}</div>`).join("")}${
         s.error ? `<div class="reason" style="margin-top:6px">${esc(s.error)}</div>` : ""}</td>
       <td class="hide-sm small muted">${ago(s.checked_at)}</td>
       <td class="actions">${btn(`restart|${s.repo}|${s.branch}`, "Restart")}${btn(`teardown|${s.repo}|${s.branch}`, "Tear down", "danger")}</td></tr>`).join("")}</tbody></table>`

@@ -142,6 +142,9 @@ just contract                 # print examples/justfile, the two recipes a proje
   rewrite CI). `git.push()` explains it. It also bit us when a branch was
   based on a commit that had a workflow file which was later deleted
   upstream: rebasing onto the current base fixed it.
+- **gh must be ≥ 2.73.** Older `gh pr edit` asks for the Projects (classic)
+  `projectCards` field, which GitHub has switched off, so it fails. `doctor`
+  checks the version. Upgrade gh; don't work around it in code.
 - **`gh issue edit --remove-label` fails the whole command** if one label
   doesn't exist. `setStatus()` uses the REST API and only removes labels the
   issue has.
@@ -191,6 +194,31 @@ just contract                 # print examples/justfile, the two recipes a proje
   machine's other stacks. `doctor` counts bridge networks and the idle ones,
   and `poolHint()` adds the explanation to the stack error when Docker says
   the pool is full.
+- **A stack is wired for one origin.** With a domain set, Chrome's Local
+  Network Access blocks the public page from calling loopback, so a page at
+  `https://<branch>.<domain>` calling `local.auth.local.nhost.run` (127.0.0.1)
+  fails as "CORS ... `loopback` address space". So in public mode the public
+  URL is the only one used (agent prompts via `stackWhere()`, PR body, status
+  page). Every backend the browser calls gets `https://<branch>--<service>.<domain>`,
+  declared by `up` printing `PR_DAEMON_ROUTE <service> <local-url>` (stored in
+  `stacks.routes`). Those routes always send the upstream's local Host, because
+  gateways like nhost's route on it. `hostLabel()` caps the branch at 48
+  characters so `--<service>` (at most 12) fits in a 63-character label.
+- **Wildcard certificates (`[preview] dns = "cloudflare"`):** Let's Encrypt
+  only issues wildcards through DNS-01, so Caddy needs the
+  `caddy-dns/cloudflare` module (`caddy add-package`, which a `brew upgrade`
+  undoes; Docker mode builds `pr-daemon-caddy-cloudflare`) and a token from
+  `$CLOUDFLARE_API_TOKEN` or `~/.pr-daemon/cloudflare-token`. caddy.json only
+  holds `{env.CLOUDFLARE_API_TOKEN}`, and `cleanEnv` drops the variable so
+  agents never get it. Caddy 2.11 rejects `automatic_https.prefer_wildcard`:
+  since 2.10 a managed wildcard covers its subdomains by default. The module
+  refuses tokens that don't look real, so validate configs with a
+  40-character fake.
+- **Check the proxy on its own:** Caddy answers `https://pr-daemon.<domain>`
+  itself, and `doctor` fetches it. When debugging, also look for
+  `rateLimited` in `~/.pr-daemon/caddy/caddy.log`: 5 failed certificate
+  attempts on a host (e.g. while DNS was wrong) lock that host out for an hour,
+  and `just dev` restarting Caddy on every edit burns through attempts fast.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
 - **`up` / `down` / `check` are arbitrary shell command lines**, run as
@@ -218,10 +246,14 @@ just contract                 # print examples/justfile, the two recipes a proje
     pause and resume.
 - **Measured cost:** a small feature is about 2–3M tokens, around 94% of them
   cache reads.
-- **For framejs.app public previews:** its `pr-daemon-up` doesn't use
-  `PR_DAEMON_PUBLIC_URL` yet. Its browser code also talks to nhost on
-  `local.<svc>.local.nhost.run:<port>`, and those need public routes too.
-  That's project work, not pr-daemon work.
+- **For framejs.app public previews:** pr-daemon's side is done
+  (`PR_DAEMON_ROUTE`). The project still has to do its part: `pr-daemon-up`
+  must print `PR_DAEMON_ROUTE auth|graphql|storage|functions
+  https://local.<svc>.local.nhost.run:<NHOST_HTTP_PORT>`, give the browser
+  nhost client explicit public service URLs instead of `subdomain=local`, and
+  set nhost auth's client URL and allowed redirects to `PR_DAEMON_PUBLIC_URL`.
+  The DNS record is `*.home` CNAME `home.<domain>` (DNS only): a
+  `home.` target with a trailing dot was the first outage.
 
 ## Open items
 

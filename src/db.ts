@@ -40,6 +40,7 @@ export interface Stack {
   healthy: number;         // 1 / 0 / -1 unknown
   error: string;           // why `up` last failed; "" when it's fine
   networks: string;        // docker network ids this stack's `up` created, space separated
+  routes: string;          // JSON {service: local URL} from `up`'s PR_DAEMON_ROUTE lines; each gets <branch>--<service>.<domain>
   checked_at: number | null;
   created_at: number;
 }
@@ -86,7 +87,8 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   // Columns added after the first release: ALTER is the whole migration story.
-  for (const [table, col, def] of [["stacks", "error", "TEXT NOT NULL DEFAULT ''"], ["stacks", "networks", "TEXT NOT NULL DEFAULT ''"]]) {
+  for (const [table, col, def] of [["stacks", "error", "TEXT NOT NULL DEFAULT ''"], ["stacks", "networks", "TEXT NOT NULL DEFAULT ''"],
+    ["stacks", "routes", "TEXT NOT NULL DEFAULT ''"]]) {
     const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === col);
     if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
   }
