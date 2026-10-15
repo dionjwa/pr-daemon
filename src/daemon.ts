@@ -9,13 +9,15 @@ import { AGENT_KINDS, openDb, Store, type Job } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
-import { Proxy, publicUrl, serviceUrl, stackRoutes } from "./proxy.ts";
+import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { formatAmount, formatDuration } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
+/** Shutdown waits this long for Caddy to exit, then quits regardless. launchd's ExitTimeOut must be longer. */
+export const EXIT_DEADLINE_MS = STOP_WAIT_MS + 10_000;
 
 export class Daemon {
   store: Store;
@@ -34,6 +36,8 @@ export class Daemon {
   private configOnDisk = "";
   /** The last parse error announced, so one broken save doesn't repeat in the event log. */
   private configError = "";
+  /** The shutdown in progress, if any. */
+  private stopping: Promise<void> | null = null;
 
   constructor() {
     // Keep the text, not just the parsed config: the file watcher compares
@@ -71,13 +75,23 @@ export class Daemon {
     this.store.event("shutdown requested", null, "warn");
     setTimeout(() => {
       const done = (): never => process.exit(0);
-      setTimeout(done, 10_000).unref();
+      setTimeout(done, EXIT_DEADLINE_MS).unref();
       this.shutdown().then(done, done);
     }, 100);
   }
 
-  /** Stop polling and take the preview proxy down with us. Running jobs are re-queued on the next start. */
-  async shutdown(): Promise<void> {
+  /**
+   * Stop polling and take the preview proxy down with us, waiting until Caddy
+   * has exited. Running jobs are re-queued on the next start. Safe to call
+   * twice (a signal arriving during a page-requested shutdown): both wait on
+   * the same stop.
+   */
+  shutdown(): Promise<void> {
+    this.stopping ??= this.doShutdown();
+    return this.stopping;
+  }
+
+  private async doShutdown(): Promise<void> {
     if (this.pollTimer) clearTimeout(this.pollTimer);
     if (this.configTimer) clearTimeout(this.configTimer);
     this.configWatcher?.close();

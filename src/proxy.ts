@@ -19,6 +19,10 @@ import { run } from "./util.ts";
 const CADDY_DIR = join(HOME, "caddy");
 const CONTAINER = "pr-daemon-caddy";
 const IMAGE = "caddy:2";
+/** How long Caddy lets open connections (HMR websockets, …) finish when it stops or reloads. */
+const GRACE = "5s";
+/** How long shutdown waits for Caddy to exit. pr-daemon's own exit deadline (cli.ts) must be longer. */
+export const STOP_WAIT_MS = 15_000;
 
 // ---------------------------------------------------------------- wildcard certificate
 // With [preview] dns set, Caddy gets ONE certificate for *.<domain> through the
@@ -160,6 +164,9 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
     apps: {
       http: {
         http_port: p.httpPort, https_port: p.httpsPort,
+        // Without one Caddy waits forever for open connections, and a dev
+        // server's websocket would keep it from ever stopping.
+        grace_period: GRACE,
         // Caddy ≥ 2.10 serves hosts covered by a managed wildcard from it rather than getting their own.
         servers: { previews: { listen, routes, ...(p.tls === "off" ? { automatic_https: { disable: true } } : {}) } },
       },
@@ -233,8 +240,12 @@ export class Proxy {
     for (let i = 0; i < 20 && this.busy; i++) await new Promise((r) => setTimeout(r, 100));
     const managed = this.store.get("proxy:managed") as ProxyMode | undefined;
     if (!managed) return;
-    await this.stop(managed);
-    this.store.event(`preview proxy (${managed}) stopped: pr-daemon is shutting down`);
+    this.store.event(`stopping the preview proxy (${managed}): pr-daemon is shutting down`);
+    const started = Date.now();
+    const gone = await this.stop(managed);
+    const secs = ((Date.now() - started) / 1000).toFixed(1);
+    if (gone) this.store.event(`preview proxy (${managed}) stopped after ${secs}s`);
+    else this.store.event(`preview proxy (${managed}) still running after ${secs}s; the next start adopts it`, null, "warn");
   }
 
   private adminUrl(path: string): string {
@@ -364,13 +375,31 @@ export class Proxy {
     if (r.code !== 0) throw new Error(`docker run failed: ${r.stderr.trim().slice(-400)}`);
   }
 
-  async stop(mode: ProxyMode): Promise<void> {
-    if (mode === "docker") await run("docker", ["rm", "-f", CONTAINER]);
+  /** Stop Caddy and wait until it has exited (and released its ports). Returns false if it's still running. */
+  async stop(mode: ProxyMode): Promise<boolean> {
+    // Its pid, so we can wait for the process itself and not just its admin API.
+    const pid = mode === "binary" ? await this.pid() : 0;
+    const deadline = Date.now() + STOP_WAIT_MS;
+    if (mode === "docker") await run("docker", ["rm", "-f", CONTAINER], { timeoutMs: STOP_WAIT_MS });
     else { try { await this.admin("/stop", { method: "POST", signal: AbortSignal.timeout(3000) }); } catch { /* already gone */ } }
     this.store.set("proxy:managed", "");
     this.store.set("proxy:launched", "");
     this.lastHash = "";
-    // Wait for the ports to be released before anything starts again.
-    for (let i = 0; i < 20 && (await this.alive()); i++) await new Promise((r) => setTimeout(r, 250));
+    while (Date.now() < deadline) {
+      if (!(await this.alive()) && !(pid && running(pid))) return true;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
   }
+
+  /** The pid listening on the admin port (ours or an adopted Caddy), or 0. */
+  private async pid(): Promise<number> {
+    const r = await run("lsof", ["-nP", `-iTCP:${adminPort(this.cfg())}`, "-sTCP:LISTEN", "-t"], { timeoutMs: 5000 });
+    return Number(r.stdout.trim().split("\n")[0]) || 0;
+  }
+}
+
+function running(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
 }

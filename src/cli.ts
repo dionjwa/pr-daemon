@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
-import { Daemon } from "./daemon.ts";
+import { Daemon, EXIT_DEADLINE_MS } from "./daemon.ts";
 import { caddyHasDns, CHECK_BODY, CHECK_LABEL, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
 import type { JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
@@ -43,7 +43,7 @@ async function main(argv: string[]): Promise<void> {
           if (quitting) process.exit(1);
           quitting = true;
           const done = (): never => process.exit(0);
-          setTimeout(done, 10_000).unref();
+          setTimeout(done, EXIT_DEADLINE_MS).unref();
           d.shutdown().then(done, done);
         });
       }
@@ -123,9 +123,9 @@ async function stop(): Promise<void> {
 
 const stopped = () => "Stopped. Preview stacks keep running; Caddy stopped with it. Start again: pr-daemon serve (or just start).";
 
-/** Wait up to 10s for the port to go quiet. */
+/** Wait for the port to go quiet: as long as a clean shutdown (which waits for Caddy) can take. */
 async function gone(port: number): Promise<boolean> {
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < EXIT_DEADLINE_MS / 250; i++) {
     if (!(await alive(port))) return true;
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -206,7 +206,16 @@ async function wildcardChecks(ok: (good: boolean, what: string, fix?: string) =>
     const r = await run("curl", ["-sS", "-m", "15", "-H", "@-", `https://api.cloudflare.com/client/v4${path}`], { input: `Authorization: Bearer ${token}\n` });
     try { return JSON.parse(r.stdout); } catch { return { success: false, errors: [{ message: r.stderr.trim() || r.stdout.trim() }] }; }
   };
-  const v = await api("/user/tokens/verify");
+  // A user-owned token verifies at /user/tokens/verify; an account-owned one
+  // (`cfat_…`) is "Invalid API Token" there and verifies under its account.
+  let v = await api("/user/tokens/verify");
+  if (!v.success) {
+    const accounts = await api("/accounts");
+    for (const a of accounts.success ? accounts.result ?? [] : []) {
+      const av = await api(`/accounts/${a.id}/tokens/verify`);
+      if (av.success) { v = av; break; }
+    }
+  }
   ok(v.success && v.result?.status === "active", `${provider} accepts the token`, v.errors?.[0]?.message ?? "the token was rejected");
   if (!v.success) return;
   // The zone is the domain or one of its parents (home.example.com → example.com).
@@ -267,6 +276,7 @@ async function installService(): Promise<void> {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>AbandonProcessGroup</key><true/>
+  <key>ExitTimeOut</key><integer>${EXIT_DEADLINE_MS / 1000 + 5}</integer>
   <key>StandardOutPath</key><string>${xml(logFile)}</string>
   <key>StandardErrorPath</key><string>${xml(logFile)}</string>
 </dict></plist>
