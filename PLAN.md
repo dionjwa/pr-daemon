@@ -51,9 +51,11 @@ stacks, and serves a status and config page on localhost.
 - [x] Rewrite as a single TypeScript process: watcher, queue, scheduler, budget, agent supervisor
 - [x] SQLite store (`node:sqlite`, no native modules), status page and config editor
 - [x] Unit tests: amounts, durations, templates, config validation, budget window maths
-- [ ] Dogfood: framejs.app #99 through `pr-demon serve`
-- [ ] Prove a budget pause and resume, and a `/demon` revise, on a real issue
-- [ ] `install-service`: confirm `claude` is logged in under launchd
+- [x] Dogfood: framejs.app #99 → PR #100 through `pr-demon serve` (build, check, PR, fresh review `VERDICT: ok`)
+- [x] Resume after a failure (the same Claude session continued, then pushed and opened the PR)
+- [x] `/demon` revise, paused mid-run by the per-issue cap, resumed in the same session after the cap was raised
+- [x] `install-service`: `claude` works under launchd (no token needed); preview stacks survive pr-demon restarting
+- [ ] Teardown on a real PR merge or close (manual teardown verified on #96)
 
 ### Phase 2: reachable from the internet
 

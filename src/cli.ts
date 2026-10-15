@@ -29,6 +29,8 @@ async function main(argv: string[]): Promise<void> {
   switch (cmd) {
     case "serve": {
       const d = new Daemon();
+      // A stray GitHub/network error must never take the whole process down.
+      process.on("unhandledRejection", (e) => d.store.event(`unexpected error: ${(e as Error)?.message ?? e}`, null, "error"));
       serve(d);
       d.start();
       return new Promise(() => {}); // run forever

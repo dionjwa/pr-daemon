@@ -150,6 +150,11 @@ export class Daemon {
       && j.kind !== "teardown" && (j.branch === branch || (j.kind === "build" && j.number === issue)));
   }
 
+  /** The issue a job is about: builds carry it; review/revise carry the PR, whose branch starts with it. */
+  private issueOf(job: Job): number {
+    return job.kind === "review" || job.kind === "revise" ? Number(job.branch.split("-")[0]) || job.number : job.number;
+  }
+
   // ------------------------------------------------------------ scheduling
   private lockKey(j: Job): string {
     return `${j.repo}:${j.branch || this.store.stackForIssue(j.repo, j.number)?.branch || `#${j.number}`}`;
@@ -171,8 +176,7 @@ export class Daemon {
       const lock = this.lockKey(job);
       if (locks.has(lock)) continue;
       if (isAgent) {
-        const issue = job.kind === "build" ? job.number : Number(job.branch.split("-")[0]) || job.number;
-        const g = gate(this.store, this.cfg, job.repo, issue);
+        const g = gate(this.store, this.cfg, job.repo, this.issueOf(job));
         if (!g.ok) {
           if (job.reason !== g.reason) this.store.update(job.id, { reason: g.reason });
           if (g.needsHuman && job.state !== "paused") this.store.update(job.id, { state: "paused", resume_after: null });
@@ -206,17 +210,19 @@ export class Daemon {
     this.store.event(`started ${job.kind} ${job.repo}#${job.number}`, job.id);
 
     return RUNNERS[job.kind](ctx)
-      .then(() => {
+      .then(async () => {
         this.store.update(job.id, { state: "done", finished_at: Date.now() });
+        // A review/revise that was paused set the issue to agent:paused; put it back.
+        if (job.kind === "review" || job.kind === "revise") await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "in-review").catch(() => {});
         this.store.event(`finished ${job.kind} ${job.repo}#${job.number}`, job.id);
       })
       .catch(async (e: Error) => {
         if (e instanceof PauseError) {
           this.store.update(job.id, { state: "paused", reason: e.message, resume_after: e.retryAt });
-          const when = e.retryAt ? `resumes in ~${formatDuration(e.retryAt - Date.now())}` : "resume it from the status page";
-          this.store.event(`paused: ${e.message}; ${when}`, job.id, "warn");
-          if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "paused");
-          await gh.comment(job.repo, job.number, `⏸️ **pr-demon** paused: ${e.message}. It ${when}.`);
+          const when = e.retryAt ? `It resumes on its own in about ${formatDuration(e.retryAt - Date.now())}.` : `Press Resume on the status page when you're ready: ${this.statusUrl(job.id)}`;
+          this.store.event(`paused: ${e.message}`, job.id, "warn");
+          await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "paused").catch(() => {});
+          await gh.comment(job.repo, job.number, `⏸️ **pr-demon** paused: ${e.message}. ${when}`);
         } else if (e instanceof CancelError || ctx.cancelled) {
           this.store.update(job.id, { state: "cancelled", finished_at: Date.now() });
           this.store.event("cancelled", job.id, "warn");
@@ -227,7 +233,7 @@ export class Daemon {
           this.store.update(job.id, { state: "failed", reason: e.message.slice(0, 2000), finished_at: Date.now() });
           this.store.event(`error: ${e.message.slice(0, 500)}`, job.id, "error");
           if (AGENT_KINDS.includes(job.kind)) {
-            if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "failed");
+            if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
             await gh.comment(job.repo, job.number, `❌ **pr-demon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-demon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
           }
         }

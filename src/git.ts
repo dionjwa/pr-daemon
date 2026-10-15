@@ -83,7 +83,15 @@ export async function commitsAhead(wt: string, base: string): Promise<number> {
 }
 
 export async function push(wt: string, branch: string): Promise<void> {
-  await git(wt, "push", "-q", "-u", "origin", branch);
+  const r = await run("git", ["-C", wt, "push", "-q", "-u", "origin", branch]);
+  if (r.code === 0) return;
+  if (/without `?workflow`? scope/.test(r.stderr)) {
+    // gh's default login can't push changes under .github/workflows. That's a
+    // useful guard (the agent can't rewrite CI), so say so instead of a raw git error.
+    throw new Error(`GitHub refused the push because the branch changes .github/workflows/ and your gh login lacks the "workflow" scope. ` +
+      `Either undo the workflow change on ${branch}, or allow it with: gh auth refresh -s workflow`);
+  }
+  throw new Error(`git push failed: ${r.stderr.trim().slice(-800)}`);
 }
 
 export async function removeWorktree(repo: string, wt: string, branch: string): Promise<void> {
