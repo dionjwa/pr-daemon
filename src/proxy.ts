@@ -1,12 +1,12 @@
 // Public preview URLs: https://<branch>.<domain> → that branch's local stack.
 //
-// pr-demon owns one Caddy (the `caddy` binary, or a Docker container) and
+// pr-daemon owns one Caddy (the `caddy` binary, or a Docker container) and
 // keeps its routes equal to the stacks table. Every few seconds it rebuilds
 // the whole Caddy config from the stacks and loads it through Caddy's admin
 // API when it changed: no incremental state to drift. Caddy handles TLS
 // (Let's Encrypt per branch host, or its own local CA for testing).
 //
-// You route the domain to this machine (DNS + port forwards); pr-demon does
+// You route the domain to this machine (DNS + port forwards); pr-daemon does
 // the rest.
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -17,7 +17,7 @@ import type { Stack, Store } from "./db.ts";
 import { run } from "./util.ts";
 
 const CADDY_DIR = join(HOME, "caddy");
-const CONTAINER = "pr-demon-caddy";
+const CONTAINER = "pr-daemon-caddy";
 const IMAGE = "caddy:2";
 
 export type ProxyMode = "binary" | "docker";
@@ -63,7 +63,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
     routes.push({ match: [{ host: [`${hostLabel(s.branch)}.${p.domain}`] }], handle: [handler], terminal: true });
   }
   // Anything else on the domain: a plain 404 instead of a connection error.
-  routes.push({ handle: [{ handler: "static_response", status_code: 404, body: "pr-demon: no preview is running for this address.\n" }] });
+  routes.push({ handle: [{ handler: "static_response", status_code: 404, body: "pr-daemon: no preview is running for this address.\n" }] });
 
   const listen = p.tls === "off" ? [`:${p.httpPort}`] : [`:${p.httpsPort}`];
   const tls: Record<string, unknown> = {};
@@ -72,7 +72,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
 
   return {
     // Inside Docker the admin API must listen on all interfaces (it's published
-    // to 127.0.0.1 only). pr-demon always sends Origin = the admin address.
+    // to 127.0.0.1 only). pr-daemon always sends Origin = the admin address.
     admin: { listen: mode === "docker" ? `0.0.0.0:${adminPort(cfg)}` : p.admin, origins: [p.admin] },
     ...(mode === "binary" ? { storage: { module: "file_system", root: join(CADDY_DIR, "data") } } : {}),
     apps: {
@@ -106,13 +106,32 @@ export class Proxy {
   private child: ChildProcess | null = null;
   private lastHash = "";
   private busy = false;
+  private timer: NodeJS.Timeout | null = null;
+  private stopped = false;
   status: ProxyStatus = { enabled: false, mode: null, running: false, routes: 0, error: "", domain: "" };
 
   constructor(store: Store, cfg: () => Config) { this.store = store; this.cfg = cfg; }
 
   start(): void {
     void this.tick();
-    setInterval(() => void this.tick(), 5000).unref?.();
+    this.timer = setInterval(() => void this.tick(), 5000);
+    this.timer.unref?.();
+  }
+
+  /**
+   * Stop the Caddy we manage and don't start another: previews die with
+   * pr-daemon. (Preview stacks are separate; they keep running.) Called on
+   * SIGINT/SIGTERM, so a `launchctl kickstart` restart means a few seconds
+   * of downtime on the preview URLs while the new process starts Caddy again.
+   */
+  async shutdown(): Promise<void> {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    for (let i = 0; i < 20 && this.busy; i++) await new Promise((r) => setTimeout(r, 100));
+    const managed = this.store.get("proxy:managed") as ProxyMode | undefined;
+    if (!managed) return;
+    await this.stop(managed);
+    this.store.event(`preview proxy (${managed}) stopped: pr-daemon is shutting down`);
   }
 
   private adminUrl(path: string): string {
@@ -140,7 +159,7 @@ export class Proxy {
 
   /** Keep Caddy running (or stopped) and its routes equal to the stacks table. */
   async tick(): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.stopped) return;
     this.busy = true;
     try {
       const cfg = this.cfg();
@@ -200,8 +219,10 @@ export class Proxy {
     const cfg = this.cfg().preview;
     if (mode === "binary") {
       const log = join(CADDY_DIR, "caddy.log");
-      // Its own process group, so it outlives a pr-demon restart; the next
-      // pr-demon finds it answering on the admin port and adopts it.
+      // Its own process group, so a Ctrl-C or a signal to pr-daemon doesn't
+      // kill it mid-request: shutdown() asks it to stop through the admin API
+      // instead. If pr-daemon dies without that (SIGKILL, a crash), Caddy
+      // keeps serving and the next pr-daemon adopts it on the admin port.
       this.child = spawn("bash", ["-c", `exec caddy run --config "${join(CADDY_DIR, "caddy.json")}" >> "${log}" 2>&1`],
         { detached: true, stdio: "ignore", env: { ...process.env, XDG_DATA_HOME: join(CADDY_DIR, "data") } });
       this.child.unref();
@@ -213,8 +234,8 @@ export class Proxy {
     const r = await run("docker", ["run", "-d", "--name", CONTAINER, "--restart", "unless-stopped",
       "--add-host", "host.docker.internal:host-gateway",
       ...ports.flatMap((p) => ["-p", `${p}:${p}`]), "-p", `127.0.0.1:${port}:${port}`,
-      "-v", `${CADDY_DIR}:/etc/pr-demon:ro`, "-v", "pr-demon-caddy-data:/data",
-      IMAGE, "caddy", "run", "--config", "/etc/pr-demon/caddy.json"], { timeoutMs: 180_000 });
+      "-v", `${CADDY_DIR}:/etc/pr-daemon:ro`, "-v", "pr-daemon-caddy-data:/data",
+      IMAGE, "caddy", "run", "--config", "/etc/pr-daemon/caddy.json"], { timeoutMs: 180_000 });
     if (r.code !== 0) throw new Error(`docker run failed: ${r.stderr.trim().slice(-400)}`);
   }
 

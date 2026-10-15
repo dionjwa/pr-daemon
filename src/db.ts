@@ -46,7 +46,7 @@ export interface Stack {
 export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, revise: 2, review: 3, build: 4 };
 export const AGENT_KINDS: JobKind[] = ["build", "review", "revise"];
 
-export function openDb(path = join(HOME, "pr-demon.db")): DatabaseSync {
+export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
   mkdirSync(HOME, { recursive: true });
   const db = new DatabaseSync(path);
   db.exec(`
@@ -100,7 +100,7 @@ export class Store {
   // ---------- events ----------
   event(message: string, jobId: number | null = null, level: "info" | "warn" | "error" = "info"): void {
     this.db.prepare("INSERT INTO events(at, job_id, level, message) VALUES(?, ?, ?, ?)").run(Date.now(), jobId, level, message);
-    process.stderr.write(`[pr-demon] ${jobId ? `#job${jobId} ` : ""}${message}\n`);
+    process.stderr.write(`[pr-daemon] ${jobId ? `#job${jobId} ` : ""}${message}\n`);
   }
   events(limit = 100): unknown[] {
     return this.db.prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?").all(limit);

@@ -1,4 +1,4 @@
-// Configuration: one TOML file (default ~/.pr-demon/config.toml).
+// Configuration: one TOML file (default ~/.pr-daemon/config.toml).
 // The web page edits the raw text, so comments survive; every save is parsed
 // and validated first, and a bad file is never written.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -7,8 +7,8 @@ import { dirname, join } from "node:path";
 import { parse } from "smol-toml";
 import { parseAmount, parseDuration } from "./util.ts";
 
-export const HOME = process.env.PR_DEMON_HOME ?? join(homedir(), ".pr-demon");
-export const CONFIG_PATH = process.env.PR_DEMON_CONFIG ?? join(HOME, "config.toml");
+export const HOME = process.env.PR_DAEMON_HOME ?? join(homedir(), ".pr-daemon");
+export const CONFIG_PATH = process.env.PR_DAEMON_CONFIG ?? join(HOME, "config.toml");
 
 export interface RepoConfig {
   name: string;          // owner/repo
@@ -59,15 +59,28 @@ export interface Config {
   repos: RepoConfig[];
 }
 
-export const DEFAULT_TOML = `# pr-demon configuration.
+export const DEFAULT_TOML = `# pr-daemon configuration.
 # Edit here or in the web page (http://localhost:7377 → Config). Saved as-is.
+#
+# Everything pr-daemon keeps is under ~/.pr-daemon (or $PR_DAEMON_HOME), and
+# it's all ordinary files you can open and inspect:
+#
+#   repos/<org>__<repo>/               the cached clone of each repo (fetched once, reused)
+#   worktrees/<org>__<repo>/<branch>/  the checkout an agent works in, one per
+#                                      branch; up, down and check run from here
+#   out/<org>__<repo>/<branch>/        prompts, agent logs (*.jsonl), PR text, screenshots
+#   pr-daemon.db                       jobs, token ledger, stacks, events (SQLite)
+#   pr-daemon.log                      the service log
+#   caddy/                             generated Caddy config and certificates
+#
+# "just where" prints that with the branches checked out right now.
 
 port = 7377              # status page: http://localhost:<port> (localhost only)
 poll = "60s"             # how often to check GitHub
 label = "agent"          # add this label to an issue to start a build
-allowed_users = []       # who may trigger builds and /demon; [] = only you (the gh user)
+allowed_users = []       # who may trigger builds and /pr-daemon; [] = only you (the gh user)
 concurrency = 1          # agent runs at the same time
-prevent_sleep = true     # macOS: keep the machine awake while pr-demon runs
+prevent_sleep = true     # macOS: keep the machine awake while pr-daemon runs
 
 [budget]
 window = "5h"            # rolling window, e.g. one Claude subscription window
@@ -89,7 +102,7 @@ auto_restart = true      # restart a preview stack that stopped answering
 [preview]
 # Public preview URLs: https://<branch>.<domain>, e.g. https://42-dark-mode.preview.example.com
 # You point *.<domain> at this machine (DNS + port forwards for 80 and 443);
-# pr-demon runs Caddy and routes each branch's host to its local stack.
+# pr-daemon runs Caddy and routes each branch's host to its local stack.
 # domain = "preview.example.com"   # unset = local URLs only, no proxy
 proxy = "auto"           # auto (caddy binary if installed, else Docker) | binary | docker | off
 tls = "auto"             # auto = Let's Encrypt per branch host (needs 80+443 reachable) | internal = Caddy's own CA (testing) | off = plain http
@@ -99,16 +112,58 @@ https_port = 443
 # public_port = 443                # the port people use, if you forward e.g. 443 → 8443
 admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
 
-# One block per repository. Commands run from the root of the branch's worktree.
+# ============================================================================
+# REPOSITORIES to watch. This is the only part you have to fill in.
+#
+# Each repo is one [[repos]] block. The DOUBLE brackets mean "another item in
+# the list", so to watch more repos, repeat the whole block. Uncomment the two
+# lines below (delete the "# ") to start with one:
+
 # [[repos]]
 # name = "your-org/your-repo"
-# base = ""                       # unset = the repo's default branch
-# up = "just pr-demon-up"         # start the stack in the background; print its URL last
-# down = "just pr-demon-down"     # stop it and delete its data
-# check = "just pr-demon-check"   # must pass before a PR opens; "" = trust the agent
-# proxy_host = "public"           # Host header the app gets via the preview URL: "public" (the
-#                                 # branch's public host) or "upstream" (its local host, for
-#                                 # dev servers that reject unknown hosts)
+
+# Three repos, with nothing but the defaults, look like this:
+#
+#   [[repos]]
+#   name = "your-org/api"
+#
+#   [[repos]]
+#   name = "your-org/website"
+#
+#   [[repos]]
+#   name = "someone-else/their-repo"
+#
+# Order doesn't matter, and blank lines between blocks are fine.
+#
+# Everything except "name" is optional: leave a line out to get the default
+# shown below. A block runs until the next [[repos]], so a repo's own settings
+# go directly under its "name" — never after the next block's brackets:
+#
+#   [[repos]]
+#   name = "your-org/api"
+#   check = "just test"             # belongs to your-org/api
+#
+#   [[repos]]
+#   name = "your-org/website"
+#   check = ""                      # belongs to your-org/website
+#
+# The settings, with their defaults.
+#
+# up, down and check are ANY shell command: each is run with bash -lc from the
+# root of the branch's worktree. "npm run preview", "docker compose up -d
+# --wait && echo http://localhost:3000", "make up", "./scripts/up.sh" — all
+# fine. The defaults name just recipes only by convention.
+#
+# What a project's commands have to do (hand this to an agent):
+#   pr-daemon setup      or      http://localhost:7377/setup
+#
+#   base = ""                       # branch to build from; unset = the repo's default branch
+#   up = "just pr-daemon-up"        # start the stack in the background; print its URL last
+#   down = "just pr-daemon-down"    # stop it and delete its data
+#   check = "just pr-daemon-check"  # must pass before a PR opens; "" = trust the agent
+#   proxy_host = "public"           # Host header the app gets via the preview URL: "public" (the
+#                                   # branch's public host) or "upstream" (its local host, for
+#                                   # dev servers that reject unknown hosts)
 `;
 
 type Raw = Record<string, unknown>;
@@ -138,6 +193,13 @@ function amount(v: unknown, name: string): number | null {
   catch (e) { throw new Error(`${name}: ${(e as Error).message}`); }
 }
 
+/** Shown in errors: the shape of the repos list, for people who don't write TOML. */
+const REPOS_EXAMPLE = `  [[repos]]
+  name = "your-org/api"
+
+  [[repos]]
+  name = "your-org/website"`;
+
 /** Parse + validate TOML text. Throws a readable error on any problem. */
 export function parseConfig(text: string): Config {
   let raw: Raw;
@@ -145,7 +207,7 @@ export function parseConfig(text: string): Config {
   catch (e) { throw new Error(`TOML syntax: ${(e as Error).message}`); }
   const b = (raw.budget ?? {}) as Raw, a = (raw.agent ?? {}) as Raw, st = (raw.stacks ?? {}) as Raw, pv = (raw.preview ?? {}) as Raw;
   const repos = (raw.repos ?? []) as Raw[];
-  if (!Array.isArray(repos)) throw new Error("repos must be a list of [[repos]] blocks");
+  if (!Array.isArray(repos)) throw new Error(`repos needs DOUBLE brackets, one block per repository:\n\n${REPOS_EXAMPLE}`);
   const users = raw.allowed_users ?? [];
   if (!Array.isArray(users) || users.some((u) => typeof u !== "string")) throw new Error("allowed_users must be a list of GitHub usernames");
 
@@ -184,15 +246,19 @@ export function parseConfig(text: string): Config {
       admin: str(pv.admin, "127.0.0.1:2019"),
     },
     repos: repos.map((r, i) => {
+      const at = `[[repos]] block #${i + 1}`;
+      if (typeof r !== "object" || r === null || Array.isArray(r)) throw new Error(`${at} must be a block of settings, not a bare value:\n\n${REPOS_EXAMPLE}`);
       const name = str(r.name, "");
-      if (!/^[\w.-]+\/[\w.-]+$/.test(name)) throw new Error(`repos[${i}].name must be "owner/repo"`);
+      if (!name) throw new Error(`${at} has no name: add name = "owner/repo" under it`);
+      if (name === "your-org/your-repo") throw new Error(`${at}: replace the example name "your-org/your-repo" with your own repository`);
+      if (!/^[\w.-]+\/[\w.-]+$/.test(name)) throw new Error(`${at}: name "${name}" must be "owner/repo", the two parts of its GitHub address`);
       return {
         name,
         base: str(r.base, ""),
-        up: str(r.up, "just pr-demon-up"),
-        down: str(r.down, "just pr-demon-down"),
-        check: str(r.check, "just pr-demon-check"),
-        proxyHost: oneOf(r.proxy_host, ["public", "upstream"], "public", `repos[${i}].proxy_host`),
+        up: str(r.up, "just pr-daemon-up"),
+        down: str(r.down, "just pr-daemon-down"),
+        check: str(r.check, "just pr-daemon-check"),
+        proxyHost: oneOf(r.proxy_host, ["public", "upstream"], "public", `${at}: proxy_host`),
       };
     }),
   };
@@ -201,7 +267,8 @@ export function parseConfig(text: string): Config {
   }
   if (!/^[\w.[\]:-]+:\d+$/.test(cfg.preview.admin)) throw new Error('preview.admin must be host:port, e.g. "127.0.0.1:2019"');
   if (cfg.pollMs < 10_000) throw new Error("poll must be at least 10s (GitHub rate limits)");
-  if (new Set(cfg.repos.map((r) => r.name)).size !== cfg.repos.length) throw new Error("a repo is listed twice");
+  const dup = cfg.repos.map((r) => r.name).find((n, i, all) => all.indexOf(n) !== i);
+  if (dup) throw new Error(`${dup} has two [[repos]] blocks: keep one, with all of its settings under it`);
   return cfg;
 }
 

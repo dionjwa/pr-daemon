@@ -126,7 +126,7 @@ export async function build(ctx: Ctx): Promise<void> {
   mkdirSync(join(out, "screenshots"), { recursive: true });
 
   await gh.setStatus(repo.name, n, cfg.label, "working");
-  if (!resuming) await gh.comment(repo.name, n, `🛠️ **pr-demon** is on it.\n- branch: \`${branch}\`\n- status: ${ctx.statusUrl} (on the pr-demon machine)`);
+  if (!resuming) await gh.comment(repo.name, n, `🛠️ **pr-daemon** is on it.\n- branch: \`${branch}\`\n- status: ${ctx.statusUrl} (on the pr-daemon machine)`);
 
   // Stack first. If it won't start, the agent's first job is to fix that.
   const pub = publicUrl(cfg, branch);
@@ -146,7 +146,7 @@ export async function build(ctx: Ctx): Promise<void> {
   // Build → check → fix, until the project's own check passes. Fix rounds
   // resume the same session: the agent keeps its context (and the cache).
   let summary = await agentStep(ctx, resuming
-    ? { prompt: "pr-demon paused you (token budget or a restart). Continue the task from where you left off.", log: join(out, "agent-build.jsonl"), resume: job.session_id, issue: n }
+    ? { prompt: "pr-daemon paused you (token budget or a restart). Continue the task from where you left off.", log: join(out, "agent-build.jsonl"), resume: job.session_id, issue: n }
     : { prompt: readFileSync(join(out, "prompt-build.md"), "utf8"), log: join(out, "agent-build.jsonl"), issue: n });
 
   let result = await stack.check(repo.check, wt);
@@ -164,13 +164,13 @@ export async function build(ctx: Ctx): Promise<void> {
   if (untracked.length) store.event(`left untracked (not committed): ${untracked.join(" ")}`, job.id, "warn");
   if ((await git.commitsAhead(wt, base)) === 0) {
     await gh.setStatus(repo.name, n, cfg.label, "failed");
-    await gh.comment(repo.name, n, `😶 **pr-demon** finished without making any commits.\n\n<details><summary>agent summary</summary>\n\n${summary}\n</details>`);
+    await gh.comment(repo.name, n, `😶 **pr-daemon** finished without making any commits.\n\n<details><summary>agent summary</summary>\n\n${summary}\n</details>`);
     throw new FailError("no commits");
   }
   await git.push(wt, branch);
   if (!result.ok) {
     await gh.setStatus(repo.name, n, cfg.label, "failed");
-    await gh.comment(repo.name, n, `❌ **pr-demon** pushed \`${branch}\` but \`${repo.check}\` still fails after ${cfg.agent.maxAttempts} round(s). No PR opened.\n\`\`\`\n${result.output}\n\`\`\``);
+    await gh.comment(repo.name, n, `❌ **pr-daemon** pushed \`${branch}\` but \`${repo.check}\` still fails after ${cfg.agent.maxAttempts} round(s). No PR opened.\n\`\`\`\n${result.output}\n\`\`\``);
     throw new FailError("check still failing");
   }
 
@@ -178,7 +178,7 @@ export async function build(ctx: Ctx): Promise<void> {
   store.update(job.id, { pr: prNumber });
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, pr: prNumber, builder_session: store.job(job.id)!.session_id });
   await gh.setStatus(repo.name, n, cfg.label, "in-review");
-  await gh.comment(repo.name, n, `✅ **pr-demon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
+  await gh.comment(repo.name, n, `✅ **pr-daemon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
   store.enqueue({ repo: repo.name, kind: "review", number: prNumber, branch, trigger_key: `review:${repo.name}#${prNumber}:job${job.id}` });
 }
 
@@ -192,13 +192,13 @@ async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string;
 
 ## Try it
 
-${o.pub ? `- **Preview:** ${o.pub}\n- Local: ${o.url || "_not running_"} (on the pr-demon machine)` : `- **Preview:** ${o.url || "_not running_"} (on the pr-demon machine)`}
-- Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/demon\`
+${o.pub ? `- **Preview:** ${o.pub}\n- Local: ${o.url || "_not running_"} (on the pr-daemon machine)` : `- **Preview:** ${o.url || "_not running_"} (on the pr-daemon machine)`}
+- Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/pr-daemon\`
 ${shots ? `\n## Screenshots\n\n${shots}` : ""}
 Closes #${o.n}
 
 ---
-<sub>🤖 Built by [pr-demon](https://github.com/metapages/pr-demon) · ${(tokens / 1e6).toFixed(2)}M tokens. A human must approve before merge.</sub>`;
+<sub>🤖 Built by [pr-daemon](https://github.com/metapages/pr-daemon) · ${(tokens / 1e6).toFixed(2)}M tokens. A human must approve before merge.</sub>`;
   writeFileSync(join(o.out, "pr-final.md"), body);
   const existing = await gh.openPrForBranch(repo.name, o.branch);
   if (existing) { await gh.editPr(repo.name, existing, { title, bodyFile: join(o.out, "pr-final.md") }); return existing; }
@@ -226,7 +226,7 @@ export async function review(ctx: Ctx): Promise<void> {
   const out = join(git.outDir(repo.name, branch), `review-${job.id}`);
   mkdirSync(out, { recursive: true });
   const text = job.session_id
-    ? "pr-demon paused you. Continue the review from where you left off."
+    ? "pr-daemon paused you. Continue the review from where you left off."
     : prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)" });
   await agentStep(ctx, { prompt: text, log: join(out, "agent.jsonl"), resume: job.session_id || undefined, issue: n });
   const file = join(out, "review.md");
@@ -264,14 +264,14 @@ export async function revise(ctx: Ctx): Promise<void> {
     FEEDBACK: payload(job).feedback ?? "", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
-    ? { prompt: "pr-demon paused you. Continue addressing the feedback from where you left off.", log: join(out, `agent-revise-${job.id}.jsonl`), resume: job.session_id, issue: n }
+    ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: join(out, `agent-revise-${job.id}.jsonl`), resume: job.session_id, issue: n }
     : { prompt: text, log: join(out, `agent-revise-${job.id}.jsonl`), resume: builder || undefined, issue: n });
 
   await git.commitLeftovers(wt);
   const result = await stack.check(repo.check, wt);
   await git.push(wt, branch);
   const shots = await uploadShots(ctx, branch, out);
-  await gh.comment(repo.name, job.number, `🔁 **pr-demon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
+  await gh.comment(repo.name, job.number, `🔁 **pr-daemon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
 
 ${summary}
 ${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`);

@@ -1,4 +1,4 @@
-// pr-demon command line.
+// pr-daemon command line.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,23 +6,25 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
 import { Daemon } from "./daemon.ts";
 import type { JobKind } from "./db.ts";
+import { setupDoc } from "./setup.ts";
 import { run } from "./util.ts";
 import { serve } from "./web.ts";
 
-const HELP = `pr-demon — label an issue, get a pull request.
+const HELP = `pr-daemon — label an issue, get a pull request.
 
-  pr-demon serve                         run the process: poll GitHub, run agents, serve the status page
-  pr-demon status                        what's running, queued and paused
-  pr-demon doctor                        check tools, logins and config
-  pr-demon run <kind> <owner/repo> <n> [feedback]
+  pr-daemon serve                         run the process: poll GitHub, run agents, serve the status page
+  pr-daemon status                        what's running, queued and paused
+  pr-daemon doctor                        check tools, logins and config
+  pr-daemon setup                         print what a project must do to take part (also at /setup)
+  pr-daemon run <kind> <owner/repo> <n> [feedback]
                                          run one job now, in this terminal (kind: build|review|revise|teardown|restart)
-  pr-demon install-service               start pr-demon at login (macOS launchd / Linux systemd --user)
-  pr-demon uninstall-service
+  pr-daemon install-service               start pr-daemon at login (macOS launchd / Linux systemd --user)
+  pr-daemon uninstall-service
 
 Config: ${CONFIG_PATH}   (also editable on the status page)`;
 
 const SRC = dirname(fileURLToPath(import.meta.url));
-const LABEL = "pr-demon";
+const LABEL = "pr-daemon";
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...args] = argv;
@@ -31,15 +33,28 @@ async function main(argv: string[]): Promise<void> {
       const d = new Daemon();
       // A stray GitHub/network error must never take the whole process down.
       process.on("unhandledRejection", (e) => d.store.event(`unexpected error: ${(e as Error)?.message ?? e}`, null, "error"));
+      // Ctrl-C, launchctl/systemctl stop: take Caddy down with us, but never
+      // hang (launchd SIGKILLs a process that ignores SIGTERM for too long).
+      let quitting = false;
+      for (const sig of ["SIGINT", "SIGTERM"] as const) {
+        process.on(sig, () => {
+          if (quitting) process.exit(1);
+          quitting = true;
+          const done = (): never => process.exit(0);
+          setTimeout(done, 10_000).unref();
+          d.shutdown().then(done, done);
+        });
+      }
       serve(d);
       d.start();
       return new Promise(() => {}); // run forever
     }
     case "status": return status();
     case "doctor": return doctor();
+    case "setup": console.log(setupDoc(loadConfig(), "/pr-daemon")); return;
     case "run": {
       const [kind, repo, n, ...rest] = args;
-      if (!["build", "review", "revise", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-demon run <kind> <owner/repo> <number> [feedback]");
+      if (!["build", "review", "revise", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
       const d = new Daemon();
       const id = d.store.enqueue({ repo, kind: kind as JobKind, number: Number(n), trigger_key: `manual:${repo}#${n}:${kind}:${Date.now()}`,
         payload: rest.length ? { feedback: rest.join(" ") } : {} });
@@ -59,7 +74,7 @@ async function status(): Promise<void> {
   const cfg = loadConfig();
   let s: any;
   try { s = await (await fetch(`http://localhost:${cfg.port}/api/status`)).json(); }
-  catch { console.log(`pr-demon isn't running (start it: pr-demon serve, or pr-demon install-service)`); return; }
+  catch { console.log(`pr-daemon isn't running (start it: pr-daemon serve, or pr-daemon install-service)`); return; }
   console.log(`${s.paused ? "PAUSED" : "running"} · budget ${s.budget.usedText} / ${s.budget.limitText} in last ${s.budget.window} · http://localhost:${cfg.port}`);
   for (const j of s.jobs.filter((x: any) => ["running", "queued", "paused"].includes(x.state)))
     console.log(`  ${j.state.padEnd(8)} ${j.kind.padEnd(8)} ${j.repo}#${j.number}  ${j.tokensText}  ${j.reason}`);
@@ -79,7 +94,8 @@ async function doctor(): Promise<void> {
   try {
     const cfg = loadConfig();
     ok(true, `config is valid (${CONFIG_PATH})`);
-    ok(cfg.repos.length > 0, `${cfg.repos.length} repo(s) configured`, `add a [[repos]] block to ${CONFIG_PATH}`);
+    ok(cfg.repos.length > 0, cfg.repos.length ? `${cfg.repos.length} repo(s) configured: ${cfg.repos.map((r) => r.name).join(", ")}` : "no repositories configured yet",
+      `add one block per repo to ${CONFIG_PATH} (the double brackets make it a list):\n\n      [[repos]]\n      name = "your-org/your-repo"\n`);
     for (const r of cfg.repos) {
       const v = await run("gh", ["api", `repos/${r.name}`, "--jq", ".permissions.push"]);
       ok(v.stdout.trim() === "true", `you can push to ${r.name}`);
@@ -109,9 +125,9 @@ const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 async function installService(): Promise<void> {
   mkdirSync(HOME, { recursive: true });
   const args = [process.execPath, "--no-warnings=ExperimentalWarning", join(SRC, "cli.ts"), "serve"];
-  const logFile = join(HOME, "pr-demon.log");
+  const logFile = join(HOME, "pr-daemon.log");
   if (process.platform === "darwin") {
-    // AbandonProcessGroup: preview stacks started by pr-demon survive it restarting.
+    // AbandonProcessGroup: preview stacks started by pr-daemon survive it restarting.
     writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -135,7 +151,7 @@ async function installService(): Promise<void> {
     console.log(`Installed and started. Logs: ${logFile}\nStatus page: http://localhost:${loadConfig().port}`);
   } else {
     mkdirSync(dirname(unitPath), { recursive: true });
-    writeFileSync(unitPath, `[Unit]\nDescription=pr-demon\n\n[Service]\nExecStart=${args.join(" ")}\nEnvironment=PATH=${process.env.PATH}\nRestart=always\nKillMode=process\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`);
+    writeFileSync(unitPath, `[Unit]\nDescription=pr-daemon\n\n[Service]\nExecStart=${args.join(" ")}\nEnvironment=PATH=${process.env.PATH}\nRestart=always\nKillMode=process\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`);
     await run("systemctl", ["--user", "daemon-reload"]);
     const r = await run("systemctl", ["--user", "enable", "--now", LABEL]);
     if (r.code !== 0) throw new Error(`systemctl failed: ${r.stderr}`);
@@ -151,7 +167,7 @@ async function uninstallService(): Promise<void> {
     await run("systemctl", ["--user", "disable", "--now", LABEL]);
     if (existsSync(unitPath)) (await import("node:fs")).rmSync(unitPath);
   }
-  console.log("Stopped and removed. Preview stacks keep running; tear them down from the status page first if you want them gone.");
+  console.log("Stopped and removed. Caddy stopped with it, so the public preview URLs are down.\nPreview stacks keep running on their local ports; tear them down from the status page before uninstalling if you want them gone.");
 }
 
-main(process.argv.slice(2)).catch((e) => { console.error(`pr-demon: ${(e as Error).message}`); process.exit(1); });
+main(process.argv.slice(2)).catch((e) => { console.error(`pr-daemon: ${(e as Error).message}`); process.exit(1); });

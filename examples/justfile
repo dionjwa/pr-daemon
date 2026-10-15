@@ -1,23 +1,28 @@
-# The pr-demon contract: add these recipes to your project's justfile.
-# pr-demon runs each one from the root of the branch's worktree, in a normal
-# developer environment (no CI variables).
+# The pr-daemon contract, as just recipes. These names are only the defaults:
+# up, down and check can be ANY shell command ("npm run preview", "docker
+# compose up -d --wait && echo http://localhost:3000", "make up", a script),
+# set per repo in ~/.pr-daemon/config.toml. The full contract, for a human or
+# an agent: `pr-daemon setup`, or http://localhost:7377/setup
+#
+# pr-daemon runs each command with `bash -lc` from the root of the branch's
+# worktree, in a normal developer environment (no CI variables).
 
 # REQUIRED. Start THIS branch's whole stack in the background, wait until it
 # answers, then print its URL as the last line. Must be idempotent: if it's
 # already running, just print the URL. Must not open a browser.
-# With a preview domain configured, pr-demon also passes PR_DEMON_PUBLIC_URL
-# (e.g. https://42-dark-mode.preview.example.com) and PR_DEMON_PUBLIC_HOST:
+# With a preview domain configured, pr-daemon also passes PR_DAEMON_PUBLIC_URL
+# (e.g. https://42-dark-mode.preview.example.com) and PR_DAEMON_PUBLIC_HOST:
 # use them as the app's public origin (auth redirects, CORS, cookies).
-pr-demon-up:
+pr-daemon-up:
     #!/usr/bin/env bash
     set -euo pipefail
     docker compose -p "app-$(git rev-parse --abbrev-ref HEAD | tr -c 'a-z0-9\n' '-')" up -d --wait >&2
     echo "http://localhost:8080"
 
 # REQUIRED. Stop this branch's stack and delete its data.
-pr-demon-down:
+pr-daemon-down:
     docker compose -p "app-$(git rev-parse --abbrev-ref HEAD | tr -c 'a-z0-9\n' '-')" down -v --remove-orphans
 
 # OPTIONAL. Must pass before a PR is opened (leave it out to trust the agent's testing).
-pr-demon-check:
+pr-daemon-check:
     just lint && just test

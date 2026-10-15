@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pr-demon</title>
+<title>pr-daemon</title>
 <style>
   :root {
     --bg: #f6f5f2; --panel: #fff; --ink: #1d1d1b; --ink-2: #55534e; --ink-3: #8a877f; --line: #e4e1da;
@@ -61,6 +61,8 @@
   .events div { padding: 2px 16px; border-bottom: 1px dashed var(--line); }
   .e-warn { color: var(--warn); } .e-error { color: var(--bad); }
   textarea { width: 100%; min-height: 62vh; border: 0; padding: 14px 16px; background: var(--panel); color: var(--ink); font: 13px/1.55 var(--mono); resize: vertical; outline: none; }
+  pre.paste { margin: 0 16px; padding: 12px 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    font: 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word; user-select: all; }
   .bar { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
   .msg-ok { color: var(--ok); } .msg-bad { color: var(--bad); white-space: pre-wrap; }
   .empty { padding: 18px 16px; color: var(--ink-3); }
@@ -70,8 +72,8 @@
 </head>
 <body>
 <header>
-  <h1>😈 pr-demon</h1>
-  <nav><a href="#" id="tab-status">Status</a><a href="#config" id="tab-config">Config</a></nav>
+  <h1>😈 pr-daemon</h1>
+  <nav><a href="#" id="tab-status">Status</a><a href="#setup" id="tab-setup">Setup</a><a href="#config" id="tab-config">Config</a></nav>
   <span class="grow"></span>
   <span id="proxy" class="badge" hidden></span>
   <span id="pill" class="badge">…</span>
@@ -115,6 +117,34 @@
       <span id="cfg-msg" class="small"></span>
     </div>
   </section>
+  <section>
+    <h2>Where things are <span class="muted small" style="text-transform:none;letter-spacing:0">on this machine, to open and inspect by hand</span></h2>
+    <div id="paths" class="pad small"></div>
+  </section>
+</main>
+
+<main id="view-setup" hidden>
+  <section>
+    <h2>Setting up a project</h2>
+    <div class="pad small" style="padding-bottom:0">Paste this into your open AI chat session on your repo:</div>
+    <pre id="setup-paste" class="paste"></pre>
+    <div class="bar">
+      <button class="primary" id="setup-copy">Copy</button>
+      <span class="small muted">The agent fetches that page: it's the whole contract in plain text —
+        what the two commands must do, the environment, the paths, a checklist.
+        <a id="setup-link" href="/setup" target="_blank">Open it yourself</a>.</span>
+    </div>
+  </section>
+  <section>
+    <h2>In short</h2>
+    <div class="pad small">Your project needs two commands: <b>start this branch's stack and print its URL</b>,
+      and <b>stop it and delete its data</b>. A third, a check that must pass before a PR opens, is optional.
+      They can be <b>any</b> shell command — <code>npm</code>, <code>docker compose</code>, <code>make</code>,
+      a script — run with <code>bash -lc</code> from the branch's worktree. The
+      <code>just pr-daemon-up</code> / <code>-down</code> / <code>-check</code> defaults are only a convention;
+      set <code>up</code>, <code>down</code> and <code>check</code> per repo in
+      <a href="#config">Config</a> to whatever your project already has.</div>
+  </section>
 </main>
 
 <script>
@@ -126,7 +156,7 @@ const dur = (ms) => { const s = Math.max(0, Math.round(ms / 1000));
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.floor(s / 3600)}h${Math.round((s % 3600) / 60)}m`; };
 const until = (t) => dur(t - Date.now());
 const amt = (n) => n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
-const api = (path, method = "GET", body) => fetch(path, { method, headers: { "content-type": "application/json", "x-pr-demon": "1" }, body: body && JSON.stringify(body) })
+const api = (path, method = "GET", body) => fetch(path, { method, headers: { "content-type": "application/json", "x-pr-daemon": "1" }, body: body && JSON.stringify(body) })
   .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); return j; });
 
 let S = null;
@@ -149,7 +179,7 @@ function render() {
   if (px.enabled || px.error) {
     $("proxy").textContent = px.running ? `*.${px.domain} · ${px.mode} · ${px.routes} route${px.routes === 1 ? "" : "s"}` : `*.${px.domain} · proxy down`;
     $("proxy").className = `badge ${px.running ? "s-done" : "s-failed"}`;
-    $("proxy").title = px.error || "Public preview proxy (Caddy) managed by pr-demon";
+    $("proxy").title = px.error || "Public preview proxy (Caddy) managed by pr-daemon";
   }
 
   const b = S.budget, pct = b.limit ? Math.min(100, (b.used / b.limit) * 100) : 0;
@@ -161,8 +191,13 @@ function render() {
 
   $("howto").innerHTML = S.repos.length
     ? `Add the <span class="badge">${esc(S.label)}</span> label to an issue in ${S.repos.map((r) => `<a href="https://github.com/${esc(r)}/issues" target="_blank">${esc(r)}</a>`).join(", ")}.
-       Ask for changes with a PR comment starting <code>/demon</code>. Merge or close the PR to clean up.`
-    : `<b>No repos configured yet.</b> Open <a href="#config">Config</a> and add a <code>[[repos]]</code> block.`;
+       Ask for changes with a PR comment starting <code>/pr-daemon</code>. Merge or close the PR to clean up.`
+    : `<b>No repos configured yet.</b> Open <a href="#config">Config</a> and add one block per repository &mdash;
+       the double brackets are what make it a list:<pre style="margin:8px 0">[[repos]]
+name = "your-org/api"
+
+[[repos]]
+name = "your-org/website"</pre>`;
 
   const jobs = S.jobs;
   $("jobs").innerHTML = jobs.length ? `<table><thead><tr><th>State</th><th>Job</th><th>Issue / PR</th><th class="hide-sm">Branch</th><th>Tokens</th><th class="hide-sm">When</th><th></th></tr></thead><tbody>${
@@ -184,13 +219,14 @@ function render() {
         <td class="hide-sm small muted">${when}</td>
         <td class="actions">${btns}</td></tr>`;
       const detail = open.has(j.id) ? `<tr><td colspan="7" style="padding:0"><pre class="activity">${
-        j.activity.length ? esc(j.activity.join("\n")) : j.state === "running" ? "waiting for the agent's first tool call…" : "No live activity (only kept while pr-demon runs). Full logs: ~/.pr-demon/out/…"}</pre></td></tr>` : "";
+        j.activity.length ? esc(j.activity.join("\n")) : j.state === "running" ? "waiting for the agent's first tool call…" : "No live activity (only kept while pr-daemon runs)."}${
+        j.worktree ? `\n\nworktree (the checkout it works in): ${esc(j.worktree)}\nprompts, logs, PR text, screenshots: ${esc(j.out)}` : ""}</pre></td></tr>` : "";
       return row + detail;
     }).join("")}</tbody></table>` : `<div class="empty">Nothing yet. Label an issue <span class="badge">${esc(S.label)}</span> to start.</div>`;
 
   $("stacks").innerHTML = S.stacks.length ? `<table><thead><tr><th>Branch</th><th>Issue / PR</th><th>Preview</th><th class="hide-sm">Checked</th><th></th></tr></thead><tbody>${
     S.stacks.map((s) => `<tr>
-      <td class="small">${esc(s.branch)}</td>
+      <td class="small">${esc(s.branch)}<div class="muted" style="font-size:11px">${esc(s.worktree)}</div></td>
       <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
       <td><span class="dot ${s.healthy === 1 ? "ok" : s.healthy === 0 ? "bad" : ""}"></span>${
         s.public_url ? `<a href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ""}${
@@ -198,6 +234,15 @@ function render() {
       <td class="hide-sm small muted">${ago(s.checked_at)}</td>
       <td class="actions">${btn(`restart|${s.repo}|${s.branch}`, "Restart")}${btn(`teardown|${s.repo}|${s.branch}`, "Tear down", "danger")}</td></tr>`).join("")}</tbody></table>`
     : `<div class="empty">No preview stacks running.</div>`;
+
+  const P = S.paths ?? {};
+  $("paths").innerHTML = `<pre style="margin:0;overflow-x:auto">${[
+    [P.config, "settings: what this page's Config tab edits"],
+    [`${P.repos}/<org>__<repo>`, "the cached clone of each repo, fetched once and reused"],
+    [`${P.worktrees}/<org>__<repo>/<branch>`, "the checkout the agent works in; your up/down/check commands run here"],
+    [`${P.out}/<org>__<repo>/<branch>`, "prompts, agent logs (*.jsonl), PR text, screenshots"],
+    [P.log, "the service log"],
+  ].map(([path, what]) => `${esc(path)}\n    <span class="muted">${esc(what)}</span>`).join("\n")}</pre>`;
 
   $("events").innerHTML = S.events.map((e) => `<div class="e-${e.level}"><span class="muted">${new Date(e.at).toLocaleTimeString()}</span> ${e.job_id ? `<a href="#job-${e.job_id}">job ${e.job_id}</a> ` : ""}${esc(e.message)}</div>`).join("");
 }
@@ -209,7 +254,7 @@ function btn(key, label, cls = "", title = "") {
 
 async function refresh() {
   try { S = await api("/api/status"); render(); }
-  catch (e) { $("pill").textContent = "pr-demon is not running"; $("pill").className = "badge s-failed"; }
+  catch (e) { $("pill").textContent = "pr-daemon is not running"; $("pill").className = "badge s-failed"; }
 }
 
 document.addEventListener("click", async (ev) => {
@@ -233,6 +278,21 @@ document.addEventListener("click", async (ev) => {
 $("pause").onclick = async () => { await api("/api/pause", "POST", { paused: !S?.paused }); refresh(); };
 $("poll-now").onclick = async () => { await api("/api/poll", "POST"); setTimeout(refresh, 1500); };
 
+// ---------- setup tab ----------
+// location.origin, so the line always names the host and port you reached this
+// page on: change `port` in the config and the pasted URL follows.
+const setupUrl = () => `${location.origin}/setup`;
+function setupPaste() {
+  $("setup-paste").textContent = `Set up this repo for pr-daemon: ${setupUrl()}`;
+  $("setup-link").href = setupUrl();
+}
+$("setup-copy").onclick = async (e) => {
+  const b = e.currentTarget;
+  try { await navigator.clipboard.writeText($("setup-paste").textContent); b.textContent = "Copied"; }
+  catch { getSelection().selectAllChildren($("setup-paste")); b.textContent = "Press ⌘C"; }
+  setTimeout(() => (b.textContent = "Copy"), 2000);
+};
+
 // ---------- config tab: loaded on open, never overwritten by the refresh loop ----------
 let loadedCfg = "";
 async function loadConfig() {
@@ -249,10 +309,13 @@ $("cfg-revert").onclick = () => { $("cfg").value = loadedCfg; $("cfg-msg").textC
 $("cfg").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); $("cfg-save").click(); } });
 
 function route() {
-  const cfg = location.hash === "#config";
-  $("view-status").hidden = cfg; $("view-config").hidden = !cfg;
-  $("tab-status").className = cfg ? "" : "on"; $("tab-config").className = cfg ? "on" : "";
-  if (cfg) loadConfig();
+  const view = location.hash === "#config" ? "config" : location.hash === "#setup" ? "setup" : "status";
+  for (const v of ["status", "setup", "config"]) {
+    $(`view-${v}`).hidden = v !== view;
+    $(`tab-${v}`).className = v === view ? "on" : "";
+  }
+  if (view === "config") loadConfig();
+  if (view === "setup") setupPaste();
   const m = /^#job-(\d+)$/.exec(location.hash); if (m) open.add(Number(m[1]));
 }
 window.addEventListener("hashchange", route);

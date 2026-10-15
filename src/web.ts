@@ -1,5 +1,5 @@
 // The status page + a tiny JSON API, bound to localhost only.
-// Writes need an `X-PR-Demon: 1` header: browsers won't send a custom header
+// Writes need an `X-PR-Daemon: 1` header: browsers won't send a custom header
 // cross-site without a CORS preflight (which we never grant), so other web
 // pages can't drive this one. The Host check blocks DNS-rebinding.
 import { readFileSync } from "node:fs";
@@ -28,9 +28,12 @@ export function serve(d: Daemon): void {
       if (!["localhost", "127.0.0.1", "[::1]"].includes(host)) return send(res, 403, { error: "localhost only" });
       const url = new URL(req.url ?? "/", "http://localhost");
       const m = req.method ?? "GET";
-      if (m !== "GET" && req.headers["x-pr-demon"] !== "1") return send(res, 403, { error: "missing X-PR-Demon header" });
+      if (m !== "GET" && req.headers["x-pr-daemon"] !== "1") return send(res, 403, { error: "missing X-PR-Daemon header" });
 
       if (m === "GET" && url.pathname === "/") return send(res, 200, readFileSync(PAGE, "utf8"), "text/html; charset=utf-8");
+      // Plain text so `curl http://localhost:<port>/setup` hands an agent the
+      // whole contract, and a browser shows it ready to copy.
+      if (m === "GET" && url.pathname === "/setup") return send(res, 200, d.setupDoc(), "text/plain; charset=utf-8");
       if (m === "GET" && url.pathname === "/api/status") return send(res, 200, d.status());
       if (m === "GET" && url.pathname === "/api/config") return send(res, 200, { text: d.configText() });
       if (m === "PUT" && url.pathname === "/api/config") {

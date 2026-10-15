@@ -1,4 +1,6 @@
-// A project's preview stack, driven by its own commands (default: just recipes).
+// A project's preview stack, driven by its own commands. Each is an arbitrary
+// shell command line (see sh()); the `just pr-daemon-*` defaults are only a
+// convention, and the one just-aware bit is missingRecipe() below.
 import { run, sh, tail } from "./util.ts";
 
 const UP_TIMEOUT = 30 * 60e3;
@@ -18,7 +20,7 @@ async function missingRecipe(cmd: string, wt: string): Promise<boolean> {
  */
 export async function up(cmd: string, wt: string, publicUrl = ""): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
   if (await missingRecipe(cmd, wt)) return { ok: false, error: `\`${cmd}\`: no such recipe in this project` };
-  const env = { PR_DEMON_PUBLIC_URL: publicUrl, PR_DEMON_PUBLIC_HOST: publicUrl ? new URL(publicUrl).host : "" };
+  const env = { PR_DAEMON_PUBLIC_URL: publicUrl, PR_DAEMON_PUBLIC_HOST: publicUrl ? new URL(publicUrl).host : "" };
   const r = await sh(cmd, wt, { timeoutMs: UP_TIMEOUT, detached: true, env });
   const out = `${r.stdout}\n${r.stderr}`;
   if (r.code !== 0) return { ok: false, error: tail(out, 60) };

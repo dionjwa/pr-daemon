@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-# pr-demon launcher: runs the TypeScript source directly (Node >= 23.6 strips types).
+# pr-daemon launcher: runs the TypeScript source directly (Node >= 23.6 strips types).
 # node:sqlite still prints an ExperimentalWarning; it's stable enough for us.
 exec node --no-warnings=ExperimentalWarning "$(cd "$(dirname "$(realpath "$0")")/.." && pwd)/src/cli.ts" "$@"

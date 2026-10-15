@@ -1,16 +1,20 @@
 // The single long-running process: polls GitHub, queues jobs, runs them under
 // the token budget, watches stacks, and serves the status page.
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
 import { loadConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
 import { AGENT_KINDS, openDb, Store, type Job } from "./db.ts";
 import * as gh from "./gh.ts";
+import * as git from "./git.ts";
 import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl } from "./proxy.ts";
+import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { formatAmount, formatDuration } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
+const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
 
 export class Daemon {
   store: Store;
@@ -37,14 +41,21 @@ export class Daemon {
 
   start(): void {
     const n = this.store.recoverRunning();
-    if (n) this.store.event(`${n} job(s) were running when pr-demon stopped; re-queued to resume`);
-    this.store.event(`pr-demon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
+    if (n) this.store.event(`${n} job(s) were running when pr-daemon stopped; re-queued to resume`);
+    this.store.event(`pr-daemon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
     if (process.platform === "darwin" && this.cfg.preventSleep) {
       spawn("caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore", detached: true }).unref();
     }
     this.schedulePoll(1000);
     setInterval(() => this.tick(), 2000).unref?.();
     this.proxy.start();
+  }
+
+  /** Stop polling and take the preview proxy down with us. Running jobs are re-queued on the next start. */
+  async shutdown(): Promise<void> {
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    this.store.event("pr-daemon is shutting down");
+    await this.proxy.shutdown();
   }
 
   // ------------------------------------------------------------ config
@@ -56,6 +67,9 @@ export class Daemon {
     return this.cfg;
   }
   configText(): string { return readConfigText(); }
+
+  /** The contract a project has to meet, with this machine's paths filled in: GET /setup. */
+  setupDoc(): string { return setupDoc(this.cfg, COMMAND); }
 
   // ------------------------------------------------------------ polling
   schedulePoll(inMs = this.cfg.pollMs): void {
@@ -107,22 +121,23 @@ export class Daemon {
       if (id) store.event(`queued build for ${repo}#${issue.number} "${issue.title}" (label by @${ev.actor})`, id);
     }
 
-    // 2. "/demon …" comments on PRs → revise.
+    // 2. "/pr-daemon …" comments on PRs → revise.
     const sinceKey = `comments-since:${repo}`;
     const since = store.get(sinceKey) ?? new Date(Date.now() - 10 * 60e3).toISOString(); // first run: don't replay history
     const startedAt = Date.now();
     for (const c of await gh.commentsSince(repo, since)) {
-      if (!c.body.trimStart().startsWith("/demon") || !c.html_url.includes("/pull/")) continue;
+      const body = c.body.trimStart();
+      if (!body.startsWith(COMMAND) || !c.html_url.includes("/pull/")) continue;
       const key = `comment:${repo}:${c.id}`;
       if (store.hasTrigger(key)) continue;
       const pr = Number(c.issue_url.split("/").pop());
       if (!allowed.includes(c.user.login)) {
-        store.enqueue({ repo, kind: "revise", number: pr, trigger_key: key, state: "ignored", reason: `/demon from @${c.user.login}, who isn't allowed` });
+        store.enqueue({ repo, kind: "revise", number: pr, trigger_key: key, state: "ignored", reason: `${COMMAND} from @${c.user.login}, who isn't allowed` });
         continue;
       }
       const branch = (await gh.pr(repo, pr)).head.ref;
-      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: c.body.trimStart().slice("/demon".length).trim() } });
-      if (id) store.event(`queued revise for ${repo} PR #${pr} (/demon by @${c.user.login})`, id);
+      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: body.slice(COMMAND.length).trim() } });
+      if (id) store.event(`queued revise for ${repo} PR #${pr} (${COMMAND} by @${c.user.login})`, id);
     }
     store.set(sinceKey, new Date(startedAt - 60e3).toISOString()); // overlap; ids dedupe
 
@@ -226,7 +241,7 @@ export class Daemon {
           const when = e.retryAt ? `It resumes on its own in about ${formatDuration(e.retryAt - Date.now())}.` : `Press Resume on the status page when you're ready: ${this.statusUrl(job.id)}`;
           this.store.event(`paused: ${e.message}`, job.id, "warn");
           await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "paused").catch(() => {});
-          await gh.comment(job.repo, job.number, `⏸️ **pr-demon** paused: ${e.message}. ${when}`);
+          await gh.comment(job.repo, job.number, `⏸️ **pr-daemon** paused: ${e.message}. ${when}`);
         } else if (e instanceof CancelError || ctx.cancelled) {
           this.store.update(job.id, { state: "cancelled", finished_at: Date.now() });
           this.store.event("cancelled", job.id, "warn");
@@ -238,7 +253,7 @@ export class Daemon {
           this.store.event(`error: ${e.message.slice(0, 500)}`, job.id, "error");
           if (AGENT_KINDS.includes(job.kind)) {
             if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
-            await gh.comment(job.repo, job.number, `❌ **pr-demon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-demon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
+            await gh.comment(job.repo, job.number, `❌ **pr-daemon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-daemon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
           }
         }
       })
@@ -286,6 +301,7 @@ export class Daemon {
       now: Date.now(),
       paused: this.paused,
       configPath: CONFIG_PATH,
+      paths: paths(),
       repos: this.cfg.repos.map((r) => r.name),
       label: this.cfg.label,
       poll: { lastAt: this.lastPollAt, nextAt: this.nextPollAt, error: this.lastPollError, every: formatDuration(this.cfg.pollMs) },
@@ -301,6 +317,8 @@ export class Daemon {
         tokensText: formatAmount(j.tokens),
         issueTokensText: j.kind === "build" ? formatAmount(issueUsed(this.store, this.cfg, j.repo, j.number)) : undefined,
         activity: this.activity.get(j.id)?.slice(-40) ?? [],
+        out: j.branch ? git.outDir(j.repo, j.branch) : "",
+        worktree: j.branch ? join(git.worktreeRoot(j.repo), j.branch) : "",
       })),
       stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch) })),
       proxy: this.proxy.status,

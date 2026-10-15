@@ -50,8 +50,20 @@ test("config validation gives readable errors", () => {
   assert.throws(() => parseConfig(`port = `), /TOML syntax/);
   const c = parseConfig(`[budget]\ntokens = "40M"\nper_issue = "5M"\n[[repos]]\nname = "o/r"\ncheck = ""`);
   assert.equal(c.budget.tokens, 40e6);
-  assert.equal(c.repos[0].up, "just pr-demon-up");
+  assert.equal(c.repos[0].up, "just pr-daemon-up");
   assert.equal(c.repos[0].check, "");
+});
+
+test("the repos list: several blocks, and the mistakes people make with TOML", () => {
+  const c = parseConfig(`[[repos]]\nname = "o/api"\n\n[[repos]]\nname = "o/web"\ncheck = "just test"`);
+  assert.deepEqual(c.repos.map((r) => r.name), ["o/api", "o/web"]);
+  assert.equal(c.repos[0].check, "just pr-daemon-check");   // settings belong to their own block
+  assert.equal(c.repos[1].check, "just test");
+  assert.throws(() => parseConfig(`[repos]\nname = "o/r"`), /DOUBLE brackets/);        // single brackets
+  assert.throws(() => parseConfig(`repos = ["o/r"]`), /block of settings/);            // a bare list
+  assert.throws(() => parseConfig(`[[repos]]\ncheck = ""`), /has no name/);
+  assert.throws(() => parseConfig(`[[repos]]\nname = "your-org/your-repo"`), /replace the example/);
+  assert.throws(() => parseConfig(`[[repos]]\nname = "o/r"\n[[repos]]\nname = "o/r"`), /two \[\[repos\]\] blocks/);
 });
 
 test("budget window, per-issue cap, and when it frees up", () => {

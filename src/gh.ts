@@ -1,5 +1,5 @@
 // GitHub through the `gh` CLI, as the logged-in user. No tokens are stored by
-// pr-demon; `gh` (and git, via `gh auth git-credential`) use your own login.
+// pr-daemon; `gh` (and git, via `gh auth git-credential`) use your own login.
 import { must, run } from "./util.ts";
 
 async function api<T>(path: string, args: string[] = []): Promise<T> {
@@ -82,11 +82,11 @@ export async function review(repo: string, n: number, bodyFile: string): Promise
 
 export async function ensureLabels(repo: string, label: string): Promise<void> {
   const labels: [string, string, string][] = [
-    [label, "5319e7", "An agent builds this issue (pr-demon)"],
-    [`${label}:working`, "fbca04", "pr-demon is working on this"],
-    [`${label}:in-review`, "0e8a16", "pr-demon opened a PR; waiting for a human"],
-    [`${label}:paused`, "c5def5", "pr-demon paused this (token budget); resumes automatically"],
-    [`${label}:failed`, "d93f0b", "pr-demon gave up; see the issue comments"],
+    [label, "5319e7", "An agent builds this issue (pr-daemon)"],
+    [`${label}:working`, "fbca04", "pr-daemon is working on this"],
+    [`${label}:in-review`, "0e8a16", "pr-daemon opened a PR; waiting for a human"],
+    [`${label}:paused`, "c5def5", "pr-daemon paused this (token budget); resumes automatically"],
+    [`${label}:failed`, "d93f0b", "pr-daemon gave up; see the issue comments"],
   ];
   await Promise.all(labels.map(([name, color, desc]) =>
     run("gh", ["label", "create", name, "-R", repo, "--color", color, "--description", desc])));

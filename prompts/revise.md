@@ -11,7 +11,7 @@ Also read the PR conversation for context:
 
 - The stack is running at {{PREVIEW_URL}} (restart with `{{UP_CMD}}`).
 - Make the changes, keep `{{CHECK_CMD}}` passing, and commit. Do NOT push,
-  comment, or open PRs: pr-demon does that.
+  comment, or open PRs: pr-daemon does that.
 - If the UI changed, save fresh screenshots to `{{OUT}}/screenshots/*.png`.
 - If you disagree with a point, don't change the code for it; explain why.
 
