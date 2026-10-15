@@ -5,7 +5,8 @@ import { gate, issueUsed, windowState } from "./budget.ts";
 import { loadConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
 import { AGENT_KINDS, openDb, Store, type Job } from "./db.ts";
 import * as gh from "./gh.ts";
-import { CancelError, FailError, PauseError, RUNNERS, type Ctx } from "./pipeline.ts";
+import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
+import { Proxy, publicUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
 import { formatAmount, formatDuration } from "./util.ts";
 
@@ -14,6 +15,7 @@ const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no 
 export class Daemon {
   store: Store;
   cfg: Config;
+  proxy: Proxy;
   running = new Map<number, Ctx>();
   activity = new Map<number, string[]>();
   lastPollAt = 0;
@@ -25,6 +27,7 @@ export class Daemon {
   constructor() {
     this.cfg = loadConfig();
     this.store = new Store(openDb());
+    this.proxy = new Proxy(this.store, () => this.cfg);
   }
 
   get paused(): boolean { return this.store.get("paused") === "1"; }
@@ -41,6 +44,7 @@ export class Daemon {
     }
     this.schedulePoll(1000);
     setInterval(() => this.tick(), 2000).unref?.();
+    this.proxy.start();
   }
 
   // ------------------------------------------------------------ config
@@ -209,7 +213,7 @@ export class Daemon {
     this.running.set(job.id, ctx);
     this.store.event(`started ${job.kind} ${job.repo}#${job.number}`, job.id);
 
-    return RUNNERS[job.kind](ctx)
+    return JOBS[job.kind](ctx)
       .then(async () => {
         this.store.update(job.id, { state: "done", finished_at: Date.now() });
         // A review/revise that was paused set the issue to agent:paused; put it back.
@@ -298,7 +302,8 @@ export class Daemon {
         issueTokensText: j.kind === "build" ? formatAmount(issueUsed(this.store, this.cfg, j.repo, j.number)) : undefined,
         activity: this.activity.get(j.id)?.slice(-40) ?? [],
       })),
-      stacks: this.store.stacks(),
+      stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch) })),
+      proxy: this.proxy.status,
       events: this.store.events(120),
     };
   }

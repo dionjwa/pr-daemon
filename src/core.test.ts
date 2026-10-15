@@ -78,3 +78,61 @@ test("budget window, per-issue cap, and when it frees up", () => {
   const g2 = gate(store, cfg, "o/r", 2, now);
   assert.equal(!g2.ok && g2.needsHuman, false);
 });
+
+import { caddyConfig, hostLabel, publicUrl } from "./proxy.ts";
+import type { Stack } from "./db.ts";
+
+const stackOf = (branch: string, url: string, repo = "o/r"): Stack => ({
+  repo, branch, issue: Number(branch.split("-")[0]), worktree: "/w", url, pr: null, builder_session: "", healthy: 1, checked_at: null, created_at: 0,
+});
+
+test("branch → DNS label", () => {
+  assert.equal(hostLabel("94-my-new-feature"), "94-my-new-feature");
+  assert.equal(hostLabel("94-My_New.Feature"), "94-my-new-feature");
+  assert.equal(hostLabel("x".repeat(80)).length, 63);
+  assert.equal(hostLabel("--a--"), "a");
+});
+
+test("public URLs", () => {
+  const on = parseConfig(`[preview]\ndomain = "preview.example.com"`);
+  assert.equal(publicUrl(on, "94-my-new-feature"), "https://94-my-new-feature.preview.example.com");
+  assert.equal(publicUrl(parseConfig(`[preview]\ndomain = "p.test"\nhttps_port = 8443`), "1-a"), "https://1-a.p.test:8443");
+  assert.equal(publicUrl(parseConfig(`[preview]\ndomain = "p.test"\nhttps_port = 8443\npublic_port = 443`), "1-a"), "https://1-a.p.test");
+  assert.equal(publicUrl(parseConfig(`[preview]\ndomain = "p.test"\ntls = "off"`), "1-a"), "http://1-a.p.test");
+  assert.equal(publicUrl(parseConfig(`[preview]\ndomain = "p.test"\nproxy = "off"`), "1-a"), "");
+  assert.equal(publicUrl(parseConfig(DEFAULT_TOML), "1-a"), "");
+});
+
+test("preview config validation", () => {
+  assert.throws(() => parseConfig(`[preview]\ndomain = "not a domain"`), /preview.domain/);
+  assert.throws(() => parseConfig(`[preview]\nproxy = "nginx"`), /preview.proxy must be one of/);
+  assert.throws(() => parseConfig(`[[repos]]\nname = "o/r"\nproxy_host = "x"`), /proxy_host/);
+  assert.equal(parseConfig(`[preview]\ndomain = "*.Preview.Example.com"`).preview.domain, "preview.example.com");
+});
+
+test("caddy config routes each branch host to its local stack", () => {
+  const cfg = parseConfig(`[preview]\ndomain = "p.example.com"\nemail = "me@example.com"\n[[repos]]\nname = "o/r"\nproxy_host = "upstream"\n[[repos]]\nname = "o/s"`);
+  const c = caddyConfig(cfg, [
+    stackOf("94-my-new-feature", "https://framejs-app.localhost:13536"),
+    stackOf("7-plain", "http://127.0.0.1:8080", "o/s"),
+    stackOf("8-no-url", ""),
+  ], "binary") as any;
+  const server = c.apps.http.servers.previews;
+  assert.deepEqual(server.listen, [":443"]);
+  assert.equal(server.routes.length, 3); // two stacks + the 404 fallback
+  const [a, b, fallback] = server.routes;
+  assert.deepEqual(a.match, [{ host: ["94-my-new-feature.p.example.com"] }]);
+  assert.equal(a.handle[0].upstreams[0].dial, "127.0.0.1:13536");
+  assert.equal(a.handle[0].transport.tls.server_name, "framejs-app.localhost");
+  assert.deepEqual(a.handle[0].headers.request.set.Host, ["framejs-app.localhost:13536"]);
+  assert.equal(b.handle[0].upstreams[0].dial, "127.0.0.1:8080");
+  assert.equal(b.handle[0].transport, undefined);
+  assert.equal(b.handle[0].headers, undefined);           // proxy_host defaults to public
+  assert.equal(fallback.handle[0].status_code, 404);
+  assert.equal(c.apps.tls.automation.policies[0].issuers[0].email, "me@example.com");
+  assert.equal(c.apps.pki.certificate_authorities.local.install_trust, false);
+  const d = caddyConfig(cfg, [stackOf("94-x", "https://framejs-app.localhost:13536")], "docker") as any;
+  assert.equal(d.apps.http.servers.previews.routes[0].handle[0].upstreams[0].dial, "host.docker.internal:13536");
+  assert.match(d.admin.listen, /^0\.0\.0\.0:/);
+  assert.deepEqual(d.admin.origins, ["127.0.0.1:2019"]);
+});

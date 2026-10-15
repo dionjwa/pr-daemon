@@ -141,6 +141,49 @@ http://localhost:7377. It's only reachable from your own machine.
 - **Config:** edit the config file in place. It's checked before saving, so
   a typo can't break anything.
 
+## Public preview URLs (optional)
+
+Set a domain and each branch gets its own address, named after the branch:
+
+```toml
+[preview]
+domain = "preview.example.com"   # → https://94-my-new-feature.preview.example.com
+email = "you@example.com"        # optional, for Let's Encrypt notices
+```
+
+**Your part (once):**
+- Point `*.preview.example.com` at this machine with a wildcard DNS record.
+- Forward ports **80** and **443** to it, e.g. on your router.
+
+**pr-demon's part:**
+- It runs **Caddy**: the `caddy` binary if it's installed (`brew install caddy`), otherwise a Docker container. You can force either with `proxy = "binary"` or `proxy = "docker"`.
+- It keeps Caddy's routes equal to the running stacks: a new branch gets a route, and a torn-down one loses it.
+- It gets an HTTPS certificate per branch host from Let's Encrypt automatically.
+- If Caddy dies it's restarted, and if pr-demon restarts it reuses the Caddy that's already running.
+
+The PR's **Preview** link becomes the public URL, and the status page shows
+both the public and the local address.
+
+**Your app needs to know its public address.** `pr-demon-up` receives:
+
+| Variable | Example |
+|---|---|
+| `PR_DEMON_PUBLIC_URL` | `https://94-my-new-feature.preview.example.com` |
+| `PR_DEMON_PUBLIC_HOST` | `94-my-new-feature.preview.example.com` |
+
+Use them for anything that builds absolute URLs: auth redirect URLs, CORS
+origins, cookie domains, and links to other services. Both are empty when no
+domain is set.
+
+If the app's dev server only accepts its local host name (Vite's
+`allowedHosts`, for example), set `proxy_host = "upstream"` on the repo.
+pr-demon then forwards the app's local Host header instead of the public one.
+
+**Testing without a domain:** use `domain = "pr-demon.localhost"`,
+`tls = "internal"`, `http_port = 8080` and `https_port = 8443`, then open
+`https://<branch>.pr-demon.localhost:8443`. Your browser will warn about
+Caddy's local certificate.
+
 ## Token budget
 
 ```toml
@@ -177,7 +220,11 @@ See the comments in `~/.pr-demon/config.toml`. The main ones:
 | `agent.max_attempts` | `3` | Build → check → fix rounds before giving up |
 | `agent.auto_revise` | `true` | The builder answers the reviewer once, automatically |
 | `stacks.auto_restart` | `true` | Restart preview stacks that stop answering |
+| `preview.domain` | unset | Public preview URLs `https://<branch>.<domain>` (pr-demon runs Caddy) |
+| `preview.proxy` | `auto` | `auto` / `binary` / `docker` / `off` |
+| `preview.tls` | `auto` | `auto` (Let's Encrypt) / `internal` (testing) / `off` (plain http) |
 | `[[repos]] up / down / check` | `just pr-demon-up` / `-down` / `-check` | Override for projects without `just` |
+| `[[repos]] proxy_host` | `public` | Host header the app sees through the preview proxy: `public` or `upstream` |
 
 ## Commands
 
@@ -199,6 +246,7 @@ pr-demon install-service | uninstall-service
   repos/<org>__<repo>/              a cached clone
   worktrees/<org>__<repo>/42-…/     the branch the agent works in (the stack runs from here)
   out/<org>__<repo>/42-…/           prompts, agent logs (*.jsonl), PR text, screenshots
+  caddy/                            the generated Caddy config, its log, and certificates (binary mode)
 ```
 
 ## Safety
@@ -209,8 +257,10 @@ pr-demon install-service | uninstall-service
   you do.
 - Only allowed users (by default, only you) can start work. pr-demon checks
   who added the label and who wrote each `/demon` comment.
-- Nothing from the internet connects in: pr-demon only polls GitHub. The
-  status page listens on 127.0.0.1 only and refuses requests from other
-  websites.
+- Nothing from the internet connects to pr-demon itself: it only polls GitHub.
+  The status page listens on 127.0.0.1 only and refuses requests from other
+  websites. With a preview domain set, Caddy serves **only the preview
+  stacks**, so anyone with a branch's URL can reach that preview. Treat
+  previews as public, or put access control in the app.
 
 See [PLAN.md](PLAN.md) for the design and roadmap.

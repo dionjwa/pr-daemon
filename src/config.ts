@@ -16,6 +16,19 @@ export interface RepoConfig {
   up: string;            // start this branch's stack; last line of output = preview URL
   down: string;          // stop it
   check: string;         // "" = no harness check (trust the agent)
+  /** Host header the app receives through the preview proxy: the public one, or its local one. */
+  proxyHost: "public" | "upstream";
+}
+
+export interface PreviewConfig {
+  domain: string;                         // "" = local URLs only
+  proxy: "auto" | "binary" | "docker" | "off";
+  tls: "auto" | "internal" | "off";
+  email: string;
+  httpPort: number;
+  httpsPort: number;
+  publicPort: number | null;              // port in public URLs when you forward e.g. 443 → 8443
+  admin: string;                          // Caddy admin API, host:port (local only)
 }
 
 export interface Config {
@@ -42,6 +55,7 @@ export interface Config {
     healthEveryMs: number;
     autoRestart: boolean;
   };
+  preview: PreviewConfig;
   repos: RepoConfig[];
 }
 
@@ -72,6 +86,19 @@ stall = "30m"            # no agent output for this long = stalled (kill, retry 
 health_every = "5m"      # check each preview URL
 auto_restart = true      # restart a preview stack that stopped answering
 
+[preview]
+# Public preview URLs: https://<branch>.<domain>, e.g. https://42-dark-mode.preview.example.com
+# You point *.<domain> at this machine (DNS + port forwards for 80 and 443);
+# pr-demon runs Caddy and routes each branch's host to its local stack.
+# domain = "preview.example.com"   # unset = local URLs only, no proxy
+proxy = "auto"           # auto (caddy binary if installed, else Docker) | binary | docker | off
+tls = "auto"             # auto = Let's Encrypt per branch host (needs 80+443 reachable) | internal = Caddy's own CA (testing) | off = plain http
+# email = "you@example.com"        # for Let's Encrypt expiry notices
+http_port = 80
+https_port = 443
+# public_port = 443                # the port people use, if you forward e.g. 443 → 8443
+admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
+
 # One block per repository. Commands run from the root of the branch's worktree.
 # [[repos]]
 # name = "your-org/your-repo"
@@ -79,6 +106,9 @@ auto_restart = true      # restart a preview stack that stopped answering
 # up = "just pr-demon-up"         # start the stack in the background; print its URL last
 # down = "just pr-demon-down"     # stop it and delete its data
 # check = "just pr-demon-check"   # must pass before a PR opens; "" = trust the agent
+# proxy_host = "public"           # Host header the app gets via the preview URL: "public" (the
+#                                 # branch's public host) or "upstream" (its local host, for
+#                                 # dev servers that reject unknown hosts)
 `;
 
 type Raw = Record<string, unknown>;
@@ -94,6 +124,11 @@ function bool(v: unknown, d: boolean, name: string): boolean {
   if (typeof v !== "boolean") throw new Error(`${name} must be true or false`);
   return v;
 }
+function oneOf<T extends string>(v: unknown, options: readonly T[], d: T, name: string): T {
+  if (v === undefined) return d;
+  if (typeof v !== "string" || !options.includes(v as T)) throw new Error(`${name} must be one of: ${options.join(", ")}`);
+  return v as T;
+}
 function dur(v: unknown, d: string, name: string): number {
   try { return parseDuration((v as string | number | undefined) ?? d); }
   catch (e) { throw new Error(`${name}: ${(e as Error).message}`); }
@@ -108,7 +143,7 @@ export function parseConfig(text: string): Config {
   let raw: Raw;
   try { raw = parse(text) as Raw; }
   catch (e) { throw new Error(`TOML syntax: ${(e as Error).message}`); }
-  const b = (raw.budget ?? {}) as Raw, a = (raw.agent ?? {}) as Raw, st = (raw.stacks ?? {}) as Raw;
+  const b = (raw.budget ?? {}) as Raw, a = (raw.agent ?? {}) as Raw, st = (raw.stacks ?? {}) as Raw, pv = (raw.preview ?? {}) as Raw;
   const repos = (raw.repos ?? []) as Raw[];
   if (!Array.isArray(repos)) throw new Error("repos must be a list of [[repos]] blocks");
   const users = raw.allowed_users ?? [];
@@ -138,6 +173,16 @@ export function parseConfig(text: string): Config {
       healthEveryMs: dur(st.health_every, "5m", "stacks.health_every"),
       autoRestart: bool(st.auto_restart, true, "stacks.auto_restart"),
     },
+    preview: {
+      domain: str(pv.domain, "").trim().replace(/^\*?\./, "").toLowerCase(),
+      proxy: oneOf(pv.proxy, ["auto", "binary", "docker", "off"], "auto", "preview.proxy"),
+      tls: oneOf(pv.tls, ["auto", "internal", "off"], "auto", "preview.tls"),
+      email: str(pv.email, ""),
+      httpPort: num(pv.http_port, 80, "preview.http_port"),
+      httpsPort: num(pv.https_port, 443, "preview.https_port"),
+      publicPort: pv.public_port === undefined ? null : num(pv.public_port, 443, "preview.public_port"),
+      admin: str(pv.admin, "127.0.0.1:2019"),
+    },
     repos: repos.map((r, i) => {
       const name = str(r.name, "");
       if (!/^[\w.-]+\/[\w.-]+$/.test(name)) throw new Error(`repos[${i}].name must be "owner/repo"`);
@@ -147,9 +192,14 @@ export function parseConfig(text: string): Config {
         up: str(r.up, "just pr-demon-up"),
         down: str(r.down, "just pr-demon-down"),
         check: str(r.check, "just pr-demon-check"),
+        proxyHost: oneOf(r.proxy_host, ["public", "upstream"], "public", `repos[${i}].proxy_host`),
       };
     }),
   };
+  if (cfg.preview.domain && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(cfg.preview.domain)) {
+    throw new Error(`preview.domain "${cfg.preview.domain}" isn't a domain name (e.g. "preview.example.com")`);
+  }
+  if (!/^[\w.[\]:-]+:\d+$/.test(cfg.preview.admin)) throw new Error('preview.admin must be host:port, e.g. "127.0.0.1:2019"');
   if (cfg.pollMs < 10_000) throw new Error("poll must be at least 10s (GitHub rate limits)");
   if (new Set(cfg.repos.map((r) => r.name)).size !== cfg.repos.length) throw new Error("a repo is listed twice");
   return cfg;

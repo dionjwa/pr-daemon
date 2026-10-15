@@ -47,13 +47,14 @@ export function formatDuration(ms: number): string {
 
 // ---------- child processes ----------
 // The agent and the stack must behave as if a developer were at a terminal:
-// strip CI/runner variables so projects don't switch into "CI mode".
+// drop CI=… (projects switch into "CI mode") and the markers of an enclosing
+// Claude Code session (pr-demon may be started from one; the agent must not
+// think it's nested inside it).
+const DROP_ENV = new Set(["CI", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]);
+
 export function cleanEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (/^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(k) || k === "CI") continue;
-    env[k] = v;
-  }
+  for (const [k, v] of Object.entries(process.env)) if (!DROP_ENV.has(k)) env[k] = v;
   for (const [k, v] of Object.entries(extra)) if (v !== undefined) env[k] = v;
   return env;
 }
@@ -88,8 +89,8 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
 }
 
 /** Run a shell command line (a project's recipe) in a directory. */
-export function sh(line: string, cwd: string, timeoutMs?: number, detached = false): Promise<RunResult> {
-  return run("bash", ["-lc", line], { cwd, timeoutMs, detached });
+export function sh(line: string, cwd: string, o: { timeoutMs?: number; detached?: boolean; env?: Record<string, string> } = {}): Promise<RunResult> {
+  return run("bash", ["-lc", line], { cwd, timeoutMs: o.timeoutMs, detached: o.detached, env: cleanEnv(o.env) });
 }
 
 /** Like run() but throws with stderr on failure and returns trimmed stdout. */

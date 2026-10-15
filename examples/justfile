@@ -5,6 +5,9 @@
 # REQUIRED. Start THIS branch's whole stack in the background, wait until it
 # answers, then print its URL as the last line. Must be idempotent: if it's
 # already running, just print the URL. Must not open a browser.
+# With a preview domain configured, pr-demon also passes PR_DEMON_PUBLIC_URL
+# (e.g. https://42-dark-mode.preview.example.com) and PR_DEMON_PUBLIC_HOST:
+# use them as the app's public origin (auth redirects, CORS, cookies).
 pr-demon-up:
     #!/usr/bin/env bash
     set -euo pipefail

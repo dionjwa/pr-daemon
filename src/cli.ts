@@ -84,6 +84,19 @@ async function doctor(): Promise<void> {
       const v = await run("gh", ["api", `repos/${r.name}`, "--jq", ".permissions.push"]);
       ok(v.stdout.trim() === "true", `you can push to ${r.name}`);
     }
+    const p = cfg.preview;
+    if (p.domain && p.proxy !== "off") {
+      const hasCaddy = (await run("which", ["caddy"])).code === 0;
+      const usable = p.proxy === "binary" ? hasCaddy : p.proxy === "docker" ? docker.code === 0 : hasCaddy || docker.code === 0;
+      ok(usable, `preview proxy for *.${p.domain} (${p.proxy}${p.proxy === "auto" ? `: ${hasCaddy ? "caddy binary" : "docker"}` : ""})`,
+        "brew install caddy, or start Docker");
+      const example = `${cfg.repos[0] ? "42-example" : "x"}.${p.domain}`;
+      const dns = await run("dig", ["+short", example]);
+      ok(!!dns.stdout.trim() || /\.localhost$/.test(p.domain), `DNS: ${example} resolves${dns.stdout.trim() ? ` (${dns.stdout.trim().split("\n")[0]})` : ""}`,
+        `point *.${p.domain} at this machine (a wildcard A record), and forward ports ${p.httpPort} and ${p.httpsPort} to it`);
+    } else {
+      console.log(`· no preview domain: previews use local URLs (set [preview] domain to get https://<branch>.<domain>)`);
+    }
   } catch (e) { ok(false, "config is valid", (e as Error).message); }
   process.exit(bad ? 1 : 0);
 }

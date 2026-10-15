@@ -45,9 +45,8 @@ stacks, and serves a status and config page on localhost.
 
 ## Plan
 
-### Phase 1 (done in this draft)
+### Phase 1: the core loop
 
-- [x] Actions + runner prototype (bash), dogfooded on framejs.app #96 → PR #97
 - [x] Rewrite as a single TypeScript process: watcher, queue, scheduler, budget, agent supervisor
 - [x] SQLite store (`node:sqlite`, no native modules), status page and config editor
 - [x] Unit tests: amounts, durations, templates, config validation, budget window maths
@@ -57,15 +56,19 @@ stacks, and serves a status and config page on localhost.
 - [x] `install-service`: `claude` works under launchd (no token needed); preview stacks survive pr-demon restarting
 - [ ] Teardown on a real PR merge or close (manual teardown verified on #96)
 
-### Phase 2: reachable from the internet
+### Phase 2: public preview URLs
 
-- Caddy (one reverse proxy, `import previews/*.caddy`), with pfSense
-  forwarding 443 once, or a Cloudflare Tunnel.
-- `pr-demon-up` registers the branch's route, and `pr-demon-down` removes it.
-- Projects need configurable public origins (auth redirects, CORS, cookies).
+- [x] `[preview] domain`: each branch at `https://<branch>.<domain>`
+- [x] pr-demon supervises Caddy (binary or Docker), and routes are rebuilt from the stacks table and loaded via the admin API
+- [x] TLS: Let's Encrypt per host (auto), Caddy's CA (internal, for testing), or plain http
+- [x] `pr-demon-up` gets `PR_DEMON_PUBLIC_URL` / `PR_DEMON_PUBLIC_HOST`, plus a per-repo `proxy_host`
+- [x] Verified locally with `*.pr-demon.localhost` in both modes: switching modes live, adopting a running Caddy after a restart, relaunching on port changes, stopping when the domain is unset
+- [ ] A real domain with ports 80/443 forwarded (yours to set up), so Let's Encrypt can issue certificates
+- [ ] framejs.app: use `PR_DEMON_PUBLIC_URL` for its origins. Its browser code also calls nhost services on their own `*.local.nhost.run` hosts, and those need public routes too
 
 ### Phase 3: polish
 
 - Spend per PR in the description, per-repo budgets.
+- Optional access control on previews (basic auth or a shared secret), and a wildcard certificate via a DNS challenge.
 - A form view of the config next to the raw TOML.
 - Several machines coordinating through GitHub labels.

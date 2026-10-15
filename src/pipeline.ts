@@ -11,6 +11,7 @@ import type { Config, RepoConfig } from "./config.ts";
 import type { Job, Store } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
+import { publicUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
@@ -128,11 +129,12 @@ export async function build(ctx: Ctx): Promise<void> {
   if (!resuming) await gh.comment(repo.name, n, `🛠️ **pr-demon** is on it.\n- branch: \`${branch}\`\n- status: ${ctx.statusUrl} (on the pr-demon machine)`);
 
   // Stack first. If it won't start, the agent's first job is to fix that.
-  const s = await stack.up(repo.up, wt);
+  const pub = publicUrl(cfg, branch);
+  const s = await stack.up(repo.up, wt, pub);
   const url = s.ok ? s.url : "";
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: s.ok ? 1 : 0, checked_at: Date.now() });
   const stackNote = s.ok
-    ? `The stack for this branch is already running at ${url || "(no URL printed)"}. Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
+    ? `The stack for this branch is already running at ${url || "(no URL printed)"}${pub ? ` (publicly: ${pub})` : ""}. Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
     : `WARNING: \`${repo.up}\` FAILED before you started. Fix that first, then continue. Output:\n\`\`\`\n${s.error}\n\`\`\``;
 
   const vars = {
@@ -154,7 +156,7 @@ export async function build(ctx: Ctx): Promise<void> {
       prompt: prompt("fix", { ...vars, CHECK_OUT: result.output }),
       log: join(out, "agent-build.jsonl"), resume: store.job(job.id)!.session_id, issue: n,
     });
-    await stack.up(repo.up, wt);
+    await stack.up(repo.up, wt, pub);
     result = await stack.check(repo.check, wt);
   }
 
@@ -172,15 +174,15 @@ export async function build(ctx: Ctx): Promise<void> {
     throw new FailError("check still failing");
   }
 
-  const prNumber = await publishPr(ctx, { n, branch, base, url, out, issueTitle: issue.title });
+  const prNumber = await publishPr(ctx, { n, branch, base, url, pub, out, issueTitle: issue.title });
   store.update(job.id, { pr: prNumber });
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, pr: prNumber, builder_session: store.job(job.id)!.session_id });
   await gh.setStatus(repo.name, n, cfg.label, "in-review");
-  await gh.comment(repo.name, n, `✅ **pr-demon** opened #${prNumber}. Preview: ${url || "n/a"}`);
+  await gh.comment(repo.name, n, `✅ **pr-demon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
   store.enqueue({ repo: repo.name, kind: "review", number: prNumber, branch, trigger_key: `review:${repo.name}#${prNumber}:job${job.id}` });
 }
 
-async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string; url: string; out: string; issueTitle: string }): Promise<number> {
+async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string; url: string; pub: string; out: string; issueTitle: string }): Promise<number> {
   const { repo, store, job } = ctx;
   const read = (f: string) => (existsSync(join(o.out, f)) ? readFileSync(join(o.out, f), "utf8").trim() : "");
   const title = read("pr-title.txt").split("\n")[0] || o.issueTitle;
@@ -190,7 +192,7 @@ async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string;
 
 ## Try it
 
-- **Preview:** ${o.url || "_not running_"} (on the pr-demon machine)
+${o.pub ? `- **Preview:** ${o.pub}\n- Local: ${o.url || "_not running_"} (on the pr-demon machine)` : `- **Preview:** ${o.url || "_not running_"} (on the pr-demon machine)`}
 - Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/demon\`
 ${shots ? `\n## Screenshots\n\n${shots}` : ""}
 Closes #${o.n}
@@ -251,13 +253,14 @@ export async function revise(ctx: Ctx): Promise<void> {
   const shotsDir = join(out, "screenshots");
   rmSync(shotsDir, { recursive: true, force: true });
   mkdirSync(shotsDir, { recursive: true });
-  const s = await stack.up(repo.up, wt);
+  const pub = publicUrl(ctx.cfg(), branch);
+  const s = await stack.up(repo.up, wt, pub);
   const url = s.ok ? s.url : "";
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, pr: job.number, healthy: s.ok ? 1 : 0, checked_at: Date.now() });
   const builder = store.stack(repo.name, branch)?.builder_session || "";
 
   const text = prompt("revise", {
-    PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: url,
+    PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: pub ? `${url} (publicly: ${pub})` : url,
     FEEDBACK: payload(job).feedback ?? "", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
@@ -295,9 +298,9 @@ export async function restart(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const s = store.stackForIssue(repo.name, job.number);
   if (!s || !existsSync(s.worktree)) return;
-  const r = await stack.up(repo.up, s.worktree);
+  const r = await stack.up(repo.up, s.worktree, publicUrl(ctx.cfg(), s.branch));
   store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, healthy: r.ok ? 1 : 0, checked_at: Date.now() });
   if (!r.ok) throw new Error(`restart failed: ${r.error}`);
 }
 
-export const RUNNERS = { build, review, revise, teardown, restart } as const;
+export const JOBS = { build, review, revise, teardown, restart } as const;

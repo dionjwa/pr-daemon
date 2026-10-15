@@ -1,4 +1,4 @@
-# This repo's own CI: GitHub-hosted runners only.
+# Typecheck + unit tests.
 name: ci
 on: [push, pull_request]
 permissions: { contents: read }

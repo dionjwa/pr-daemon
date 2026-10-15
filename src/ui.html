@@ -73,6 +73,7 @@
   <h1>😈 pr-demon</h1>
   <nav><a href="#" id="tab-status">Status</a><a href="#config" id="tab-config">Config</a></nav>
   <span class="grow"></span>
+  <span id="proxy" class="badge" hidden></span>
   <span id="pill" class="badge">…</span>
   <span id="poll" class="muted small"></span>
   <button id="poll-now" title="Check GitHub for new labels and comments now">Check GitHub now</button>
@@ -143,6 +144,14 @@ function render() {
   $("poll").innerHTML = S.poll.error ? `<span class="e-error">GitHub: ${esc(S.poll.error)}</span>`
     : `checked ${ago(S.poll.lastAt)} · next in ${until(S.poll.nextAt)}`;
 
+  const px = S.proxy;
+  $("proxy").hidden = !px.enabled && !px.error;
+  if (px.enabled || px.error) {
+    $("proxy").textContent = px.running ? `*.${px.domain} · ${px.mode} · ${px.routes} route${px.routes === 1 ? "" : "s"}` : `*.${px.domain} · proxy down`;
+    $("proxy").className = `badge ${px.running ? "s-done" : "s-failed"}`;
+    $("proxy").title = px.error || "Public preview proxy (Caddy) managed by pr-demon";
+  }
+
   const b = S.budget, pct = b.limit ? Math.min(100, (b.used / b.limit) * 100) : 0;
   $("budget").innerHTML = `
     <div class="budget"><span class="big">${esc(b.usedText)}</span><span class="muted">of ${esc(b.limitText)} · last ${esc(b.window)}</span></div>
@@ -183,7 +192,9 @@ function render() {
     S.stacks.map((s) => `<tr>
       <td class="small">${esc(s.branch)}</td>
       <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
-      <td><span class="dot ${s.healthy === 1 ? "ok" : s.healthy === 0 ? "bad" : ""}"></span>${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>` : `<span class="muted">no URL</span>`}</td>
+      <td><span class="dot ${s.healthy === 1 ? "ok" : s.healthy === 0 ? "bad" : ""}"></span>${
+        s.public_url ? `<a href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ""}${
+        s.url ? `<div class="${s.public_url ? "small muted" : ""}">${s.public_url ? "local: " : ""}<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></div>` : `<span class="muted">no URL</span>`}</td>
       <td class="hide-sm small muted">${ago(s.checked_at)}</td>
       <td class="actions">${btn(`restart|${s.repo}|${s.branch}`, "Restart")}${btn(`teardown|${s.repo}|${s.branch}`, "Tear down", "danger")}</td></tr>`).join("")}</tbody></table>`
     : `<div class="empty">No preview stacks running.</div>`;
