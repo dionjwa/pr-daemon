@@ -3,85 +3,67 @@
 ## Goal
 
 Describe a feature in a GitHub issue, add a label, and get back a pull request
-that is ready for a human to test and approve:
+that is ready for a human to try and merge:
 
 1. A branch named `<issue>-<very-short-summary>`.
-2. A full local stack for that branch, running on a machine you own.
+2. A full local stack for that branch, on a machine you own.
 3. An agent that builds the feature, writes tests, and keeps iterating until
    the project's checks pass.
-4. A PR with a description, screenshots of any UI changes, and a link to the
+4. A PR with a description, screenshots of UI changes, and a link to the
    running app.
 5. A separate review by a second agent that sees only the PR.
-6. A human approves and merges. **pr-demon never merges.**
-7. Everything is cleaned up automatically once the PR is merged or closed.
+6. A human merges. **pr-demon never merges.**
+7. Automatic cleanup once the PR is merged or closed.
+8. All of it within a token budget.
 
 It has to be **portable**. Any project that can start a per-branch stack from
-a command can use it, whatever its language or framework.
+a command can use it.
 
-## Design decisions
+## Design
+
+**One process on the host** (`pr-demon serve`, Node + TypeScript). It polls
+GitHub, keeps a job queue in SQLite, runs agents under a token budget, watches
+stacks, and serves a status and config page on localhost.
 
 | Decision | Why |
 |---|---|
-| **GitHub Actions is the orchestrator.** There's no separate daemon or poller. | Events, logs, secrets, retries and concurrency come for free. Nothing extra to keep alive. |
-| **A dedicated self-hosted runner on your machine** with only the `pr-demon` label. | The stack and agent need your Docker, disk and CPU. A separate runner means your normal CI never queues behind an hour-long agent run. Without the `self-hosted` label, existing `runs-on: self-hosted` jobs can't land on it. |
-| **The runner refuses every other workflow** (job-started hook). | Labels route jobs but don't restrict them. The hook runs on your machine and only allows `pr-demon.yml` from the default branch. |
-| **One composite action plus one copy-paste workflow per project.** | The project owns its triggers. pr-demon owns the logic. Updating is just bumping a ref. |
-| **The project contract is four `just` recipes**: `pr-demon-up`, `pr-demon-url`, `pr-demon-down`, `pr-demon-check`. | This is the only project-specific part. The commands are overridable for projects without `just`. |
-| **Each branch gets a git worktree** under `~/.pr-demon/`, and the stack is started detached. | Several issues can be in flight at once, and the stack outlives the job so a human can test it. |
-| **The agent runs in a developer-like environment**, with no `GITHUB_*`, `RUNNER_*` or `CI` variables. | The stack behaves exactly like `just dev` on a laptop. The runner also won't kill the stack when the job ends. |
-| **Agent = headless Claude Code (`claude -p`).** | It reads the project's CLAUDE.md and skills, so project knowledge lives in the project. |
-| **pr-demon decides "done"**, not the agent: it re-runs `pr-demon-check` and loops back with the failure up to 3 times. | Agents claim success too early. The harness verifies. |
-| **The reviewer is a fresh `claude -p`** with only the PR number. | No build context leaks in, by construction. It posts a COMMENT review because a bot can't approve its own PR, and that's the point: the human approves. |
-| **One automatic revise round** if the reviewer says `VERDICT: changes`. After that, a human drives with `/demon <feedback>` comments on the PR. | Cheap fixes happen without you, and there's no endless agent ping-pong. |
-| **Screenshots are committed to an orphan `pr-demon-assets` branch** and linked from the PR. | GitHub has no API for attaching images to PRs. |
-| **Cleanup has three triggers**: PR closed, issue closed, and a nightly reaper. | Missed events don't leave stacks running for ever. |
-| **Labels show state**: `agent` → `agent:working` → `agent:in-review` (or `agent:failed`). | You can see what's happening from the issue list. |
-| **The repo is public-safe**: no secrets, hostnames or paths in it. Its own CI runs only on GitHub-hosted runners. | Secrets live in the calling repo or on the runner machine. Callers pin a SHA. |
-
-## Security model
-
-- The agent runs with full permissions **on your machine**. The runner should
-  ideally run as a dedicated OS user (later: a VM).
-- `github.token` can't push changes to `.github/workflows/`, so the agent
-  can't rewrite its own triggers. Keep it that way: don't hand pr-demon a
-  token with the `workflows` permission.
-- Teardown uses `pull_request_target`, so it always runs the default branch's
-  copy of `pr-demon.yml`, never a PR's edited copy.
-- Only `OWNER`, `MEMBER` and `COLLABORATOR` can trigger `/demon`, and only
-  people with triage rights can add labels.
+| **A single host process, not GitHub Actions.** | No runner, hook, per-repo workflow file or repo settings. Live control over each agent run: count tokens, pause, resume, stop stalled runs. |
+| **Polling, not webhooks.** | Nothing on the internet needs to reach the machine, so no pfSense or tunnel for triggers. A 60s delay is fine for hour-long jobs. |
+| **Acts as your GitHub user** (via `gh`). | No bot account or app. Pushes trigger your normal CI. |
+| **Only allowed users trigger work.** | It reads who added the label (issue events API) and who wrote each `/demon` comment. The default allowlist is just you. |
+| **Labels are dedupe keys.** | Each "label added" event triggers exactly once. Re-adding the label starts over. |
+| **The project contract is `pr-demon-up` (prints the URL) and `pr-demon-down`.** `pr-demon-check` is optional. | The only project-specific part. Commands can be overridden per repo. |
+| **Each branch gets a git worktree**, and the stack starts in its own process group. | Several issues can run at once, and stacks survive pr-demon restarting. |
+| **Agents run with no CI variables.** | The stack behaves exactly like `just dev` on a laptop. |
+| **Agent = `claude -p --output-format stream-json`.** | Usage streams live, which drives the budget. `--session-id` / `--resume` let a paused or stalled run continue instead of starting over. |
+| **pr-demon decides "done"**, not the agent. | It re-runs the check and resumes the same session with the failure, up to N rounds. |
+| **The reviewer is a fresh session.** | No build context leaks in. It posts a COMMENT review, since you can't approve your own PR. |
+| **One automatic revise round** after a `VERDICT: changes` review. After that, `/demon` comments. | Cheap fixes happen without you, with no endless back-and-forth between agents. |
+| **Budget = a rolling token window plus a per-issue cap**, in human amounts (`"40M"`). | Matches the 5-hour subscription window. The per-issue cap protects against one runaway issue. |
+| **The config is a TOML file, edited raw** in the web page and validated before it's written. | One source of truth, and your comments survive. |
+| **State is rebuildable.** | GitHub holds the issue/PR truth, the disk holds the worktrees. SQLite holds the queue, the ledger and events, and running jobs resume after a crash. |
 
 ## Plan
 
-### Phase 1: works on one machine, one repo (this draft)
+### Phase 1 (done in this draft)
 
-- [x] `bin/pr-demon` with build, review, revise, teardown, reap and status
-- [x] prompts: build, fix, review, revise
-- [x] composite `action.yml` and an example caller workflow
-- [x] runner install with only the `pr-demon` label and the job-started hook
-- [x] dogfood on `metapages/framejs.app`: contract recipes, runner, a real issue → PR
-      (issue #96 → PR #97: built, checked, screenshots, review, auto-revise)
-- [x] runner refuses non-allowed workflows (verified with a throwaway workflow)
-- [x] fixes from the run: tracked-only leftover commits (the reviewer caught a
-      committed tool cache), agent stderr kept out of the JSON log, `set -e`
-      traps, scripts safe to update mid-run
-- [ ] runner service needs `CLAUDE_CODE_OAUTH_TOKEN` (keychain login isn't
-      visible to launchd): human step, documented in the README
-- [ ] merge `pr-demon.yml` to the default branch and run one issue fully through Actions
-- [ ] teardown on PR close, verified end to end
+- [x] Actions + runner prototype (bash), dogfooded on framejs.app #96 → PR #97
+- [x] Rewrite as a single TypeScript process: watcher, queue, scheduler, budget, agent supervisor
+- [x] SQLite store (`node:sqlite`, no native modules), status page and config editor
+- [x] Unit tests: amounts, durations, templates, config validation, budget window maths
+- [ ] Dogfood: framejs.app #99 through `pr-demon serve`
+- [ ] Prove a budget pause and resume, and a `/demon` revise, on a real issue
+- [ ] `install-service`: confirm `claude` is logged in under launchd
 
 ### Phase 2: reachable from the internet
 
-- Caddy as a launchd/systemd service with `import previews/*.caddy`.
-  `pr-demon-up` writes `previews/<branch>.caddy` and reloads, and
-  `pr-demon-down` removes it.
-- Either one pfSense forward (443 → Caddy, wildcard DNS-01 cert) or a
-  Cloudflare Tunnel (no router changes).
-- Projects need configurable public origins (auth redirect URLs, CORS,
-  cookies) for the preview hostname.
+- Caddy (one reverse proxy, `import previews/*.caddy`), with pfSense
+  forwarding 443 once, or a Cloudflare Tunnel.
+- `pr-demon-up` registers the branch's route, and `pr-demon-down` removes it.
+- Projects need configurable public origins (auth redirects, CORS, cookies).
 
 ### Phase 3: polish
 
-- Optional GitHub App token so the project's own CI runs on the agent's pushes.
-- Cost and time caps per issue. Post the agent's token usage to the PR.
-- Tag releases (`v1`). Callers pin a SHA.
-- Several runners or machines, with a stack-per-machine registry.
+- Spend per PR in the description, per-repo budgets.
+- A form view of the config next to the raw TOML.
+- Several machines coordinating through GitHub labels.

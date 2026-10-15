@@ -1,16 +1,14 @@
-# This repo's own CI. It runs on GitHub-hosted runners ONLY: a public repo must
-# never run on a self-hosted runner (anyone's fork PR would run on your machine).
+# This repo's own CI: GitHub-hosted runners only.
 name: ci
 on: [push, pull_request]
 permissions: { contents: read }
 jobs:
-  lint:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck -x bin/pr-demon lib/*.sh runner/*.sh
-      - name: hook allows pr-demon.yml on main, refuses everything else
-        run: |
-          GITHUB_WORKFLOW_REF=o/r/.github/workflows/pr-demon.yml@refs/heads/main bash runner/job-started.sh
-          ! GITHUB_WORKFLOW_REF=o/r/.github/workflows/pr-demon.yml@refs/heads/evil bash runner/job-started.sh
-          ! GITHUB_WORKFLOW_REF=o/r/.github/workflows/test.yml@refs/heads/main bash runner/job-started.sh
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci
+      - run: npm run check
+      - run: npm test

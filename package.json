@@ -1,0 +1,20 @@
+{
+  "name": "pr-demon",
+  "version": "0.2.0",
+  "description": "Label an issue, get a pull request: a coding agent supervised by one process on your own machine.",
+  "type": "module",
+  "bin": { "pr-demon": "./bin/pr-demon" },
+  "engines": { "node": ">=23.6" },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --no-warnings=ExperimentalWarning --test src/*.test.ts",
+    "serve": "node --no-warnings=ExperimentalWarning src/cli.ts serve"
+  },
+  "dependencies": {
+    "smol-toml": "^1.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.8.0"
+  }
+}
