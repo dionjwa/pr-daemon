@@ -80,6 +80,7 @@
   <span id="proxy" class="badge" hidden></span>
   <span id="pill" class="badge">…</span>
   <span id="poll" class="muted small"></span>
+  <button id="notify" hidden></button>
   <button id="poll-now" title="Check GitHub for new labels and comments now">Check GitHub now</button>
   <button id="pause"></button>
   <button id="shutdown" class="danger" title="Stop pr-daemon on this machine. Preview stacks keep running; Caddy stops with it.">Shut down</button>
@@ -271,7 +272,7 @@ function btn(key, label, cls = "", title = "") {
 }
 
 async function refresh() {
-  try { S = await api("/api/status"); render(); }
+  try { S = await api("/api/status"); render(); notifyReady(); }
   catch (e) { $("pill").textContent = "pr-daemon is not running"; $("pill").className = "badge s-failed"; }
 }
 
@@ -311,6 +312,46 @@ $("shutdown").onclick = async () => {
   setTimeout(refresh, 1500);   // the refresh loop reports it as not running
 };
 $("poll-now").onclick = async () => { await api("/api/poll", "POST"); setTimeout(refresh, 1500); };
+
+// ---------- browser notifications: a preview stack is ready ----------
+// For watching from another machine (through an SSH tunnel, say); the daemon's
+// own desktop notification is the `notify` setting. Only while this tab is
+// open, and only where the browser allows it (https or localhost). Each tab
+// remembers its own on/off; the tag stops several tabs repeating one notice.
+let seenReady = null;            // newest notice already handled; null until the first status
+const pref = { get: () => { try { return localStorage.getItem("notify") === "1"; } catch { return false; } },
+  set: (on) => { try { localStorage.setItem("notify", on ? "1" : "0"); } catch {} } };
+function notifyButton() {
+  const b = $("notify");
+  if (!("Notification" in window) || !isSecureContext) {
+    b.hidden = false; b.disabled = true; b.textContent = "🔕 Notifications unavailable";
+    b.title = "Browsers only allow notifications on https or localhost. Reach this page through an SSH tunnel (ssh -L) to use them.";
+    return;
+  }
+  b.hidden = false;
+  const p = Notification.permission, on = p === "granted" && pref.get();
+  b.disabled = p === "denied";
+  b.textContent = p === "denied" ? "🔕 Notifications blocked" : on ? "🔔 Notifications on" : "🔕 Notify me";
+  b.title = p === "denied" ? "This browser blocks notifications for this page: allow them in the site settings."
+    : on ? "A browser notification when a preview stack is ready. Click to turn off." : "Get a browser notification when a preview stack is ready";
+}
+$("notify").onclick = async () => {
+  if (Notification.permission === "granted" && pref.get()) pref.set(false);
+  else pref.set((await Notification.requestPermission()) === "granted");
+  notifyButton();
+};
+function notifyReady() {
+  const list = S.ready ?? [];
+  const newest = list.length ? list[list.length - 1].at : 0;
+  if (seenReady === null) { seenReady = newest; return; }   // history, not news
+  if ("Notification" in window && Notification.permission === "granted" && pref.get()) {
+    for (const r of list.filter((r) => r.at > seenReady)) {
+      const n = new Notification("pr-daemon: preview ready", { body: `${r.repo}#${r.issue} ${r.branch}\n${r.url}`, tag: `ready:${r.repo}:${r.branch}:${r.at}` });
+      n.onclick = () => { if (r.url) window.open(r.url, "_blank", "noopener"); n.close(); };
+    }
+  }
+  seenReady = Math.max(seenReady, newest);
+}
 
 // ---------- setup tab ----------
 // location.origin, so the line always names the host and port you reached this
@@ -353,7 +394,7 @@ function route() {
   const m = /^#job-(\d+)$/.exec(location.hash); if (m) open.add(Number(m[1]));
 }
 window.addEventListener("hashchange", route);
-route(); refresh(); setInterval(refresh, 3000);
+route(); notifyButton(); refresh(); setInterval(refresh, 3000);
 </script>
 </body>
 </html>

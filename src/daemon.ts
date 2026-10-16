@@ -38,6 +38,8 @@ export class Daemon {
   private configOnDisk = "";
   /** The last parse error announced, so one broken save doesn't repeat in the event log. */
   private configError = "";
+  /** Stacks that just became ready, newest last: the status page turns these into browser notifications. */
+  ready: { at: number; repo: string; issue: number; branch: string; url: string }[] = [];
   /** The shutdown in progress, if any. */
   private stopping: Promise<void> | null = null;
 
@@ -48,7 +50,9 @@ export class Daemon {
     this.cfg = parseConfig(this.configOnDisk);
     this.store = new Store(openDb());
     this.store.onStackReady = (s) => {
-      if (this.cfg.notify) notify("pr-daemon: preview ready", `${s.repo}#${s.issue} ${s.branch}`, publicUrl(this.cfg, s.branch) || s.url);
+      const url = publicUrl(this.cfg, s.branch) || s.url;
+      this.ready = [...this.ready, { at: Date.now(), repo: s.repo, issue: s.issue, branch: s.branch, url }].slice(-20);
+      if (this.cfg.notify) notify("pr-daemon: preview ready", `${s.repo}#${s.issue} ${s.branch}`, url);
     };
     this.proxy = new Proxy(this.store, () => this.cfg);
   }
@@ -536,6 +540,7 @@ export class Daemon {
       stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
         services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) })),
       proxy: this.proxy.status,
+      ready: this.ready,
       events: this.store.events(120),
     };
   }
