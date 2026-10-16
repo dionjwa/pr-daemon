@@ -97,6 +97,8 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
 
 export class Store {
   db: DatabaseSync;
+  /** Called when a stack becomes healthy: new, or after being down or unknown. */
+  onStackReady: ((s: Stack) => void) | null = null;
   constructor(db: DatabaseSync) { this.db = db; }
 
   // ---------- kv ----------
@@ -194,6 +196,7 @@ export class Store {
       this.db.prepare(`UPDATE stacks SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE repo = ? AND branch = ?`)
         .run(...keys.map((k) => (rest as Record<string, unknown>)[k] as SQLInputValue), repo, branch);
     }
+    if (s.healthy === 1 && existing?.healthy !== 1) this.onStackReady?.(this.stack(repo, branch)!);
   }
   deleteStack(repo: string, branch: string): void {
     this.db.prepare("DELETE FROM stacks WHERE repo = ? AND branch = ?").run(repo, branch);

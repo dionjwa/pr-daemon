@@ -12,7 +12,7 @@ import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.t
 import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
-import { formatAmount, formatDuration } from "./util.ts";
+import { formatAmount, formatDuration, notify } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
@@ -47,6 +47,9 @@ export class Daemon {
     this.configOnDisk = readConfigText();
     this.cfg = parseConfig(this.configOnDisk);
     this.store = new Store(openDb());
+    this.store.onStackReady = (s) => {
+      if (this.cfg.notify) notify("pr-daemon: preview ready", `${s.repo}#${s.issue} ${s.branch}`, publicUrl(this.cfg, s.branch) || s.url);
+    };
     this.proxy = new Proxy(this.store, () => this.cfg);
   }
 

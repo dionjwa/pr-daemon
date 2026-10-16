@@ -39,6 +39,7 @@ export interface Config {
   allowedUsers: string[];   // empty = only the gh-authenticated user
   concurrency: number;      // agent jobs at once
   preventSleep: boolean;
+  notify: boolean;          // desktop notification when a preview stack is ready
   budget: {
     windowMs: number;
     tokens: number | null;      // per window; null = unlimited
@@ -86,6 +87,7 @@ allowed_users = []       # who may direct the agent: add the label, write/edit l
                          # /pr-daemon and PR comments the agent reads. [] = only you (the gh user)
 concurrency = 1          # agent runs at the same time
 prevent_sleep = true     # macOS: keep the machine awake while pr-daemon runs
+notify = true            # desktop notification when a preview stack is ready (macOS; notify-send on Linux)
 
 [budget]
 window = "5h"            # rolling window, e.g. one Claude subscription window
@@ -228,6 +230,7 @@ export function parseConfig(text: string): Config {
     allowedUsers: users as string[],
     concurrency: Math.max(1, num(raw.concurrency, 1, "concurrency")),
     preventSleep: bool(raw.prevent_sleep, true, "prevent_sleep"),
+    notify: bool(raw.notify, true, "notify"),
     budget: {
       windowMs: dur(b.window, "5h", "budget.window"),
       tokens: amount(b.tokens, "budget.tokens"),

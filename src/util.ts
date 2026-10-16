@@ -110,6 +110,25 @@ export function slugify(s: string): string {
     .split("-").slice(0, 5).join("-").slice(0, 40).replace(/-+$/, "");
 }
 
+/**
+ * A desktop notification, best effort: terminal-notifier (clicking opens the
+ * URL) or osascript on macOS, notify-send on Linux. Never throws.
+ */
+export function notify(title: string, body: string, url = ""): void {
+  const fire = (cmd: string, args: string[], fallback?: () => void) => {
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.on("error", () => fallback?.());
+    child.unref();
+  };
+  if (process.platform === "darwin") {
+    // osascript reads the text from argv, so nothing needs escaping.
+    const osascript = () => fire("osascript", ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, url ? `${body}\n${url}` : body]);
+    fire("terminal-notifier", ["-title", title, "-message", body, "-group", `pr-daemon:${title}`, ...(url ? ["-open", url] : [])], osascript);
+  } else if (process.platform === "linux") {
+    fire("notify-send", ["--app-name=pr-daemon", title, url ? `${body}\n${url}` : body]);
+  }
+}
+
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function log(msg: string): void {
