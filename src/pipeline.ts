@@ -34,6 +34,8 @@ export interface Ctx {
   /** The agent run in flight, so the scheduler can cancel it. */
   current: AgentRun | null;
   cancelled: boolean;
+  /** pr-daemon is shutting down: start no more agent runs (the job resumes on the next start). */
+  halted?: boolean;
   activity: (line: string) => void;
   statusUrl: string;
   /** The worktree the agent runs in (set by each job once it has one). */
@@ -78,13 +80,23 @@ export const withNetworks = (existing: string | undefined, created: string[]): s
 /** The last line that says something, for one-line event messages. */
 const lastLine = (s: string) => s.trim().split("\n").filter((l) => l.trim()).pop()?.slice(0, 200) ?? "";
 
+/** Where an agent job's stream-json log is written (null for jobs without an agent). */
+export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): string | null {
+  if (!job.branch) return null;
+  const out = git.outDir(job.repo, job.branch);
+  if (job.kind === "build") return join(out, "agent-build.jsonl");
+  if (job.kind === "review") return join(out, `review-${job.id}`, "agent.jsonl");
+  if (job.kind === "revise") return join(out, `agent-revise-${job.id}.jsonl`);
+  return null;
+}
+
 // ---------------------------------------------------------------- the agent step
 /**
  * Run the agent once, under the budget. Usage is written to the ledger as it
  * streams; the moment a budget is exceeded the run is stopped and the job
  * pauses (its session resumes later). One automatic retry if it stalls.
  */
-async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resume?: string; issue: number; keepSession?: boolean }): Promise<string> {
+export async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resume?: string; issue: number; keepSession?: boolean }): Promise<string> {
   const { store, job } = ctx;
   const cfg = ctx.cfg();
   const g0 = gate(store, cfg, job.repo, o.issue);
@@ -93,6 +105,7 @@ async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resume?: st
   let resume = o.resume, promptText = o.prompt;
   type Stop = { reason: string; retryAt: number | null; needsHuman: boolean };
   for (let attempt = 1; ; attempt++) {
+    if (ctx.halted) throw new Error("pr-daemon is shutting down");
     let stop: Stop | null = null;
     const run = startAgent({
       cwd: ctx.current_wt ?? ".", prompt: promptText, logFile: o.log, resume,
@@ -181,8 +194,8 @@ export async function build(ctx: Ctx): Promise<void> {
   // Build → check → fix, until the project's own check passes. Fix rounds
   // resume the same session: the agent keeps its context (and the cache).
   let summary = await agentStep(ctx, resuming
-    ? { prompt: "pr-daemon paused you (token budget or a restart). Continue the task from where you left off.", log: join(out, "agent-build.jsonl"), resume: job.session_id, issue: n }
-    : { prompt: readFileSync(join(out, "prompt-build.md"), "utf8"), log: join(out, "agent-build.jsonl"), issue: n });
+    ? { prompt: "pr-daemon paused you (token budget or a restart). Continue the task from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
+    : { prompt: readFileSync(join(out, "prompt-build.md"), "utf8"), log: agentLog({ ...job, branch })!, issue: n });
 
   // The agent may have changed what the stack needs — or fixed an `up` that
   // was broken when we started, which is exactly what it was asked to do.
@@ -206,7 +219,7 @@ export async function build(ctx: Ctx): Promise<void> {
     store.event(`check failed; fix round ${attempt}`, job.id, "warn");
     summary = await agentStep(ctx, {
       prompt: prompt("fix", { ...vars, CHECK_OUT: result.output }),
-      log: join(out, "agent-build.jsonl"), resume: store.job(job.id)!.session_id, issue: n,
+      log: agentLog({ ...job, branch })!, resume: store.job(job.id)!.session_id, issue: n,
     });
     await restartStack();
     result = await stack.check(repo.check, wt);
@@ -280,7 +293,7 @@ export async function review(ctx: Ctx): Promise<void> {
   const text = job.session_id
     ? "pr-daemon paused you. Continue the review from where you left off."
     : prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)" });
-  await agentStep(ctx, { prompt: text, log: join(out, "agent.jsonl"), resume: job.session_id || undefined, issue: n });
+  await agentStep(ctx, { prompt: text, log: agentLog({ ...job, branch })!, resume: job.session_id || undefined, issue: n });
   const file = join(out, "review.md");
   if (!existsSync(file)) { store.event("reviewer wrote no review.md", job.id, "warn"); return; }
   await gh.review(repo.name, job.number, file);
@@ -319,8 +332,8 @@ export async function revise(ctx: Ctx): Promise<void> {
     FEEDBACK: payload(job).feedback ?? "", DISCUSSION: talk.text || "(none)", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
-    ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: join(out, `agent-revise-${job.id}.jsonl`), resume: job.session_id, issue: n }
-    : { prompt: text, log: join(out, `agent-revise-${job.id}.jsonl`), resume: builder || undefined, issue: n });
+    ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
+    : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, issue: n });
 
   await git.commitLeftovers(wt);
   const result = await stack.check(repo.check, wt);

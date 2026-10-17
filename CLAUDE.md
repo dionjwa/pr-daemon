@@ -87,6 +87,7 @@ A human always merges.
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
 | `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
+| `transcript.ts` | Parses an agent's `*.jsonl` log into what it said, each tool call and its result, for `GET /api/jobs/<id>/transcript?from=N` (the page polls for new entries). `agentLog(job)` in `pipeline.ts` is the one place that knows each job's log path |
 | `budget.ts` | Rolling-window sum, per-issue sum, `gate()`, and when the window frees up |
 | `proxy.ts` | Caddy supervisor. `caddyConfig()` is pure (unit-tested): routes are rebuilt from the stacks table every 5s and loaded via the admin API when the hash changes |
 | `db.ts` | Schema plus `Store` (jobs, usage, stacks, events, kv) |
@@ -163,6 +164,7 @@ just contract                 # print examples/justfile, the two recipes a proje
 - **launchd:** `claude` works headless when HOME and PATH are set (the plist
   does this; no OAuth token needed). `AbandonProcessGroup` plus starting
   stacks `detached` means preview stacks survive pr-daemon restarting.
+- **Shutdown stops the agents, but not the jobs.** The service lets children outlive pr-daemon (`AbandonProcessGroup` / `KillMode=process`, for the preview stacks), so an agent left alone would keep working beside the resumed copy of its own session. `doShutdown()` kills each running agent (Claude takes its tool processes with it) and waits up to 12s. `launch()` leaves those jobs `running`, and `recoverRunning()` re-queues them on the next start to `--resume`. A SIGKILLed or crashed pr-daemon can't do that, and its agents **keep working** with nobody reading their output (tested: one finished its whole task), so `start()` first runs `stopOrphans()`: any `claude -p` whose `--session-id`/`--resume` is a `running` job's session gets SIGTERM (SIGKILL after 10s) before the job resumes. Their in-flight work is lost and redone. Taking them over instead would need agents writing to a file rather than a pipe.
 - **`stop` can't rely on the API.** `pr-daemon stop` POSTs `/api/shutdown`,
   but anything older than that endpoint (or wedged) won't answer — the
   pre-rename build 403s it, since its write check wants `X-PR-Demon`. So
@@ -189,6 +191,10 @@ just contract                 # print examples/justfile, the two recipes a proje
 - **Caddy admin API vs Node `fetch`:** undici sends `Sec-Fetch-Mode: cors`, and
   Caddy then refuses requests without an allowed `Origin`. `proxy.ts` sends
   `Origin: http://<admin>` and lists it in `admin.origins`.
+- **Caddy rewrites Host for https upstreams.** With a TLS transport it sends
+  the dial address (`127.0.0.1:<port>`) as Host, not the public one, so a
+  Host-routing gateway (Traefik) 404s. `proxyTo()` sets
+  `{http.request.hostport}` explicitly unless `proxy_host = "upstream"`.
 - **Caddy ports are fixed at launch** (Docker publishes them). Changing
   ports, mode, admin address or TLS mode means stop plus relaunch: the
   `proxy:launched` kv key. The first Docker start can take a minute
@@ -231,6 +237,7 @@ just contract                 # print examples/justfile, the two recipes a proje
   `rateLimited` in `~/.pr-daemon/caddy/caddy.log`: 5 failed certificate
   attempts on a host (e.g. while DNS was wrong) lock that host out for an hour,
   and `just dev` restarting Caddy on every edit burns through attempts fast.
+- **Headless Claude doesn't log its thinking.** `thinking` blocks in stream-json have empty text (`showThinkingSummaries` doesn't change it), so the transcript shows the agent's narration, tool calls and results. Claude doesn't log the `-p` prompt either: `agent.ts` writes a `{"type":"pr-daemon","subtype":"start"}` line with it at the start of each run.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
 - **`up` / `down` / `check` are arbitrary shell command lines**, run as

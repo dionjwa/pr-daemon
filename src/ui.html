@@ -69,6 +69,19 @@
   .empty { padding: 18px 16px; color: var(--ink-3); }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } .hide-sm { display: none; } }
+  .tx { max-height: 560px; overflow: auto; padding: 10px 14px; background: var(--bg); font-size: 13px; }
+  .tx > * { margin: 0 0 6px; }
+  .tx pre { margin: 4px 0 0; padding: 6px 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
+  .tx details > summary { cursor: pointer; font: 12px/1.6 var(--mono); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tx .say { white-space: pre-wrap; line-height: 1.5; }
+  .tx .think { white-space: pre-wrap; color: var(--ink-3); font-style: italic; }
+  .tx .run { color: var(--ink-3); font-size: 12px; border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 10px; }
+  .tx .sub { margin-left: 18px; padding-left: 8px; border-left: 2px solid var(--line); }
+  .tx .err > summary, .tx pre.err { color: var(--bad); }
+  .tx .end { padding: 8px 10px; border-left: 3px solid var(--ok); background: var(--panel); white-space: pre-wrap; }
+  .tx .end.err { border-color: var(--bad); }
+  .tx-foot { padding: 6px 14px 10px; background: var(--bg); font: 12px/1.5 var(--mono); color: var(--ink-3); white-space: pre-wrap; word-break: break-word; }
   .who { margin-bottom: 10px; padding: 8px 10px; border-left: 3px solid currentColor; }
 </style>
 </head>
@@ -98,7 +111,7 @@
     </section>
   </div>
   <section>
-    <h2>Work <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for live agent activity</span></h2>
+    <h2>Work <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for the agent's transcript</span></h2>
     <div id="jobs" class="scroll"></div>
   </section>
   <section>
@@ -231,11 +244,15 @@ name = "your-org/website"</pre>`);
         <td class="small">${j.tokens ? esc(j.tokensText) : "—"}${j.cost ? `<div class="muted">≈$${j.cost.toFixed(2)} list</div>` : ""}</td>
         <td class="hide-sm small muted">${when}</td>
         <td class="actions">${btns}</td></tr>`;
-      const detail = open.has(j.id) ? `<tr><td colspan="7" style="padding:0"><pre class="activity">${
-        j.activity.length ? esc(j.activity.join("\n")) : j.state === "running" ? "waiting for the agent's first tool call…" : "No live activity (only kept while pr-daemon runs)."}${
-        j.worktree ? `\n\nworktree (the checkout it works in): ${esc(j.worktree)}\nprompts, logs, PR text, screenshots: ${esc(j.out)}` : ""}</pre></td></tr>` : "";
+      const where = j.worktree ? `worktree (the checkout it works in): ${esc(j.worktree)}\nprompts, logs, PR text, screenshots: ${esc(j.out)}` : "";
+      // Agent jobs get the transcript (a node kept across renders, see tx below); stack chores have none.
+      const detail = !open.has(j.id) ? "" : AGENT_KINDS.includes(j.kind)
+        ? `<tr><td colspan="7" style="padding:0"><div data-tx="${j.id}"></div>${where ? `<div class="tx-foot">${where}</div>` : ""}</td></tr>`
+        : `<tr><td colspan="7" style="padding:0"><pre class="activity">No agent runs in this job.${where ? `\n\n${where}` : ""}</pre></td></tr>`;
       return row + detail;
     }).join("")}</tbody></table>` : `<div class="empty">Nothing yet. Label an issue <span class="badge">${esc(S.label)}</span> to start.</div>`;
+
+  for (const cell of document.querySelectorAll("[data-tx]")) attachTx(Number(cell.dataset.tx), cell);
 
   $("stacks").innerHTML = S.stacks.length ? `<table><thead><tr><th>Branch</th><th>Issue / PR</th><th>Preview</th><th class="hide-sm">Checked</th><th></th></tr></thead><tbody>${
     S.stacks.map((s) => `<tr>
@@ -266,6 +283,68 @@ name = "your-org/website"</pre>`);
   $("events").innerHTML = S.events.map((e) => `<div class="e-${e.level}"><span class="muted">${new Date(e.at).toLocaleTimeString()}</span> ${e.job_id ? `<a href="#job-${e.job_id}">job ${e.job_id}</a> ` : ""}${esc(e.message)}</div>`).join("");
 }
 
+// ---------- transcripts: what the agent said, each tool call, and what came back ----------
+// The table is rebuilt every refresh, so each open transcript is one DOM node
+// we keep and re-attach: expanded calls stay expanded, and new entries are
+// appended (fetched from where we left off) rather than redrawn. It follows
+// the bottom while you're at the bottom, and stays put once you scroll up.
+const AGENT_KINDS = ["build", "review", "revise"];
+const tx = new Map();            // job id → { el, count, top, stick, busy, loaded }
+function attachTx(id, cell) {
+  let t = tx.get(id);
+  if (!t) {
+    const el = document.createElement("div");
+    el.className = "tx"; el.innerHTML = `<div class="muted small">Loading the transcript…</div>`;
+    t = { el, count: 0, top: 0, stick: true, busy: false, loaded: false };
+    el.addEventListener("scroll", () => { t.top = el.scrollTop; t.stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40; });
+    tx.set(id, t);
+  }
+  cell.appendChild(t.el);
+  t.el.scrollTop = t.stick ? t.el.scrollHeight : t.top;
+  const j = S.jobs.find((x) => x.id === id);
+  if (!t.loaded || j?.state === "running") loadTx(id);
+}
+async function loadTx(id) {
+  const t = tx.get(id);
+  if (!t || t.busy) return;
+  t.busy = true;
+  try {
+    const r = await api(`/api/jobs/${id}/transcript?from=${t.count}`);
+    if (!t.loaded || r.total < t.count) { t.el.innerHTML = ""; t.count = 0; }   // first load, or the log started over
+    if (!r.total) {
+      const j = S.jobs.find((x) => x.id === id);
+      t.el.innerHTML = `<div class="muted small">${j?.state === "queued" ? "Not started yet." : j?.state === "running" ? "Waiting for the agent…"
+        : `No transcript${r.file ? ` at ${esc(r.file)}` : ""}. Logs are deleted when the stack is torn down.`}</div>`;
+    }
+    for (const e of r.entries) addEntry(t.el, e);
+    t.count = r.total; t.loaded = true;
+    if (t.stick) t.el.scrollTop = t.el.scrollHeight;
+  } catch (e) { t.el.insertAdjacentHTML("beforeend", `<div class="e-error small">${esc(e.message)}</div>`); }
+  finally { t.busy = false; }
+}
+function addEntry(el, e) {
+  const sub = e.sub ? " sub" : "";
+  const line = (s) => esc(String(s).split("\n")[0].slice(0, 200));
+  let html = "";
+  if (e.k === "start") html = `<details class="run"><summary>${e.resume ? "resumed" : "started"} ${e.at ? new Date(e.at).toLocaleString() : ""} · the prompt</summary><pre>${esc(e.prompt)}</pre></details>`;
+  else if (e.k === "init") html = `<div class="muted small">${esc(e.model)} · session ${esc(e.session)}</div>`;
+  else if (e.k === "text") html = `<div class="say${sub}">${esc(e.text)}</div>`;
+  else if (e.k === "thinking") html = `<div class="think${sub}">${esc(e.text)}</div>`;
+  else if (e.k === "tool") html = `<details class="${sub}" data-call="${esc(e.id)}"><summary><span class="muted" data-mark title="running">…</span> <b>${esc(e.name)}</b> ${line(e.input)}</summary><pre>${esc(e.input)}</pre></details>`;
+  else if (e.k === "result") {
+    const call = el.querySelector(`[data-call="${CSS.escape(e.id)}"]`);
+    if (call) {
+      call.querySelector("[data-mark]").textContent = e.error ? "✗" : "✓";
+      if (e.error) call.classList.add("err");
+      call.insertAdjacentHTML("beforeend", `<pre class="${e.error ? "err" : ""}">${esc(e.text) || "(no output)"}</pre>`);
+      return;
+    }
+    html = `<pre class="${e.error ? "err" : ""}${sub}">${esc(e.text)}</pre>`;
+  }
+  else if (e.k === "end") html = `<div class="end${e.error ? " err" : ""}"><b>${e.error ? "Ended with an error" : "Done"}</b> · ${e.turns} turns${e.cost ? ` · ≈$${e.cost.toFixed(2)} list` : ""}\n${esc(e.text)}</div>`;
+  if (html) el.insertAdjacentHTML("beforeend", html);
+}
+
 function btn(key, label, cls = "", title = "") {
   const isArmed = armed.has(key);
   return `<button data-act="${esc(key)}" class="${isArmed ? "confirm" : cls}" title="${esc(title)}">${isArmed ? "Sure?" : label}</button>`;
@@ -291,7 +370,7 @@ document.addEventListener("click", async (ev) => {
     return refresh();
   }
   const row = ev.target.closest("tr[data-job]");
-  if (row && !ev.target.closest("a")) { const id = Number(row.dataset.job); open.has(id) ? open.delete(id) : open.add(id); render(); }
+  if (row && !ev.target.closest("a")) { const id = Number(row.dataset.job); if (open.has(id)) { open.delete(id); tx.delete(id); } else open.add(id); render(); }
 });
 
 $("pause").onclick = async () => { await api("/api/pause", "POST", { paused: !S?.paused }); refresh(); };

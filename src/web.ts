@@ -45,6 +45,9 @@ export function serve(d: Daemon): void {
       if (m === "POST" && url.pathname === "/api/shutdown") { d.requestShutdown(); return send(res, 200, { ok: true }); }
       if (m === "POST" && url.pathname === "/api/poll") { void d.poll(); return send(res, 200, { ok: true }); }
 
+      const tx = /^\/api\/jobs\/(\d+)\/transcript$/.exec(url.pathname);
+      if (m === "GET" && tx) return send(res, 200, d.transcript(Number(tx[1]), Number(url.searchParams.get("from") ?? 0)));
+
       const job = /^\/api\/jobs\/(\d+)\/(cancel|resume|retry)$/.exec(url.pathname);
       if (m === "POST" && job) { d[job[2] as "cancel" | "resume" | "retry"](Number(job[1])); return send(res, 200, { ok: true }); }
 

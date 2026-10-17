@@ -1,21 +1,25 @@
 // The single long-running process: polls GitHub, queues jobs, runs them under
 // the token budget, watches stacks, and serves the status page.
-import { spawn } from "node:child_process";
-import { watch, type FSWatcher } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
 import { parseConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
 import { AGENT_KINDS, openDb, Store, type Job, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
-import { CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
+import { agentLog, CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
+import { agentPids } from "./agent.ts";
+import { parseTranscript, type Entry } from "./transcript.ts";
 import { formatAmount, formatDuration, notify } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
+/** Shutdown waits this long for running agents to exit (agent.ts SIGKILLs after 10s). */
+const AGENT_STOP_MS = 12_000;
 /** Shutdown waits this long for Caddy to exit, then quits regardless. launchd's ExitTimeOut must be longer. */
 export const EXIT_DEADLINE_MS = STOP_WAIT_MS + 10_000;
 
@@ -42,6 +46,9 @@ export class Daemon {
   ready: { at: number; repo: string; issue: number; branch: string; url: string }[] = [];
   /** The shutdown in progress, if any. */
   private stopping: Promise<void> | null = null;
+  private quitting = false;
+  /** Each running job's promise, so shutdown can wait for its agent to exit. */
+  private inflight = new Map<number, Promise<void>>();
 
   constructor() {
     // Keep the text, not just the parsed config: the file watcher compares
@@ -63,6 +70,7 @@ export class Daemon {
   statusUrl(jobId?: number): string { return `http://localhost:${this.cfg.port}/${jobId ? `#job-${jobId}` : ""}`; }
 
   start(): void {
+    this.stopOrphans();
     const n = this.store.recoverRunning();
     if (n) this.store.event(`${n} job(s) were running when pr-daemon stopped; re-queued to resume`);
     this.store.event(`pr-daemon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
@@ -74,6 +82,30 @@ export class Daemon {
     setInterval(() => this.tick(), 2000).unref?.();
     this.proxy.start();
     this.watchConfig();
+  }
+
+  /**
+   * A hard-killed pr-daemon (SIGKILL, a crash) couldn't stop its agents, and
+   * they keep working with nobody reading their output. Stop them before their
+   * jobs resume the same sessions, so two agents never share a worktree. What
+   * they were in the middle of is lost; the resumed session redoes it.
+   */
+  private stopOrphans(): void {
+    const sessions = this.store.jobs(500).filter((j) => j.state === "running" && j.session_id).map((j) => j.session_id);
+    if (!sessions.length) return;
+    let ps = "";
+    try { ps = execFileSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64e6 }); }
+    catch (e) { this.store.event(`couldn't list processes to find leftover agents: ${(e as Error).message}`, null, "warn"); return; }
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const orphans = agentPids(ps, sessions).filter((o) => o.pid !== process.pid);
+    for (const o of orphans) {
+      this.store.event(`stopping a leftover agent (pid ${o.pid}, session ${o.session}) from before pr-daemon restarted`, null, "warn");
+      try { process.kill(o.pid, "SIGTERM"); } catch {}
+    }
+    // Blocking is fine here: nothing else has started yet.
+    const nap = new Int32Array(new SharedArrayBuffer(4));
+    for (let i = 0; i < 40 && orphans.some((o) => alive(o.pid)); i++) Atomics.wait(nap, 0, 0, 250);
+    for (const o of orphans.filter((o) => alive(o.pid))) { try { process.kill(o.pid, "SIGKILL"); } catch {} }
   }
 
   /**
@@ -107,7 +139,14 @@ export class Daemon {
     this.configWatcher?.close();
     this.configWatcher = null;
     this.store.event("pr-daemon is shutting down");
-    await this.proxy.shutdown();
+    // Stop the agents too. The service lets children outlive pr-daemon (so
+    // preview stacks survive a restart), and an agent left running would work
+    // on alongside the resumed copy of its own session. Jobs stay `running`,
+    // so the next start re-queues them and they resume their sessions.
+    this.quitting = true;
+    for (const ctx of this.running.values()) { ctx.halted = true; ctx.current?.kill("pr-daemon is shutting down"); }
+    const agents = Promise.race([Promise.allSettled(this.inflight.values()), new Promise((r) => setTimeout(r, AGENT_STOP_MS).unref())]);
+    await Promise.all([agents, this.proxy.shutdown()]);
   }
 
   // ------------------------------------------------------------ config
@@ -364,7 +403,7 @@ export class Daemon {
   }
 
   tick(): void {
-    if (this.paused) return;
+    if (this.paused || this.quitting) return;
     const runningJobs = [...this.running.values()].map((c) => c.job);
     let agents = runningJobs.filter((j) => AGENT_KINDS.includes(j.kind)).length;
     let chores = runningJobs.length - agents;
@@ -425,7 +464,7 @@ export class Daemon {
     this.running.set(job.id, ctx);
     this.store.event(`started ${job.kind} ${job.repo}#${job.number}`, job.id);
 
-    return JOBS[job.kind](ctx)
+    const done = JOBS[job.kind](ctx)
       .then(async () => {
         this.store.update(job.id, { state: "done", finished_at: Date.now() });
         // A review/revise that was paused set the issue to agent:paused; put it back.
@@ -433,6 +472,10 @@ export class Daemon {
         this.store.event(`finished ${job.kind} ${job.repo}#${job.number}`, job.id);
       })
       .catch(async (e: Error) => {
+        if (this.quitting) {     // stopped for shutdown: leave it `running`, to resume on the next start
+          this.store.event(`stopped for shutdown; resumes when pr-daemon starts again`, job.id, "warn");
+          return;
+        }
         if (e instanceof PauseError) {
           this.store.update(job.id, { state: "paused", reason: e.message, resume_after: e.retryAt });
           const when = e.retryAt ? `It resumes on its own in about ${formatDuration(e.retryAt - Date.now())}.` : `Press Resume on the status page when you're ready: ${this.statusUrl(job.id)}`;
@@ -454,7 +497,9 @@ export class Daemon {
           }
         }
       })
-      .finally(() => { this.running.delete(job.id); this.tick(); });
+      .finally(() => { this.running.delete(job.id); this.inflight.delete(job.id); this.tick(); });
+    this.inflight.set(job.id, done);
+    return done;
   }
 
   // ------------------------------------------------------------ actions from the page
@@ -508,6 +553,19 @@ export class Daemon {
     }
     this.store.enqueue({ repo, kind, number: s.issue, branch, trigger_key: `${kind}:${repo}:${branch}:manual:${Date.now()}` });
     this.tick();
+  }
+
+  /**
+   * The agent's transcript for one job, from entry `from` on (the page polls
+   * for what's new). Logs live in the branch's out/ directory, so they go
+   * when the stack is torn down.
+   */
+  transcript(id: number, from = 0): { file: string | null; total: number; entries: Entry[] } {
+    const j = this.store.job(id);
+    const file = j ? agentLog(j) : null;
+    if (!file || !existsSync(file)) return { file, total: 0, entries: [] };
+    const all = parseTranscript(readFileSync(file, "utf8"));
+    return { file, total: all.length, entries: all.slice(from > all.length ? 0 : from) };
   }
 
   // ------------------------------------------------------------ status for the page

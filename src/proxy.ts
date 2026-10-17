@@ -193,7 +193,11 @@ function proxyTo(url: string, mode: ProxyMode, keepHost: boolean): Record<string
     handler.transport = { protocol: "http", tls: { insecure_skip_verify: true, server_name: up.hostname } };
   }
   // The upstream sees the Host it's used to locally (e.g. a dev server that rejects unknown hosts).
+  // Otherwise it sees the public Host, which Caddy only passes through on its own
+  // for plain http: to an https upstream it sends the dial address (127.0.0.1:port),
+  // and a Host-routing gateway such as Traefik answers that with a 404.
   if (keepHost) handler.headers = { request: { set: { Host: [up.host] } } };
+  else if (up.protocol === "https:") handler.headers = { request: { set: { Host: ["{http.request.hostport}"] } } };
   return handler;
 }
 

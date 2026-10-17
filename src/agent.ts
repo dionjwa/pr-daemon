@@ -49,6 +49,21 @@ function describeTool(name: string, input: Record<string, unknown>): string {
   return `${name}: ${String(arg).replace(/\s+/g, " ").slice(0, 140)}`;
 }
 
+/**
+ * The Claude processes in `ps -axww -o pid=,command=` output that run one of
+ * these sessions: what a hard-killed pr-daemon leaves behind (they keep
+ * working when nobody reads their output).
+ */
+export function agentPids(ps: string, sessions: string[]): { pid: number; session: string }[] {
+  const out: { pid: number; session: string }[] = [];
+  for (const line of ps.split("\n")) {
+    const m = /^\s*(\d+)\s+(\S*\bclaude\s+-p\s.*)$/.exec(line);
+    const s = m && /--(?:session-id|resume)\s+([0-9a-f-]{36})(?:\s|$)/.exec(m[2]);
+    if (s && sessions.includes(s[1])) out.push({ pid: Number(m![1]), session: s[1] });
+  }
+  return out;
+}
+
 export function startAgent(o: AgentOptions): AgentRun {
   const sessionId = o.resume ?? randomUUID();
   const args = ["-p", o.prompt, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose",
@@ -58,6 +73,8 @@ export function startAgent(o: AgentOptions): AgentRun {
 
   const child = spawn("claude", args, { cwd: o.cwd, env: cleanEnv(), stdio: ["ignore", "pipe", "pipe"] });
   const log = createWriteStream(o.logFile, { flags: "a" });
+  // Claude doesn't log the prompt it was given: record it, and where each run starts.
+  log.write(JSON.stringify({ type: "pr-daemon", subtype: "start", at: Date.now(), prompt: o.prompt, resume: !!o.resume }) + "\n");
   let stderr = "";
   child.stderr.on("data", (d) => { stderr += d; if (stderr.length > 20_000) stderr = stderr.slice(-10_000); });
 

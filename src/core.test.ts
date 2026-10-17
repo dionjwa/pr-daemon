@@ -9,6 +9,8 @@ import { render } from "./pipeline.ts";
 import { openDb, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
 import { isListed, untrustedWriters } from "./gh.ts";
+import { MAX_RESULT, parseTranscript } from "./transcript.ts";
+import { agentPids } from "./agent.ts";
 
 test("human amounts", () => {
   assert.equal(parseAmount("40M"), 40_000_000);
@@ -204,6 +206,9 @@ test("caddy config routes each branch host to its local stack", () => {
   assert.equal(b.handle[0].upstreams[0].dial, "127.0.0.1:8080");
   assert.equal(b.handle[0].transport, undefined);
   assert.equal(b.handle[0].headers, undefined);           // proxy_host defaults to public
+  // Caddy sends an https upstream its dial address as Host unless told otherwise.
+  const tls = caddyConfig(cfg, [stackOf("9-tls", "https://app.localhost:21374", "o/s")], "binary") as any;
+  assert.deepEqual(tls.apps.http.servers.previews.routes[0].handle[0].headers.request.set.Host, ["{http.request.hostport}"]);
   assert.deepEqual(check.match, [{ host: ["pr-daemon.p.example.com"] }]);
   assert.equal(check.handle[0].body, CHECK_BODY);
   assert.equal(fallback.handle[0].status_code, 404);
@@ -222,4 +227,36 @@ test("issue text must come from trusted users only", () => {
   assert.deepEqual(untrustedWriters({ author: "stranger", editors: [], renamers: [] }, ["owner"]), ["stranger"]);
   assert.ok(isListed(["Alice"], "alice"));
   assert.ok(!isListed([], "alice"));
+});
+
+test("transcript: said, called, came back, once each", () => {
+  const lines = [
+    { type: "pr-daemon", subtype: "start", at: 1, prompt: "build it", resume: false },
+    { type: "system", subtype: "init", model: "m", session_id: "s" },
+    { type: "system", subtype: "thinking_tokens", estimated_tokens: 50 },
+    { type: "assistant", message: { id: "a", content: [{ type: "thinking", thinking: "" }] } },
+    { type: "assistant", message: { id: "a", content: [{ type: "text", text: "Looking around." }] } },
+    { type: "assistant", message: { id: "a", content: [{ type: "text", text: "Looking around." }] } },
+    { type: "assistant", message: { id: "a", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls", description: "list" } }] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "x".repeat(MAX_RESULT * 2) }], is_error: true }] } },
+    { type: "result", result: "done", is_error: false, num_turns: 3, total_cost_usd: 0.5 },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\nnot json\n";
+  const t = parseTranscript(lines);
+  assert.deepEqual(t.map((e) => e.k), ["start", "init", "text", "tool", "result", "end"]);
+  const tool = t[3] as { input: string };
+  assert.equal(tool.input, 'ls\n{\n  "description": "list"\n}');
+  const res = t[4] as { text: string; error: boolean };
+  assert.ok(res.error && res.text.length < MAX_RESULT + 100 && res.text.includes("left out"));
+});
+
+test("agentPids finds leftover agents by session, and nothing else", () => {
+  const a = "38bdacf0-5107-4cc9-981d-909638a116ff", b = "11111111-2222-3333-4444-555555555555";
+  const ps = [
+    `  101 claude -p Build it.\\012More --permission-mode bypassPermissions --output-format stream-json --verbose --max-turns 200 --session-id ${a}`,
+    `  102 /opt/homebrew/bin/claude -p Continue --resume ${b} --model opus`,
+    `  103 /bin/zsh -c source snapshot.sh && eval 'sleep 300' # --session-id ${a}`,
+    `  104 vim notes-about-claude -p --resume ${a}`,
+    `  105 claude -p other --session-id 99999999-2222-3333-4444-555555555555`,
+  ].join("\n");
+  assert.deepEqual(agentPids(ps, [a, b]), [{ pid: 101, session: a }, { pid: 102, session: b }]);
 });
