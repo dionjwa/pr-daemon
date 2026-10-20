@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_TOML } from "./config.ts";
 import type { Daemon } from "./daemon.ts";
 
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), "ui.html");
@@ -36,6 +37,9 @@ export function serve(d: Daemon): void {
       if (m === "GET" && url.pathname === "/setup") return send(res, 200, d.setupDoc(), "text/plain; charset=utf-8");
       if (m === "GET" && url.pathname === "/api/status") return send(res, 200, d.status());
       if (m === "GET" && url.pathname === "/api/config") return send(res, 200, { text: d.configText() });
+      // The documented template: every setting with its default and what it
+      // does. The page shows it beside your config, read-only.
+      if (m === "GET" && url.pathname === "/api/config/default") return send(res, 200, { text: DEFAULT_TOML });
       if (m === "PUT" && url.pathname === "/api/config") {
         const { text } = await body(req);
         try { d.saveConfig(String(text ?? "")); return send(res, 200, { ok: true }); }

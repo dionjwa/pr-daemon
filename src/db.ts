@@ -6,21 +6,21 @@ import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME } from "./config.ts";
 
-export type JobKind = "build" | "review" | "revise" | "teardown" | "restart";
+export type JobKind = "build" | "review" | "revise" | "ci" | "teardown" | "restart";
 export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled" | "ignored";
 
 export interface Job {
   id: number;
   repo: string;
   kind: JobKind;
-  number: number;          // issue number (build/teardown/restart) or PR number (review/revise)
-  trigger_key: string;     // dedupe key: label event id, comment id, …
+  number: number;          // issue number (build/teardown/restart) or PR number (review/revise/ci)
+  trigger_key: string;     // dedupe key: label event id, comment id, failing CI head sha, …
   state: JobState;
   reason: string;          // why it's waiting / failed / ignored
   branch: string;
   pr: number | null;
   session_id: string;      // Claude session to resume after a pause
-  payload: string;         // JSON: { feedback?, fromReview? }
+  payload: string;         // JSON: { feedback?, fromReview?, sha?, failing? }
   tokens: number;
   cost: number;
   created_at: number;
@@ -37,17 +37,27 @@ export interface Stack {
   url: string;
   pr: number | null;
   builder_session: string;
-  healthy: number;         // 1 / 0 / -1 unknown
-  error: string;           // why `up` last failed; "" when it's fine
+  healthy: number;         // the stack answers on its own address: 1 / 0 / -1 unknown
+  error: string;           // why `up` last failed, or what's wrong with the preview URL; "" when it's fine
   networks: string;        // docker network ids this stack's `up` created, space separated
   routes: string;          // JSON {service: local URL} from `up`'s PR_DAEMON_ROUTE lines; each gets <branch>--<service>.<domain>
+  /** The public preview URL serves the app: 1 / 0 / -1 (no domain, or not probed yet). */
+  public_ok: number;
+  local_code: number | null;   // last HTTP status from the stack's own address (0 = no answer)
+  public_code: number | null;  // last HTTP status from the public preview URL
   checked_at: number | null;
+  /** The project's own CI for the PR's head commit: see gh.checks(). */
+  checks_state: string;    // "" | none | pending | failure | success
+  checks_detail: string;   // one line: what is failing or running
+  checks_sha: string;      // the commit those checks are about
+  checks_at: number | null;
   created_at: number;
 }
 
 // Higher-priority work first: finish and clean up before starting new builds.
-export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, revise: 2, review: 3, build: 4 };
-export const AGENT_KINDS: JobKind[] = ["build", "review", "revise"];
+// A red PR comes before a new build: it's work already in a human's hands.
+export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, ci: 2, revise: 3, review: 4, build: 5 };
+export const AGENT_KINDS: JobKind[] = ["build", "review", "revise", "ci"];
 
 export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
   mkdirSync(HOME, { recursive: true });
@@ -78,6 +88,9 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
       builder_session TEXT NOT NULL DEFAULT '',
       healthy INTEGER NOT NULL DEFAULT -1, error TEXT NOT NULL DEFAULT '',
       networks TEXT NOT NULL DEFAULT '', checked_at INTEGER, created_at INTEGER NOT NULL,
+      public_ok INTEGER NOT NULL DEFAULT -1, local_code INTEGER, public_code INTEGER,
+      checks_state TEXT NOT NULL DEFAULT '', checks_detail TEXT NOT NULL DEFAULT '',
+      checks_sha TEXT NOT NULL DEFAULT '', checks_at INTEGER,
       PRIMARY KEY (repo, branch)
     );
     CREATE TABLE IF NOT EXISTS events (
@@ -88,16 +101,22 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
   `);
   // Columns added after the first release: ALTER is the whole migration story.
   for (const [table, col, def] of [["stacks", "error", "TEXT NOT NULL DEFAULT ''"], ["stacks", "networks", "TEXT NOT NULL DEFAULT ''"],
-    ["stacks", "routes", "TEXT NOT NULL DEFAULT ''"]]) {
+    ["stacks", "routes", "TEXT NOT NULL DEFAULT ''"], ["stacks", "public_ok", "INTEGER NOT NULL DEFAULT -1"],
+    ["stacks", "local_code", "INTEGER"], ["stacks", "public_code", "INTEGER"],
+    ["stacks", "checks_state", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_detail", "TEXT NOT NULL DEFAULT ''"],
+    ["stacks", "checks_sha", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_at", "INTEGER"]]) {
     const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === col);
     if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
   }
   return db;
 }
 
+/** A stack worth telling someone about: it answers, and its public URL (if it has one) serves the app. */
+const ready = (s?: Stack): boolean => !!s && s.healthy === 1 && s.public_ok !== 0;
+
 export class Store {
   db: DatabaseSync;
-  /** Called when a stack becomes healthy: new, or after being down or unknown. */
+  /** Called when a stack becomes reachable: new, or after being down or unknown. */
   onStackReady: ((s: Stack) => void) | null = null;
   constructor(db: DatabaseSync) { this.db = db; }
 
@@ -144,16 +163,22 @@ export class Store {
       CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END, id DESC LIMIT ?`)
       .all(Date.now() - 86400e3, limit) as unknown as Job[];
   }
-  /** Runnable jobs, best first. */
+  /** Runnable jobs, best first (PRIORITY, as SQL). */
   runnable(now = Date.now()): Job[] {
+    const order = (Object.entries(PRIORITY) as [JobKind, number][]).map(([k, n]) => `WHEN '${k}' THEN ${n}`).join(" ");
     return this.db.prepare(`SELECT * FROM jobs WHERE state = 'queued' OR (state = 'paused' AND resume_after IS NOT NULL AND resume_after <= ?)
-      ORDER BY CASE kind WHEN 'teardown' THEN 0 WHEN 'restart' THEN 1 WHEN 'revise' THEN 2 WHEN 'review' THEN 3 ELSE 4 END, id`)
+      ORDER BY CASE kind ${order} ELSE 99 END, id`)
       .all(now) as unknown as Job[];
   }
   /** Open (not finished) jobs for one issue/PR of a repo. */
   activeFor(repo: string, kind: JobKind, number: number): Job | undefined {
     return this.db.prepare(`SELECT * FROM jobs WHERE repo = ? AND kind = ? AND number = ? AND state IN ('queued','running','paused') LIMIT 1`)
       .get(repo, kind, number) as Job | undefined;
+  }
+  /** How many of a kind of job this issue/PR has had (ignored ones don't count: they never ran). */
+  countJobs(repo: string, kind: JobKind, number: number): number {
+    return Number((this.db.prepare("SELECT COUNT(*) n FROM jobs WHERE repo = ? AND kind = ? AND number = ? AND state != 'ignored'")
+      .get(repo, kind, number) as { n: number }).n);
   }
   /** After a crash, running jobs go back to the queue (their Claude session resumes). */
   recoverRunning(): number {
@@ -196,7 +221,9 @@ export class Store {
       this.db.prepare(`UPDATE stacks SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE repo = ? AND branch = ?`)
         .run(...keys.map((k) => (rest as Record<string, unknown>)[k] as SQLInputValue), repo, branch);
     }
-    if (s.healthy === 1 && existing?.healthy !== 1) this.onStackReady?.(this.stack(repo, branch)!);
+    // "Ready" means the address a person will click actually serves the app,
+    // so a stack that answers locally while its public URL doesn't is not news.
+    if (!ready(existing) && ready(this.stack(repo, branch))) this.onStackReady?.(this.stack(repo, branch)!);
   }
   deleteStack(repo: string, branch: string): void {
     this.db.prepare("DELETE FROM stacks WHERE repo = ? AND branch = ?").run(repo, branch);

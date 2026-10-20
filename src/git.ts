@@ -78,6 +78,11 @@ export async function commitLeftovers(wt: string): Promise<string[]> {
   return (await git(wt, "ls-files", "--others", "--exclude-standard")).split("\n").filter(Boolean);
 }
 
+/** The commit a worktree is on, to tell "the agent committed something" from "it didn't". */
+export async function head(wt: string): Promise<string> {
+  return git(wt, "rev-parse", "HEAD");
+}
+
 export async function commitsAhead(wt: string, base: string): Promise<number> {
   return Number(await git(wt, "rev-list", "--count", `origin/${base}..HEAD`));
 }

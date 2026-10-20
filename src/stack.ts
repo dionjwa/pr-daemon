@@ -107,10 +107,76 @@ export async function check(cmd: string, wt: string): Promise<{ ok: boolean; out
   return { ok: r.code === 0, output: tail(`${r.stdout}\n${r.stderr}`, 80), skipped: false };
 }
 
-/** Any HTTP answer below 500 counts as up (local certs are self-signed, hence -k). */
-export async function healthy(url: string): Promise<boolean> {
-  if (!url) return false;
+// ---------------------------------------------------------------- health
+// Two addresses, two different questions. The stack's own address answers "is
+// the app running at all" — anything below 500 means a server is there, and a
+// 404 from it is the app's own answer, not a fault. The public preview URL
+// answers "can a person use this", and there a 404 is the classic symptom:
+// Caddy has no route for the host, or the upstream rejects the public Host
+// (see proxy_host). So probe both and compare them.
+
+/** One HTTP probe: the status code, or 0 when nothing answered. Local certs are self-signed, hence -k. */
+export async function probe(url: string): Promise<number> {
+  if (!url) return 0;
   const r = await run("curl", ["-sk", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", url]);
-  const code = Number(r.stdout.trim());
-  return code > 0 && code < 500;
+  return Number(r.stdout.trim()) || 0;
+}
+
+export type HealthState = "up" | "degraded" | "down";
+
+/** A stack row's state in one word, for the page, `status` and `doctor`. */
+export function stackState(s: { healthy: number; public_ok: number }): HealthState | "unknown" {
+  return s.healthy === -1 ? "unknown" : s.healthy === 0 ? "down" : s.public_ok === 0 ? "degraded" : "up";
+}
+
+export interface Health {
+  state: HealthState;
+  /** Which fact made it that: used to write the message, and to decide whether a restart could help. */
+  reason: "ok" | "no-answer" | "server-error" | "preview-no-answer" | "preview-rejected";
+}
+
+/**
+ * What the two probes mean together. `local` and `pub` are status codes (0 =
+ * nothing answered); `pub` is null when there is no public URL to try.
+ *
+ * - down: the stack itself isn't serving. A restart can help.
+ * - degraded: the stack serves, but the address people use doesn't give them
+ *   the app. A restart cannot help; it's the proxy, DNS or the Host.
+ *
+ * Identical codes count as up: a proxy that faithfully relays the app's own
+ * 404 is working, and an app whose "/" is a 404 must not read as broken.
+ *
+ * Pure: unit-tested.
+ */
+export function previewHealth(local: number, pub: number | null): Health {
+  if (!local) return { state: "down", reason: "no-answer" };
+  if (local >= 500) return { state: "down", reason: "server-error" };
+  if (pub === null || pub === local || (pub >= 200 && pub < 400)) return { state: "up", reason: "ok" };
+  if (!pub) return { state: "degraded", reason: "preview-no-answer" };
+  return { state: "degraded", reason: "preview-rejected" };
+}
+
+/**
+ * What to show on the row, and what to do about it. The `preview-rejected`
+ * case is worth spelling out: the stack is fine and the proxy is running, so
+ * what's left is the Host the app receives — the gotcha `proxy_host` exists
+ * for. Pure: unit-tested.
+ */
+export function healthMessage(h: Health, o: { url: string; pub: string; repo: string; local: number; publicCode: number | null }): string {
+  const host = (u: string, part: "host" | "domain"): string => {
+    try { const h = new URL(u); return part === "host" ? h.host : h.hostname.split(".").slice(1).join("."); }
+    catch { return u; }
+  };
+  switch (h.reason) {
+    case "ok": return "";
+    case "no-answer": return `nothing answered at ${o.url}`;
+    case "server-error": return `${o.url} answered ${o.local}`;
+    case "preview-no-answer":
+      return `the stack answers at ${o.url} (${o.local}), but nothing answered at ${o.pub}. ` +
+        `Check the preview proxy below, and that *.${host(o.pub, "domain")} points at this machine.`;
+    case "preview-rejected":
+      return `the stack answers at ${o.url} (${o.local}), but ${o.pub} answers ${o.publicCode}. ` +
+        `The app is given the public Host and doesn't recognise it: set proxy_host = "upstream" for ${o.repo} ` +
+        `in the config to send it its own Host instead, or teach the app to accept ${host(o.pub, "host")}.`;
+  }
 }

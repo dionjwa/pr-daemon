@@ -49,7 +49,7 @@ export function render(template: string, vars: Record<string, string | number | 
 const prompt = (name: string, vars: Record<string, string | number | undefined>) =>
   render(readFileSync(join(PROMPTS, `${name}.md`), "utf8"), vars);
 
-function payload(job: Job): { feedback?: string; fromReview?: boolean; commentId?: number; deleteBranch?: boolean; closePr?: boolean; why?: string } {
+function payload(job: Job): { feedback?: string; fromReview?: boolean; commentId?: number; deleteBranch?: boolean; closePr?: boolean; why?: string; sha?: string; failing?: string } {
   try { return JSON.parse(job.payload || "{}"); } catch { return {}; }
 }
 
@@ -87,6 +87,7 @@ export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): str
   if (job.kind === "build") return join(out, "agent-build.jsonl");
   if (job.kind === "review") return join(out, `review-${job.id}`, "agent.jsonl");
   if (job.kind === "revise") return join(out, `agent-revise-${job.id}.jsonl`);
+  if (job.kind === "ci") return join(out, `agent-ci-${job.id}.jsonl`);
   return null;
 }
 
@@ -290,9 +291,13 @@ export async function review(ctx: Ctx): Promise<void> {
   ctx.current_wt = wt;
   const out = join(git.outDir(repo.name, branch), `review-${job.id}`);
   mkdirSync(out, { recursive: true });
+  // The repo's own CI, as it stands right now: usually still running this
+  // soon after the push, which is itself worth telling the reviewer.
+  const c = cfg.checks.watch ? await gh.checks(repo.name, p.head.sha).catch(() => null) : null;
   const text = job.session_id
     ? "pr-daemon paused you. Continue the review from where you left off."
-    : prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)" });
+    : prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)",
+      CHECKS: c ? `${c.state} (${c.summary})` : "not known" });
   await agentStep(ctx, { prompt: text, log: agentLog({ ...job, branch })!, resume: job.session_id || undefined, issue: n });
   const file = join(out, "review.md");
   if (!existsSync(file)) { store.event("reviewer wrote no review.md", job.id, "warn"); return; }
@@ -341,6 +346,72 @@ export async function revise(ctx: Ctx): Promise<void> {
   const shots = await uploadShots(ctx, branch, out);
   await gh.comment(repo.name, job.number, `🔁 **pr-daemon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
 
+${summary}
+${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`);
+}
+
+// ---------------------------------------------------------------- ci
+/**
+ * The project's own CI went red on a commit pr-daemon pushed. Same shape as a
+ * revise, with GitHub's failure as the feedback: the builder's session (when
+ * we still have it) gets the failing check names and the tail of their logs,
+ * fixes the cause, and the push makes CI run again on the new commit.
+ *
+ * The daemon queues at most one of these per head commit, and `checks.max_rounds`
+ * per PR, so a fix that doesn't fix it can't loop.
+ */
+export async function ci(ctx: Ctx): Promise<void> {
+  const { store, job, repo } = ctx;
+  const cfg = ctx.cfg();
+  const p = await gh.pr(repo.name, job.number);
+  if (p.state !== "open") { store.event(`PR #${job.number} is closed; nothing to fix`, job.id); return; }
+  const n = issueOf(p.head.ref);
+  await git.ensureClone(repo.name);
+  const { branch, wt } = await git.ensureWorktree(repo.name, n, p.base.ref);
+  ctx.current_wt = wt;
+  store.update(job.id, { branch, pr: job.number });
+  const out = git.outDir(repo.name, branch);
+  mkdirSync(out, { recursive: true });
+
+  // Ask GitHub again: the run may have been re-run, or a later push may have
+  // fixed it while this job sat in the queue.
+  const sha = payload(job).sha || p.head.sha;
+  const c = await gh.checks(repo.name, sha);
+  if (c.state !== "failure") { store.event(`checks for ${sha.slice(0, 7)} are "${c.state}" now (${c.summary}); nothing to fix`, job.id); return; }
+  const logs = await gh.failureLogs(repo.name, sha);
+
+  const s = await stack.up(repo.up, wt, publicEnv(cfg, branch));
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url: s.ok ? s.url : "", pr: job.number,
+    healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
+    networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
+
+  const text = prompt("ci", {
+    PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, SHA: sha,
+    PREVIEW_URL: stackWhere(cfg, branch, s), UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
+    FAILING: c.failing.map((f) => `- **${f.name}**${f.note ? `: ${f.note}` : ""}${f.url ? ` (${f.url})` : ""}`).join("\n"),
+    LOGS: logs || "(no logs available: these checks aren't GitHub Actions, so use their names, notes and links above)",
+  });
+  writeFileSync(join(out, `prompt-ci-${job.id}.md`), text);
+
+  const before = await git.head(wt);
+  const builder = store.stack(repo.name, branch)?.builder_session || "";
+  const summary = await agentStep(ctx, job.session_id
+    ? { prompt: "pr-daemon paused you. Continue fixing the failing checks from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
+    : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, issue: n });
+
+  await git.commitLeftovers(wt);
+  if ((await git.head(wt)) === before) {
+    // Nothing changed, so pushing would not make CI run again. Say so on the
+    // PR instead of pretending a fix went out.
+    await gh.comment(repo.name, job.number, `🧪 **pr-daemon** looked at the failing checks (${c.summary}) and made no change:\n\n${summary}`);
+    store.event("the agent changed nothing; not pushing", job.id, "warn");
+    return;
+  }
+  const local = await stack.check(repo.check, wt);
+  await git.push(wt, branch);
+  const shots = await uploadShots(ctx, branch, out);
+  await gh.comment(repo.name, job.number, `🧪 **pr-daemon** pushed a fix for the failing checks (${c.summary}). GitHub will re-run them.
+${repo.check && !local.skipped ? `\nLocally, \`${repo.check}\` ${local.ok ? "passes ✅" : `still FAILS ❌:\n\`\`\`\n${local.output}\n\`\`\``}\n` : ""}
 ${summary}
 ${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`);
 }
@@ -399,4 +470,4 @@ export async function restart(ctx: Ctx): Promise<void> {
   if (!r.ok) throw new Error(`restart failed: ${r.error}`);
 }
 
-export const JOBS = { build, review, revise, teardown, restart } as const;
+export const JOBS = { build, review, revise, ci, teardown, restart } as const;

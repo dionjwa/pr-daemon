@@ -57,6 +57,13 @@ export interface Config {
     healthEveryMs: number;
     autoRestart: boolean;
   };
+  /** The project's own CI on a PR pr-daemon pushed. */
+  checks: {
+    watch: boolean;
+    everyMs: number;
+    fix: boolean;
+    maxRounds: number;
+  };
   preview: PreviewConfig;
   repos: RepoConfig[];
 }
@@ -105,6 +112,17 @@ stall = "30m"            # no agent output for this long = stalled (kill, retry 
 [stacks]
 health_every = "5m"      # check each preview URL
 auto_restart = true      # restart a preview stack that stopped answering
+                         # A stack is never stopped on a timer: it goes away when its PR or issue
+                         # closes, when the label comes off, or when you press Tear down.
+
+[checks]
+# Your repo's own CI (GitHub Actions, or anything that reports a check or a
+# commit status). pr-daemon pushes as you, so your normal CI runs on every
+# push; this watches the result and puts an agent on it when it goes red.
+watch = true             # read each open PR's checks and show them on the status page
+every = "2m"             # how often to ask GitHub (only while a PR's preview stack exists)
+fix = true               # when a check fails, run an agent to fix it (one round per failing commit)
+max_rounds = 2           # automatic fix rounds per PR, then it stops and says so on the PR
 
 [preview]
 # Public preview URLs: https://<branch>.<domain>, e.g. https://42-dark-mode.preview.example.com
@@ -218,6 +236,7 @@ export function parseConfig(text: string): Config {
   try { raw = parse(text) as Raw; }
   catch (e) { throw new Error(`TOML syntax: ${(e as Error).message}`); }
   const b = (raw.budget ?? {}) as Raw, a = (raw.agent ?? {}) as Raw, st = (raw.stacks ?? {}) as Raw, pv = (raw.preview ?? {}) as Raw;
+  const ck = (raw.checks ?? {}) as Raw;
   const repos = (raw.repos ?? []) as Raw[];
   if (!Array.isArray(repos)) throw new Error(`repos needs DOUBLE brackets, one block per repository:\n\n${REPOS_EXAMPLE}`);
   const users = raw.allowed_users ?? [];
@@ -247,6 +266,12 @@ export function parseConfig(text: string): Config {
     stacks: {
       healthEveryMs: dur(st.health_every, "5m", "stacks.health_every"),
       autoRestart: bool(st.auto_restart, true, "stacks.auto_restart"),
+    },
+    checks: {
+      watch: bool(ck.watch, true, "checks.watch"),
+      everyMs: dur(ck.every, "2m", "checks.every"),
+      fix: bool(ck.fix, true, "checks.fix"),
+      maxRounds: Math.max(0, num(ck.max_rounds, 2, "checks.max_rounds")),
     },
     preview: {
       domain: str(pv.domain, "").trim().replace(/^\*?\./, "").toLowerCase(),

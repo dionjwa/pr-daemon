@@ -18,13 +18,16 @@ the owner's machine (`pr-daemon serve`):
 5. pushes and opens a PR with a description, screenshots and a preview link
 6. runs a **fresh** Claude session to review the PR (it sees only the PR), with
    one automatic revise round if the verdict is `changes`
-7. `/pr-daemon <feedback>` comments on the PR trigger further revisions
-8. when the PR closes (or the issue, before there's a PR), or the `agent` label
+7. watches **the repo's own CI** on the PR (check runs and commit statuses) and,
+   when it goes red, runs an agent to fix it: once per failing head commit, up
+   to `checks.max_rounds` per PR
+8. `/pr-daemon <feedback>` comments on the PR trigger further revisions
+9. when the PR closes (or the issue, before there's a PR), or the `agent` label
    is removed: `just pr-daemon-down`, remove the worktree, clear labels, and
    delete the branch on GitHub. Removing the label also cancels running jobs
    for the issue and closes its open PR. The page's Tear down button keeps the branch.
-9. with `[preview] domain` set: runs Caddy so each branch is at
-   `https://<branch>.<domain>`
+10. with `[preview] domain` set: runs Caddy so each branch is at
+    `https://<branch>.<domain>`
 
 All agent work happens within a token budget (rolling window plus per-issue cap).
 A human always merges.
@@ -63,6 +66,14 @@ A human always merges.
   who is allowed (`status().github`); keep that visible. The README's Safety
   section is the contract: recommended for private repos, because the issue
   body and PR comments are agent input regardless of who added the label.
+- **The repo's own CI is the outer check** (`[checks]`). pr-daemon pushes as
+  the owner, so normal CI runs on every push; it reads the verdict per PR
+  (`gh.checks()`), shows it on the status page, and queues a `ci` job when red.
+  The trigger key is the **head sha**, so one failing commit gets exactly one
+  agent, and `max_rounds` (default 2) caps the attempts per PR — a fix that
+  doesn't fix it can't loop. `fix = false` (or `max_rounds = 0`) watches
+  without acting. The local `check` command stays the *inner* gate, before any
+  PR opens; CI is the one that knows about other platforms, secrets and matrices.
 - **Trigger label is `agent`.** Status labels are `agent:working`,
   `agent:in-review`, `agent:paused` and `agent:failed`.
 - **Budget:** optional tokens per rolling window (default `5h`, one Claude
@@ -85,13 +96,13 @@ A human always merges.
 |---|---|
 | `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
-| `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
+| `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `ci`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
 | `transcript.ts` | Parses an agent's `*.jsonl` log into what it said, each tool call and its result, for `GET /api/jobs/<id>/transcript?from=N` (the page polls for new entries). `agentLog(job)` in `pipeline.ts` is the one place that knows each job's log path |
 | `budget.ts` | Rolling-window sum, per-issue sum, `gate()`, and when the window frees up |
 | `proxy.ts` | Caddy supervisor. `caddyConfig()` is pure (unit-tested): routes are rebuilt from the stacks table every 5s and loaded via the admin API when the hash changes |
 | `db.ts` | Schema plus `Store` (jobs, usage, stacks, events, kv) |
-| `gh.ts` / `git.ts` / `stack.ts` | Wrappers for `gh` (as the user), the cached clone plus worktrees plus the screenshot branch, and the project's up/down/check commands |
+| `gh.ts` / `git.ts` / `stack.ts` | Wrappers for `gh` (as the user), the cached clone plus worktrees plus the screenshot branch, and the project's up/down/check commands. `gh.summarizeChecks()` reduces check runs + commit statuses to one verdict; `stack.previewHealth()` turns the two health probes into up/degraded/down (both pure, unit-tested) |
 | `config.ts` | `DEFAULT_TOML` (the documented template), `parseConfig()` with readable errors, atomic save |
 | `web.ts` / `ui.html` | The localhost API (Host check; writes need `X-PR-Daemon: 1`) and the page |
 | `setup.ts` / `docs/setup.md` | `paths()` (the runtime directories) and `setupDoc()`: the project contract with this machine's real paths and commands filled in, served as plain text at `GET /setup` and printed by `pr-daemon setup` |
@@ -100,7 +111,9 @@ A human always merges.
 The repo's own `justfile` wraps the CLI plus the dev commands; `examples/justfile` is the contract a target project implements.
 
 **Job lifecycle:** `queued → running → done | failed | cancelled | paused`, and
-`ignored` for disallowed triggers. Each job has a unique `trigger_key`
+`ignored` for a trigger pr-daemon decided not to act on (a disallowed user, or
+a failing check it won't fix because of `fix`/`max_rounds`) — the row records
+the decision so it isn't taken twice. Each job has a unique `trigger_key`
 (label event id, comment id, …), so a GitHub event triggers exactly once. A
 paused or crashed job keeps its `session_id`, and resuming continues that
 Claude session. On startup, `running` jobs are re-queued.
@@ -155,6 +168,28 @@ just contract                 # print examples/justfile, the two recipes a proje
   rewrite CI). `git.push()` explains it. It also bit us when a branch was
   based on a commit that had a workflow file which was later deleted
   upstream: rebasing onto the current base fixed it.
+- **`gh run view --log-failed` can print nothing and still exit 0.** Two
+  reasons, both real here: gh **< 2.73** (this laptop had 2.60) returns an
+  empty log for runs it can't parse, and GitHub simply has no logs for some
+  runs (expired, or a self-hosted runner that uploaded none). So
+  `gh.failureLogs()` falls back to the failed **job and step names** from
+  `actions/runs/<id>/jobs`, which at least tells the agent where to look. The
+  check-run `output.title`/`summary` is already in each failing entry's note.
+- **A green health dot meant "the server answered", not "the preview works".**
+  The old check hit the stack's own address and accepted anything under 500, so
+  a branch whose public URL 404'd showed green (found in the wild:
+  `115-fix-editor-loading` answered 200 locally and 404 publicly for days).
+  Health is now two probes compared by `stack.previewHealth()`: **down** (the
+  stack doesn't answer — a restart may help, and `auto_restart` queues one),
+  **degraded** (the stack answers, the public URL doesn't give the app — a
+  restart cannot help: it's Caddy, DNS or the Host) and **up**. Identical codes
+  count as up, so an app whose `/` is a 404 isn't reported as broken and a
+  proxy faithfully relaying that 404 isn't either. Only `up` counts as "ready",
+  so the notification doesn't fire for a preview nobody can open.
+- **A public 404 with a healthy stack is almost always the Host.** Caddy sends
+  the public host upstream unless `proxy_host = "upstream"`, and a local gateway
+  that routes on Host (nhost, Traefik, a Vite dev server with `allowedHosts`)
+  answers 404. The row says so, and names the repo to set it on.
 - **gh must be ≥ 2.73.** Older `gh pr edit` asks for the Projects (classic)
   `projectCards` field, which GitHub has switched off, so it fails. `doctor`
   checks the version. Upgrade gh; don't work around it in code.
@@ -237,6 +272,13 @@ just contract                 # print examples/justfile, the two recipes a proje
   `rateLimited` in `~/.pr-daemon/caddy/caddy.log`: 5 failed certificate
   attempts on a host (e.g. while DNS was wrong) lock that host out for an hour,
   and `just dev` restarting Caddy on every edit burns through attempts fast.
+- **The config editor colours TOML with no library.** A highlighted `<pre>`
+  sits under a transparent `<textarea>` (same font, same padding, scroll synced
+  on `input`/`scroll`): the page stays one file, works offline, and keeps the
+  textarea's own undo and caret. A CDN editor would break both. The Config tab
+  has a second inner tab serving `DEFAULT_TOML` from `GET /api/config/default`:
+  every option with its default, read-only, so the template stays discoverable
+  after the file has been edited.
 - **Headless Claude doesn't log its thinking.** `thinking` blocks in stream-json have empty text (`showThinkingSummaries` doesn't change it), so the transcript shows the agent's narration, tool calls and results. Claude doesn't log the `-p` prompt either: `agent.ts` writes a `{"type":"pr-daemon","subtype":"start"}` line with it at the start of each run.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
@@ -273,6 +315,13 @@ just contract                 # print examples/justfile, the two recipes a proje
   set nhost auth's client URL and allowed redirects to `PR_DAEMON_PUBLIC_URL`.
   The DNS record is `*.home` CNAME `home.<domain>` (DNS only): a
   `home.` target with a trailing dot was the first outage.
+
+## Dogfood findings worth keeping
+
+- **metapages/framejs.io needs `proxy_host = "upstream"`.** Its stack is served
+  by a gateway that routes on Host, so `https://<branch>.home.dionjw.dev`
+  returned 404 while the stack answered 200 locally. The status page now shows
+  that as **degraded** and names the fix on the row.
 
 ## Open items
 

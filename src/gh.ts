@@ -1,6 +1,6 @@
 // GitHub through the `gh` CLI, as the logged-in user. No tokens are stored by
 // pr-daemon; `gh` (and git, via `gh auth git-credential`) use your own login.
-import { must, run } from "./util.ts";
+import { must, run, tail } from "./util.ts";
 
 async function api<T>(path: string, args: string[] = []): Promise<T> {
   return JSON.parse((await must("gh", ["api", ...args, path])) || "null") as T;
@@ -10,6 +10,12 @@ async function api<T>(path: string, args: string[] = []): Promise<T> {
 async function apiAll<T>(path: string): Promise<T[]> {
   const out = await must("gh", ["api", "--paginate", "--slurp", path]);
   return (JSON.parse(out) as T[][]).flat();
+}
+
+/** All pages of an endpoint that wraps its list in an object (check-runs, workflow runs). */
+async function apiPages<T>(path: string, pick: (page: Record<string, unknown>) => T[] | undefined): Promise<T[]> {
+  const out = await must("gh", ["api", "--paginate", "--slurp", path]);
+  return (JSON.parse(out) as Record<string, unknown>[]).flatMap((p) => pick(p) ?? []);
 }
 
 let viewerLogin: string | undefined;
@@ -109,10 +115,119 @@ export async function commentsSince(repo: string, since: string): Promise<Commen
   return apiAll<Comment>(`repos/${repo}/issues/comments?per_page=100&sort=created&direction=asc&since=${encodeURIComponent(since)}`);
 }
 
-export interface PR { number: number; state: string; merged_at: string | null; head: { ref: string }; base: { ref: string }; html_url: string }
+export interface PR { number: number; state: string; merged_at: string | null; head: { ref: string; sha: string }; base: { ref: string }; html_url: string }
 
 export async function pr(repo: string, n: number): Promise<PR> {
   return api<PR>(`repos/${repo}/pulls/${n}`);
+}
+
+// ---------------------------------------------------------------- checks (the project's own CI)
+// pr-daemon pushes as the owner, so the repo's normal CI runs on every push.
+// Two APIs describe it, and a repo can use either: check runs (GitHub Actions
+// and most apps) and the older commit statuses (external CI). Read both, for
+// one commit, and reduce them to "is this red, and what is red".
+
+/**
+ * Conclusions worth waking an agent for. Everything else that has finished
+ * counts as done, including `neutral`, `skipped`, `cancelled` and `stale`: a
+ * skipped job is not a red PR, and a cancelled one is somebody's decision.
+ */
+const FAILED = ["failure", "timed_out", "action_required", "error"];
+
+export type ChecksState = "none" | "pending" | "failure" | "success";
+
+export interface Checks {
+  state: ChecksState;
+  /** Check runs plus statuses, as GitHub counts them. */
+  total: number;
+  pending: string[];
+  failing: { name: string; note: string; url: string }[];
+  /** One line for the status page and the event log. */
+  summary: string;
+}
+
+export interface CheckRun {
+  name: string; status: string; conclusion: string | null; html_url?: string | null; details_url?: string | null;
+  output?: { title?: string | null; summary?: string | null };
+}
+export interface CommitStatus { context: string; state: string; description?: string | null; target_url?: string | null }
+
+/**
+ * Every check GitHub knows about for one commit. `state` is the whole PR's
+ * verdict: `failure` if anything failed, else `pending` while anything is
+ * still running, else `success` (or `none` when the repo has no CI at all).
+ */
+export async function checks(repo: string, sha: string): Promise<Checks> {
+  const [runs, combined] = await Promise.all([
+    apiPages<CheckRun>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`, (p) => p.check_runs as CheckRun[] | undefined),
+    api<{ statuses: CommitStatus[] } | null>(`repos/${repo}/commits/${sha}/status`).catch(() => null),
+  ]);
+  return summarizeChecks(runs, combined?.statuses ?? []);
+}
+
+/** The verdict for one commit's checks. Pure: unit-tested. */
+export function summarizeChecks(runs: CheckRun[], rawStatuses: CommitStatus[]): Checks {
+  // A context can report many times; only its latest state counts.
+  const statuses = new Map<string, CommitStatus>();
+  for (const s of rawStatuses) statuses.set(s.context, s);
+
+  const pending = [
+    ...runs.filter((r) => r.status !== "completed").map((r) => r.name),
+    ...[...statuses.values()].filter((s) => s.state === "pending").map((s) => s.context),
+  ];
+  const failing = [
+    ...runs.filter((r) => FAILED.includes(r.conclusion ?? "")).map((r) => ({
+      name: r.name,
+      note: ((r.output?.title || r.output?.summary || r.conclusion) ?? "").split("\n")[0].slice(0, 300),
+      url: r.html_url || r.details_url || "",
+    })),
+    ...[...statuses.values()].filter((s) => FAILED.includes(s.state)).map((s) => ({
+      name: s.context, note: (s.description ?? "").slice(0, 300), url: s.target_url ?? "",
+    })),
+  ];
+  const total = runs.length + statuses.size;
+  const done = total - pending.length - failing.length;
+  const state: ChecksState = failing.length ? "failure" : pending.length ? "pending" : total ? "success" : "none";
+  const summary = state === "none" ? "no checks"
+    : state === "failure" ? `${failing.length} failing: ${failing.map((f) => f.name).join(", ")}`.slice(0, 300)
+    : state === "pending" ? `${pending.length} running: ${pending.join(", ")}`.slice(0, 300)
+    : `${done} passing`;
+  return { state, total, pending, failing, summary };
+}
+
+/**
+ * The tail of the logs of whatever failed on this commit, for the agent to
+ * read. Only GitHub Actions has logs we can fetch; an external CI's failure
+ * is just its name, note and link (see checks() above).
+ *
+ * Logs don't always survive: GitHub expires them, and a self-hosted runner may
+ * never upload any — `gh run view --log-failed` then prints nothing and exits
+ * 0. So when there is no log, say which steps failed, which at least tells the
+ * agent where to look.
+ */
+export async function failureLogs(repo: string, sha: string, lines = 120): Promise<string> {
+  type Run = { id: number; name: string; conclusion: string | null };
+  const runs = await apiPages<Run>(`repos/${repo}/actions/runs?head_sha=${sha}&per_page=50`,
+    (p) => p.workflow_runs as Run[] | undefined).catch(() => []);
+  const out: string[] = [];
+  for (const r of runs.filter((x) => FAILED.includes(x.conclusion ?? "")).slice(0, 3)) {
+    // --log-failed prints only the failed steps, which is what we want to pay for.
+    const log = await run("gh", ["run", "view", String(r.id), "-R", repo, "--log-failed"], { timeoutMs: 120_000 });
+    const text = (log.stdout || log.stderr).trim();
+    out.push(`--- ${r.name} (run ${r.id})\n${text ? tail(text, lines) : await failedSteps(repo, r.id)}`);
+  }
+  return out.join("\n\n").slice(-20_000);
+}
+
+/** Which jobs and steps failed, when the logs are gone. */
+async function failedSteps(repo: string, runId: number): Promise<string> {
+  type Job = { name: string; conclusion: string | null; html_url: string | null; steps?: { name: string; conclusion: string | null }[] };
+  const jobs = await apiPages<Job>(`repos/${repo}/actions/runs/${runId}/jobs?per_page=100`, (p) => p.jobs as Job[] | undefined).catch(() => []);
+  const bad = jobs.filter((j) => FAILED.includes(j.conclusion ?? ""));
+  if (!bad.length) return "(no logs and no failed jobs: the run may have been cancelled or its logs expired)";
+  return `(no logs: GitHub has none for this run — expired, or a runner that uploads none. The failures were:)\n` +
+    bad.map((j) => `  job "${j.name}": step(s) ${(j.steps ?? []).filter((s) => FAILED.includes(s.conclusion ?? "")).map((s) => `"${s.name}"`).join(", ") || "unknown"}` +
+      `${j.html_url ? `\n    ${j.html_url}` : ""}`).join("\n");
 }
 
 export async function openPrForBranch(repo: string, branch: string): Promise<number | null> {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount } from "./util.ts";
 import { DEFAULT_TOML, parseConfig } from "./config.ts";
 import { render } from "./pipeline.ts";
-import { openDb, Store } from "./db.ts";
+import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
 import { isListed, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
@@ -114,7 +114,8 @@ import type { Stack } from "./db.ts";
 
 const stackOf = (branch: string, url: string, repo = "o/r", routes: Record<string, string> = {}): Stack => ({
   repo, branch, issue: Number(branch.split("-")[0]), worktree: "/w", url, pr: null, builder_session: "", healthy: 1, error: "", networks: "",
-  routes: JSON.stringify(routes), checked_at: null, created_at: 0,
+  routes: JSON.stringify(routes), public_ok: -1, local_code: null, public_code: null,
+  checks_state: "", checks_detail: "", checks_sha: "", checks_at: null, checked_at: null, created_at: 0,
 });
 
 test("branch → DNS label", () => {
@@ -259,4 +260,90 @@ test("agentPids finds leftover agents by session, and nothing else", () => {
     `  105 claude -p other --session-id 99999999-2222-3333-4444-555555555555`,
   ].join("\n");
   assert.deepEqual(agentPids(ps, [a, b]), [{ pid: 101, session: a }, { pid: 102, session: b }]);
+});
+
+// ---------------------------------------------------------------- health and checks
+import { previewHealth, healthMessage } from "./stack.ts";
+import { summarizeChecks } from "./gh.ts";
+
+test("a stack that answers locally isn't necessarily a working preview", () => {
+  const state = (l: number, p: number | null) => previewHealth(l, p).state;
+  // No public URL: the stack's own answer is the whole story, and a 404 from a
+  // running app is the app's answer, not a fault.
+  assert.equal(state(200, null), "up");
+  assert.equal(state(404, null), "up");
+  assert.equal(state(0, null), "down");
+  assert.equal(state(502, null), "down");
+  // With one: the public URL is what a person opens. This is the case that
+  // used to show a green dot while the preview 404'd.
+  assert.equal(state(200, 200), "up");
+  assert.equal(state(200, 302), "up");
+  assert.equal(state(200, 404), "degraded");
+  assert.equal(state(200, 0), "degraded");
+  assert.equal(state(404, 404), "up");          // the proxy is relaying the app's own answer
+  assert.equal(state(0, 200), "down");          // the stack is gone; whatever answers isn't it
+  assert.equal(previewHealth(200, 404).reason, "preview-rejected");
+  assert.equal(previewHealth(200, 0).reason, "preview-no-answer");
+});
+
+test("the degraded message names the fix", () => {
+  const o = { url: "https://app.localhost:1", pub: "https://4-x.p.example.com", repo: "o/r", local: 200, publicCode: 404 };
+  const msg = healthMessage(previewHealth(200, 404), o);
+  assert.match(msg, /proxy_host = "upstream" for o\/r/);
+  assert.match(msg, /4-x\.p\.example\.com/);
+  assert.match(healthMessage(previewHealth(200, 0), { ...o, publicCode: 0 }), /\*\.p\.example\.com/);
+  assert.equal(healthMessage(previewHealth(200, 200), o), "");
+  assert.match(healthMessage(previewHealth(0, null), o), /nothing answered/);
+});
+
+test("checks: failure wins, then pending, and skipped isn't failure", () => {
+  const run = (name: string, conclusion: string | null, status = "completed") => ({ name, status, conclusion });
+  const red = summarizeChecks([run("test", "failure"), run("lint", "success")], []);
+  assert.equal(red.state, "failure");
+  assert.deepEqual(red.failing.map((f) => f.name), ["test"]);
+  assert.match(red.summary, /1 failing: test/);
+  assert.equal(summarizeChecks([run("build", null, "in_progress"), run("lint", "success")], []).state, "pending");
+  assert.equal(summarizeChecks([run("lint", "success"), run("docs", "skipped"), run("old", "cancelled")], []).state, "success");
+  assert.equal(summarizeChecks([], []).state, "none");
+  // Commit statuses count too, and a context that reported twice counts once.
+  const s = summarizeChecks([], [{ context: "ci/x", state: "pending" }, { context: "ci/x", state: "error", description: "boom" }]);
+  assert.equal(s.state, "failure");
+  assert.deepEqual(s.failing, [{ name: "ci/x", note: "boom", url: "" }]);
+  assert.equal(s.total, 1);
+});
+
+test("checks config, and the ci job's place in the queue", () => {
+  const c = parseConfig(DEFAULT_TOML).checks;
+  assert.deepEqual(c, { watch: true, everyMs: 120e3, fix: true, maxRounds: 2 });
+  assert.equal(parseConfig(`[checks]\nfix = false\nevery = "30s"\nmax_rounds = 0`).checks.maxRounds, 0);
+  assert.throws(() => parseConfig(`[checks]\nwatch = "yes"`), /checks.watch/);
+  // A red PR is worked on before a new build starts.
+  assert.ok(PRIORITY.ci < PRIORITY.build && PRIORITY.ci > PRIORITY.restart);
+  assert.ok(AGENT_KINDS.includes("ci"));
+});
+
+test("one ci job per failing commit, counted per PR", () => {
+  const store = new Store(openDb(join(mkdtempSync(join(tmpdir(), "prd-")), "t.db")));
+  const key = (sha: string) => `ci:o/r#7:${sha}`;
+  assert.ok(store.enqueue({ repo: "o/r", kind: "ci", number: 7, trigger_key: key("aaa") }));
+  assert.equal(store.enqueue({ repo: "o/r", kind: "ci", number: 7, trigger_key: key("aaa") }), null);  // same commit: never twice
+  assert.ok(store.enqueue({ repo: "o/r", kind: "ci", number: 7, trigger_key: key("bbb") }));           // the fix's own commit went red
+  assert.equal(store.countJobs("o/r", "ci", 7), 2);
+  // An "ignored" row (the cap was reached) records the decision without counting as a round.
+  store.enqueue({ repo: "o/r", kind: "ci", number: 7, trigger_key: key("ccc"), state: "ignored", reason: "cap" });
+  assert.equal(store.countJobs("o/r", "ci", 7), 2);
+  assert.equal(store.countJobs("o/r", "ci", 8), 0);
+});
+
+test("a stack is only 'ready' when the address people use serves the app", () => {
+  const store = new Store(openDb(join(mkdtempSync(join(tmpdir(), "prd-")), "t.db")));
+  const ready: string[] = [];
+  store.onStackReady = (s) => ready.push(s.branch);
+  const base = { repo: "o/r", branch: "9-x", issue: 9, worktree: "/w" };
+  store.upsertStack({ ...base, healthy: 1, public_ok: 0 });   // up locally, preview 404s
+  assert.deepEqual(ready, []);
+  store.upsertStack({ ...base, public_ok: 1 });
+  assert.deepEqual(ready, ["9-x"]);
+  store.upsertStack({ ...base, public_ok: 1 });               // still fine: not news twice
+  assert.deepEqual(ready, ["9-x"]);
 });

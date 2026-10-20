@@ -77,6 +77,19 @@ tests. pr-daemon runs it after the agent says it's finished, and on failure
 resumes the same agent session to fix it (up to {{MAX_ATTEMPTS}} rounds on
 this machine). Keep it fast and deterministic. Leave it out, or set `check = ""`, to trust the agent.
 
+This is the *inner* gate. Your repository's own CI is the outer one: pr-daemon
+pushes as you, so your normal workflows run on every push, and it watches their
+result on the pull request. A failing check gets an agent that reads the
+failure (and the failed job's logs, where GitHub has them), fixes the cause and
+pushes again — up to {{CI_ROUNDS}} time(s) per PR on this machine (0 means it
+only reports), then it says so on the PR and stops. Nothing extra is needed in
+your project for that; two things make it work better:
+
+- keep the CI failure readable (a clear failing step beats one long log)
+- remember pr-daemon **cannot push changes under `.github/workflows/`** (its
+  GitHub login has no `workflow` scope, on purpose), so a failure that can only
+  be fixed in a workflow file is reported, not fixed
+
 ## Public preview URLs
 
 Preview domain on this machine: {{PREVIEW}}

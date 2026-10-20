@@ -333,9 +333,11 @@ export class Daemon {
     }
 
     // 4. Stacks: clean up when the PR or issue closes, or the label comes off;
-    //    keep them healthy otherwise.
+    //    keep them healthy otherwise, and watch their PR's checks.
     for (const s of store.stacks().filter((x) => x.repo === repo)) {
-      const why = await this.cleanupReason(repo, s, labeled);
+      // One PR read per stack per poll, shared by cleanup and the checks watch.
+      const pr = s.pr ? await gh.pr(repo, s.pr).catch(() => null) : null;
+      const why = await this.cleanupReason(repo, s, labeled, pr);
       if (this.busy(repo, s.branch, s.issue)) {
         // Revisions and reviews on an abandoned branch: stop them, tear down next poll.
         if (why.labelRemoved) for (const j of this.activeFor(repo, s.branch, s.issue)) this.cancel(j.id, why.text);
@@ -347,16 +349,89 @@ export class Daemon {
         if (id) store.event(`queued teardown of ${s.branch} (${why.text})`, id);
         continue;
       }
-      if (s.url && Date.now() - (s.checked_at ?? 0) > cfg.stacks.healthEveryMs) {
-        const ok = await stack.healthy(s.url);
-        store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree, healthy: ok ? 1 : 0,
-          error: ok ? "" : `${s.url} stopped answering`, checked_at: Date.now() });
-        if (!ok && cfg.stacks.autoRestart) {
-          const id = store.enqueue({ repo, kind: "restart", number: s.issue, branch: s.branch, trigger_key: `restart:${repo}:${s.branch}:${Math.floor(Date.now() / cfg.stacks.healthEveryMs)}` });
-          if (id) store.event(`stack ${s.branch} isn't answering; queued restart`, id, "warn");
-        }
-      }
+      await this.pollChecks(repo, s, pr);
+      await this.pollHealth(repo, s);
     }
+  }
+
+  /**
+   * Is this stack still serving? Two probes, because they answer different
+   * questions (see stack.previewHealth): the stack's own address says whether
+   * the app is running, the public preview URL says whether a person can use
+   * it. Only the first is something a restart can fix.
+   */
+  private async pollHealth(repo: string, s: Stack): Promise<void> {
+    const { store, cfg } = this;
+    if (!s.url || Date.now() - (s.checked_at ?? 0) <= cfg.stacks.healthEveryMs) return;
+    const pub = publicUrl(cfg, s.branch);
+    const local = await stack.probe(s.url);
+    const publicCode = pub ? await stack.probe(pub) : null;
+    const h = stack.previewHealth(local, publicCode);
+    const error = stack.healthMessage(h, { url: s.url, pub, repo, local, publicCode });
+    const was = stack.stackState(s);
+    store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree,
+      healthy: h.state === "down" ? 0 : 1, public_ok: publicCode === null ? -1 : h.state === "up" ? 1 : 0,
+      local_code: local, public_code: publicCode, error, checked_at: Date.now() });
+    if (h.state !== was) {
+      if (h.state !== "up") store.event(`stack ${s.branch} is ${h.state}: ${error}`, null, "warn");
+      else if (was !== "unknown") store.event(`stack ${s.branch} is serving again`, null, "info");
+    }
+    // A restart re-runs `up`, which can only help when the stack itself is
+    // down. A preview URL that doesn't reach a running stack is the proxy's
+    // or the app's Host handling, and restarting would just lose the app.
+    if (h.state === "down" && cfg.stacks.autoRestart) {
+      const id = store.enqueue({ repo, kind: "restart", number: s.issue, branch: s.branch, trigger_key: `restart:${repo}:${s.branch}:${Math.floor(Date.now() / cfg.stacks.healthEveryMs)}` });
+      if (id) store.event(`stack ${s.branch} isn't answering; queued restart`, id, "warn");
+    }
+  }
+
+  /**
+   * The repo's own checks on a PR pr-daemon pushed. pr-daemon pushes as the
+   * owner, so normal CI runs; this reads the verdict, shows it on the page,
+   * and when it's red puts an agent on it — once per head commit (the trigger
+   * key is the sha) and at most `checks.max_rounds` times per PR, so a fix
+   * that doesn't fix it can't loop.
+   */
+  private async pollChecks(repo: string, s: Stack, pr: gh.PR | null): Promise<void> {
+    const { store, cfg } = this;
+    if (!cfg.checks.watch || !pr || pr.state !== "open") return;
+    if (Date.now() - (s.checks_at ?? 0) <= cfg.checks.everyMs) return;
+    const c = await gh.checks(repo, pr.head.sha);
+    store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree,
+      checks_state: c.state, checks_detail: c.summary, checks_sha: pr.head.sha, checks_at: Date.now() });
+    if (c.state !== "failure") return;
+
+    // One decision per failing commit: a re-run of the same commit, or another
+    // poll, must not queue a second agent.
+    const key = `ci:${repo}#${pr.number}:${pr.head.sha}`;
+    if (store.hasTrigger(key)) return;
+    const names = c.failing.map((f) => f.name).join(", ");
+    const ignore = (reason: string): boolean => !!store.enqueue({ repo, kind: "ci", number: pr.number, branch: s.branch, trigger_key: key, state: "ignored", reason });
+
+    // Watching without fixing: record the decision (so it isn't taken twice)
+    // and leave it on the page. max_rounds = 0 means the same thing.
+    if (!cfg.checks.fix || cfg.checks.maxRounds === 0) {
+      const why = cfg.checks.fix ? "checks.max_rounds is 0" : "checks.fix is off";
+      if (ignore(`checks failing (${names}); ${why}`)) store.event(`${repo} PR #${pr.number}: ${names} failing on GitHub (${why})`, null, "warn");
+      return;
+    }
+    const rounds = store.countJobs(repo, "ci", pr.number);
+    if (rounds >= cfg.checks.maxRounds) {
+      if (!ignore(`checks failing (${names}); ${rounds} fix round(s) already used`)) return;
+      store.event(`${repo} PR #${pr.number}: ${names} still failing after ${rounds} fix round(s); leaving it to you`, null, "warn");
+      // Say it once per PR. Every later commit that fails is somebody else's
+      // now, and a comment on each would just be nagging.
+      const said = `ci-gave-up:${repo}#${pr.number}`;
+      if (store.get(said)) return;
+      store.set(said, String(Date.now()));
+      await gh.setStatus(repo, s.issue, cfg.label, "failed").catch(() => {});
+      await gh.comment(repo, pr.number, `🧪 **pr-daemon**: the checks are still failing (${c.summary}) after ${rounds} fix round(s), so it stopped trying.\n\n` +
+        `Ask for another attempt with a PR comment starting \`${COMMAND}\`, or raise \`checks.max_rounds\` in the config.`).catch(() => {});
+      return;
+    }
+    const id = store.enqueue({ repo, kind: "ci", number: pr.number, branch: s.branch, trigger_key: key, pr: pr.number,
+      payload: { sha: pr.head.sha, failing: names } });
+    if (id) store.event(`${repo} PR #${pr.number}: ${names} failing on GitHub; queued a fix (round ${rounds + 1} of ${cfg.checks.maxRounds})`, id, "warn");
   }
 
   /**
@@ -371,12 +446,11 @@ export class Daemon {
   }
 
   /** Why a stack should go, if it should: its PR (or, before there's a PR, its issue) closed, or the label was removed. */
-  private async cleanupReason(repo: string, s: Stack, labeled: Set<number>): Promise<{ text: string; labelRemoved: boolean }> {
+  private async cleanupReason(repo: string, s: Stack, labeled: Set<number>, pr: gh.PR | null): Promise<{ text: string; labelRemoved: boolean }> {
     const issue = labeled.has(s.issue) ? null : await this.unlabeled(repo, s.issue);
     if (issue === "removed") return { text: `the ${this.cfg.label} label was removed from #${s.issue}`, labelRemoved: true };
     if (s.pr) {
-      const pr = await gh.pr(repo, s.pr);
-      if (pr.state === "closed") return { text: `PR #${s.pr} ${pr.merged_at ? "merged" : "closed"}`, labelRemoved: false };
+      if (pr?.state === "closed") return { text: `PR #${s.pr} ${pr.merged_at ? "merged" : "closed"}`, labelRemoved: false };
     } else if (issue === "closed") {
       return { text: `issue #${s.issue} closed`, labelRemoved: false };
     }
@@ -392,9 +466,9 @@ export class Daemon {
       && j.kind !== "teardown" && (j.branch === branch || (j.kind === "build" && j.number === issue)));
   }
 
-  /** The issue a job is about: builds carry it; review/revise carry the PR, whose branch starts with it. */
+  /** The issue a job is about: builds carry it; review/revise/ci carry the PR, whose branch starts with it. */
   private issueOf(job: Job): number {
-    return job.kind === "review" || job.kind === "revise" ? Number(job.branch.split("-")[0]) || job.number : job.number;
+    return job.kind === "build" ? job.number : Number(job.branch.split("-")[0]) || job.number;
   }
 
   // ------------------------------------------------------------ scheduling
@@ -468,7 +542,7 @@ export class Daemon {
       .then(async () => {
         this.store.update(job.id, { state: "done", finished_at: Date.now() });
         // A review/revise that was paused set the issue to agent:paused; put it back.
-        if (job.kind === "review" || job.kind === "revise") await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "in-review").catch(() => {});
+        if (["review", "revise", "ci"].includes(job.kind)) await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "in-review").catch(() => {});
         this.store.event(`finished ${job.kind} ${job.repo}#${job.number}`, job.id);
       })
       .catch(async (e: Error) => {
@@ -596,7 +670,11 @@ export class Daemon {
         worktree: j.branch ? join(git.worktreeRoot(j.repo), j.branch) : "",
       })),
       stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
+        // One word for the dot: the page shouldn't have to re-derive it from two status codes.
+        state: stack.stackState(s),
         services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) })),
+      checks: { watch: this.cfg.checks.watch, fix: this.cfg.checks.fix, maxRounds: this.cfg.checks.maxRounds, every: formatDuration(this.cfg.checks.everyMs) },
+      health: { every: formatDuration(this.cfg.stacks.healthEveryMs), autoRestart: this.cfg.stacks.autoRestart },
       proxy: this.proxy.status,
       ready: this.ready,
       events: this.store.events(120),

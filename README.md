@@ -12,6 +12,7 @@ pr-daemon, one process on **your own machine**, then:
 4. opens a pull request with a description, screenshots, and a link to the
    running app
 5. has a second agent, which sees only the PR, review it
+6. watches your repository's own CI on the PR and fixes it if it goes red
 
 **You** try it, then merge it. Merging or closing the PR shuts the app copy
 down, deletes the branch and cleans up. Changed your mind? Remove the `agent`
@@ -23,7 +24,8 @@ label and it stops and cleans up the same way. Everything runs within a **token 
   issue #42 ──"agent"──▶  branch 42-dark-mode-toggle → start stack → agent builds
                           → checks pass? ──no──▶ agent fixes (repeat)
                           → yes: PR + screenshots + preview link
-                          → fresh agent reviews the PR ─────────────────────────▶  try it, merge
+                          → fresh agent reviews the PR
+                          → your CI runs: red? ──▶ agent fixes it (twice at most) ─▶  try it, merge
                           stop stack, delete worktree  ◀────────────────────────────────┘
 ```
 
@@ -50,6 +52,7 @@ Status and settings are on a local web page: **http://localhost:7377**.
 | Add the **`agent`** label. | Within a minute: labels it `agent:working` and comments with the branch. |
 | Wait. Watch at http://localhost:7377 if you like. | Builds, tests, opens a PR, reviews it, and labels the issue `agent:in-review`. |
 | Open the **Preview** link in the PR and try it. | Keeps the stack running and restarts it if it stops. |
+| Watch your own CI run on the PR, as usual. | If a check fails, an agent fixes it and pushes, up to twice per PR. If it's still red after that, it says so on the PR and stops. |
 | Want changes? Comment on the PR: `/pr-daemon make the button blue`. | Makes the changes, pushes, and comments with a summary and new screenshots. |
 | Merge (or close) the PR. | Stops the stack, removes the worktree, and deletes the branch on GitHub. |
 | Changed your mind? Remove the **`agent`** label. | Stops any agent working on it, closes its PR, stops the stack, removes the worktree, and deletes the branch. |
@@ -200,13 +203,23 @@ http://localhost:7377. It's only reachable from your own machine.
   state, tokens and the reason it's waiting. Click a row to watch the agent
   live. Buttons: **Cancel**, **Resume** (continue where it stopped) and
   **Retry** (start over).
-- **Preview stacks:** every running app copy, with a health dot. Buttons:
-  **Restart**, **Tear down** (stops the stack and removes the worktree, but
-  keeps the branch and any PR open).
+- **Preview stacks** (at the top): every running app copy, with a health dot
+  and its CI state. Click a row for every address it has — the public URL, the
+  local one behind it, each backend service, the worktree and the commit its
+  checks are about. The dot has three states:
+  **up** (the address people open answers with the app),
+  **degraded** (the app is running here, but its preview URL doesn't serve it —
+  usually DNS, the proxy, or the Host the app is given, and the row says which),
+  and **down** (the app isn't answering at all; it's restarted automatically).
+  Nothing is stopped on a timer: a stack goes away when its PR or issue closes,
+  when the label comes off, or when you press Tear down.
+  Buttons: **Restart**, **Tear down** (stops the stack and removes the worktree,
+  but keeps the branch and any PR open).
 - **Events:** what happened, newest first.
 - **Pause:** stops new jobs from starting. Running ones finish.
-- **Config:** edit the config file in place. It's checked before saving, so
-  a typo can't break anything.
+- **Config:** edit the config file in place, with TOML colouring. It's checked
+  before saving, so a typo can't break anything. The **All options** tab beside
+  it lists every setting, its default and what it does.
 
 ## Public preview URLs (optional)
 
@@ -337,6 +350,9 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | `agent.max_attempts` | `3` | Build → check → fix rounds before giving up |
 | `agent.auto_revise` | `true` | The builder answers the reviewer once, automatically |
 | `stacks.auto_restart` | `true` | Restart preview stacks that stop answering |
+| `checks.watch` | `true` | Read each open PR's checks (your own CI) and show them |
+| `checks.fix` | `true` | Put an agent on a failing check |
+| `checks.max_rounds` | `2` | Automatic fix rounds per PR before it stops and says so |
 | `preview.domain` | unset | Public preview URLs `https://<branch>.<domain>` (pr-daemon runs Caddy) |
 | `preview.proxy` | `auto` | `auto` / `binary` / `docker` / `off` |
 | `preview.tls` | `auto` | `auto` (Let's Encrypt) / `internal` (testing) / `off` (plain http) |

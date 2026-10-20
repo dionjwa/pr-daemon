@@ -49,7 +49,21 @@
   .s-failed { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
   .s-cancelled, .s-ignored { color: var(--ink-3); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); margin-right: 6px; }
-  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+  .s-up { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .s-degraded { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .s-down { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+  .s-unknown { color: var(--ink-3); }
+  .s-success { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .s-pending { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+  .s-failure { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+  .s-none { color: var(--ink-3); }
+  tr.row { cursor: pointer; } tr.row:hover td { background: color-mix(in srgb, var(--chip) 60%, transparent); }
+  .detail { padding: 10px 14px; background: var(--bg); font-size: 12px; }
+  .detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
+  .detail dt { color: var(--ink-3); white-space: nowrap; }
+  .detail dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+  .foot { padding: 8px 16px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 12px; }
   .actions { white-space: nowrap; text-align: right; } .actions button { margin-left: 4px; padding: 3px 9px; }
   .reason { color: var(--ink-2); font-size: 12px; max-width: 420px; }
   pre.activity { margin: 0; padding: 10px 14px; background: var(--bg); font: 12px/1.5 var(--mono); color: var(--ink-2); max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
@@ -61,7 +75,25 @@
   .events { font: 12px/1.6 var(--mono); max-height: 320px; overflow: auto; }
   .events div { padding: 2px 16px; border-bottom: 1px dashed var(--line); }
   .e-warn { color: var(--warn); } .e-error { color: var(--bad); }
-  textarea { width: 100%; min-height: 62vh; border: 0; padding: 14px 16px; background: var(--panel); color: var(--ink); font: 13px/1.55 var(--mono); resize: vertical; outline: none; }
+  /* The config editor: a highlighted <pre> under a transparent <textarea>, the
+     two kept in exact step (same font, same padding, scroll synced in JS).
+     No library, no build, nothing fetched: this page works offline. */
+  .editor { position: relative; height: 62vh; }
+  .editor > pre, .editor > textarea { position: absolute; inset: 0; margin: 0; padding: 14px 16px; border: 0;
+    font: 13px/1.55 var(--mono); white-space: pre; tab-size: 2; }
+  .editor > pre { overflow: hidden; color: var(--ink); background: var(--panel); pointer-events: none; }
+  .editor > textarea { width: 100%; overflow: auto; background: transparent; color: transparent; caret-color: var(--ink); resize: none; outline: none; }
+  .editor > textarea::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+  pre.code { margin: 0; padding: 14px 16px; max-height: 68vh; overflow: auto; background: var(--panel);
+    font: 13px/1.55 var(--mono); color: var(--ink); white-space: pre; }
+  .tc { color: var(--ink-3); font-style: italic; }   /* comment */
+  .tt { color: var(--accent); font-weight: 600; }    /* [table] */
+  .tk { color: var(--info); }                        /* key */
+  .ts { color: var(--ok); }                          /* "string" */
+  .tn, .tb { color: var(--warn); }                   /* number, true/false */
+  nav.sub { display: flex; gap: 2px; }
+  nav.sub a { padding: 2px 9px; border-radius: 6px; color: var(--ink-2); font-size: 12px; text-transform: none; letter-spacing: 0; }
+  nav.sub a.on { background: var(--chip); color: var(--ink); }
   pre.paste { margin: 0 16px; padding: 12px 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
     font: 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word; user-select: all; }
   .bar { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
@@ -111,12 +143,13 @@
     </section>
   </div>
   <section>
-    <h2>Work <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for the agent's transcript</span></h2>
-    <div id="jobs" class="scroll"></div>
+    <h2>Preview stacks <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for its addresses</span></h2>
+    <div id="stacks" class="scroll"></div>
+    <div class="foot" id="stacks-foot"></div>
   </section>
   <section>
-    <h2>Preview stacks</h2>
-    <div id="stacks" class="scroll"></div>
+    <h2>Work <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for the agent's transcript</span></h2>
+    <div id="jobs" class="scroll"></div>
   </section>
   <section>
     <h2>Events</h2>
@@ -126,12 +159,28 @@
 
 <main id="view-config" hidden>
   <section>
-    <h2>Config <span class="muted small" id="cfg-path" style="text-transform:none;letter-spacing:0"></span></h2>
-    <textarea id="cfg" spellcheck="false" wrap="off"></textarea>
-    <div class="bar">
-      <button class="primary" id="cfg-save">Save</button>
-      <button id="cfg-revert">Revert</button>
-      <span id="cfg-msg" class="small"></span>
+    <h2>Config <span class="muted small" id="cfg-path" style="text-transform:none;letter-spacing:0"></span>
+      <span class="grow"></span>
+      <nav class="sub"><a href="#config" id="ctab-edit">Your config</a><a href="#config/options" id="ctab-options">All options</a></nav></h2>
+    <div id="cfg-edit">
+      <div class="editor">
+        <pre id="cfg-hl" aria-hidden="true"></pre>
+        <textarea id="cfg" spellcheck="false" wrap="off" aria-label="config.toml"></textarea>
+      </div>
+      <div class="bar">
+        <button class="primary" id="cfg-save">Save</button>
+        <button id="cfg-revert">Revert</button>
+        <span id="cfg-msg" class="small"></span>
+      </div>
+    </div>
+    <div id="cfg-options" hidden>
+      <div class="pad small muted" style="padding-bottom:0">Every setting, its default and what it does: the template a new config file
+        starts from. Nothing here is live &mdash; copy a line into <a href="#config">your config</a> to change it.</div>
+      <pre id="cfg-default" class="code"></pre>
+      <div class="bar">
+        <button id="cfg-copy">Copy all</button>
+        <span class="small muted">Settings you don't write take these defaults.</span>
+      </div>
     </div>
   </section>
   <section>
@@ -178,6 +227,7 @@ const api = (path, method = "GET", body) => fetch(path, { method, headers: { "co
 
 let S = null;
 const open = new Set();          // expanded job rows
+const openStacks = new Set();    // expanded stack rows ("repo|branch")
 const armed = new Map();         // confirm-twice buttons: key → timeout
 
 function link(repo, n, pr) { return `<a href="https://github.com/${esc(repo)}/${pr ? "pull" : "issues"}/${n}" target="_blank" rel="noopener">${esc(repo.split("/")[1])}#${n}</a>`; }
@@ -228,7 +278,7 @@ name = "your-org/website"</pre>`);
       const isPr = j.kind === "review" || j.kind === "revise";
       // Stack chores are not agent runs: name them so a queued "restart" row
       // doesn't read as a second build.
-      const kindLabel = { restart: "restart stack", teardown: "tear down stack" }[j.kind] ?? j.kind;
+      const kindLabel = { restart: "restart stack", teardown: "tear down stack", ci: "fix failing checks" }[j.kind] ?? j.kind;
       const when = j.state === "running" ? `for ${dur(Date.now() - j.started_at)}` : j.finished_at ? ago(j.finished_at) : ago(j.created_at);
       const btns = [
         ["running", "queued", "paused"].includes(j.state) && btn(`cancel-${j.id}`, "Cancel", "danger"),
@@ -237,7 +287,7 @@ name = "your-org/website"</pre>`);
       ].filter(Boolean).join("");
       const row = `<tr class="job" data-job="${j.id}" id="job-${j.id}">
         <td><span class="badge s-${j.state}">${j.state}</span></td>
-        <td>${esc(kindLabel)}${kindLabel !== j.kind ? `<div class="muted" style="font-size:11px">no agent, no tokens</div>` : ""}</td>
+        <td>${esc(kindLabel)}${AGENT_KINDS.includes(j.kind) ? "" : `<div class="muted" style="font-size:11px">no agent, no tokens</div>`}</td>
         <td>${link(j.repo, j.number, isPr)}${j.pr && j.kind === "build" ? ` → ${link(j.repo, j.pr, true)}` : ""}
           ${j.reason ? `<div class="reason">${esc(j.reason)}${j.resume_after ? ` · resumes in ${until(j.resume_after)}` : ""}</div>` : ""}</td>
         <td class="hide-sm small">${esc(j.branch)}</td>
@@ -254,22 +304,7 @@ name = "your-org/website"</pre>`);
 
   for (const cell of document.querySelectorAll("[data-tx]")) attachTx(Number(cell.dataset.tx), cell);
 
-  $("stacks").innerHTML = S.stacks.length ? `<table><thead><tr><th>Branch</th><th>Issue / PR</th><th>Preview</th><th class="hide-sm">Checked</th><th></th></tr></thead><tbody>${
-    S.stacks.map((s) => `<tr>
-      <td class="small">${esc(s.branch)}<div class="muted" style="font-size:11px">${esc(s.worktree)}</div></td>
-      <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
-      <td><span class="dot ${s.healthy === 1 ? "ok" : s.healthy === 0 ? "bad" : ""}"></span>${
-        s.url && s.public_url ? `<a href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ""}${
-        // With a domain the stack is wired for its public origin: the local address is only the proxy's upstream.
-        s.url ? (s.public_url ? `<div class="small muted">upstream: ${esc(s.url)}</div>`
-                              : `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>`)
-              : `<span class="muted">not running</span>`}${
-        (s.services ?? []).map((v) => `<div class="small muted">${esc(v.name)}: ${v.url
-          ? `<a href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a>` : esc(v.upstream)}</div>`).join("")}${
-        s.error ? `<div class="reason" style="margin-top:6px">${esc(s.error)}</div>` : ""}</td>
-      <td class="hide-sm small muted">${ago(s.checked_at)}</td>
-      <td class="actions">${btn(`restart|${s.repo}|${s.branch}`, "Restart")}${btn(`teardown|${s.repo}|${s.branch}`, "Tear down", "danger")}</td></tr>`).join("")}</tbody></table>`
-    : `<div class="empty">No preview stacks running.</div>`;
+  renderStacks();
 
   const P = S.paths ?? {};
   $("paths").innerHTML = `<pre style="margin:0;overflow-x:auto">${[
@@ -283,12 +318,80 @@ name = "your-org/website"</pre>`);
   $("events").innerHTML = S.events.map((e) => `<div class="e-${e.level}"><span class="muted">${new Date(e.at).toLocaleTimeString()}</span> ${e.job_id ? `<a href="#job-${e.job_id}">job ${e.job_id}</a> ` : ""}${esc(e.message)}</div>`).join("");
 }
 
+// ---------- preview stacks ----------
+// The dot answers one question: can a person open this and get the app?
+//   up        the address people use answers (2xx/3xx, or the same code the
+//             stack itself gives — a proxy relaying the app's own 404 is fine)
+//   degraded  the stack answers here, but its public URL doesn't give the app.
+//             A restart can't fix that: it's the proxy, DNS, or the Host the
+//             app is given (proxy_host). The row says which.
+//   down      the stack itself isn't answering. auto_restart queues a restart.
+const STACK_STATE = {
+  up: ["ok", "up", "The preview URL answers with the app"],
+  degraded: ["warn", "degraded", "The stack is running, but its preview URL doesn't serve the app"],
+  down: ["bad", "down", "The stack isn't answering on its own address"],
+  unknown: ["", "not checked", "Not probed yet"],
+};
+const CHECKS_NOTE = { success: "passing", pending: "running", failure: "failing", none: "no checks", "": "—" };
+
+function renderStacks() {
+  const a = (url, text) => `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text ?? url)}</a>`;
+  const code = (c) => (c === null || c === undefined ? "—" : c === 0 ? "no answer" : String(c));
+  $("stacks").innerHTML = S.stacks.length ? `<table><thead><tr><th>Stack</th><th>Branch</th><th>Issue / PR</th><th>Preview</th>
+    <th class="hide-sm">Checks</th><th class="hide-sm">Probed</th><th></th></tr></thead><tbody>${
+    S.stacks.map((s) => {
+      const [cls, word, title] = STACK_STATE[s.state] ?? STACK_STATE.unknown;
+      const id = `${s.repo}|${s.branch}`;
+      const url = s.public_url || s.url;
+      const ch = s.checks_state || "";
+      const row = `<tr class="row" data-stack="${esc(id)}" title="${esc(title)}">
+        <td><span class="badge s-${esc(s.state)}"><span class="dot ${cls}"></span>${esc(word)}</span></td>
+        <td class="small">${esc(s.branch)}</td>
+        <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
+        <td class="small">${url ? a(url) : `<span class="muted">not running</span>`}${
+          s.error ? `<div class="reason" style="margin-top:4px">${esc(s.error)}</div>` : ""}</td>
+        <td class="hide-sm small">${ch
+          ? `<span class="badge s-${esc(ch)}">${esc(CHECKS_NOTE[ch] ?? ch)}</span>${
+              s.checks_detail ? `<div class="muted" style="font-size:11px">${esc(s.checks_detail)}</div>` : ""}`
+          : `<span class="muted">${S.checks?.watch ? "—" : "not watched"}</span>`}</td>
+        <td class="hide-sm small muted">${ago(s.checked_at)}</td>
+        <td class="actions">${btn(`restart|${id}`, "Restart")}${btn(`teardown|${id}`, "Tear down", "danger")}</td></tr>`;
+      if (!openStacks.has(id)) return row;
+      // Expanded: every address this stack has, and what each one really is.
+      // With a preview domain the app is wired for its public origin, so the
+      // local address is only what the proxy forwards to — worth seeing, but
+      // the app usually breaks when you open it directly.
+      const rows = [
+        ["app", s.public_url ? `${a(s.public_url)} <span class="muted">(${code(s.public_code)})</span>` : `<span class="muted">no public address (set [preview] domain)</span>`],
+        ["upstream", s.url ? `${a(s.url)} <span class="muted">(${code(s.local_code)}${s.public_url ? ", what the proxy forwards to" : ""})</span>` : `<span class="muted">none: \`up\` printed no URL</span>`],
+        ...(s.services ?? []).map((v) => [v.name, `${v.url ? a(v.url) : `<span class="muted">no public address (set [preview] domain)</span>`} <span class="muted">←</span> ${esc(v.upstream)}`]),
+        ["worktree", esc(s.worktree)],
+        ...(s.checks_sha ? [["checks", `${esc(s.checks_state)}${s.checks_detail ? ` — ${esc(s.checks_detail)}` : ""} <span class="muted">at ${esc(s.checks_sha.slice(0, 7))}, read ${ago(s.checks_at)}</span>${
+          s.pr ? ` · ${a(`https://github.com/${s.repo}/pull/${s.pr}/checks`, "on GitHub")}` : ""}`]] : []),
+        ...(s.networks ? [["docker networks", esc(s.networks)]] : []),
+        ["started", `${new Date(s.created_at).toLocaleString()} <span class="muted">(${ago(s.created_at)})</span>`],
+      ];
+      return row + `<tr><td colspan="7" style="padding:0"><div class="detail"><dl>${
+        rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl></div></td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="empty">No preview stacks running.</div>`;
+
+  // Say plainly what does and doesn't stop a stack: the question a green dot
+  // on a dead preview makes people ask.
+  const h = S.health ?? {}, c = S.checks ?? {};
+  $("stacks-foot").innerHTML = `Each stack is probed every ${esc(h.every ?? "?")} on its own address and, with a preview domain, on its public URL.
+    ${h.autoRestart ? "One that stops answering is restarted automatically." : "<b>auto_restart is off</b>, so one that stops answering stays down."}
+    Nothing is stopped on a timer: a stack goes away when its PR or issue closes, when the <span class="badge">${esc(S.label)}</span> label comes off,
+    or when you press Tear down &mdash; and the <a href="#">Events</a> log says which.
+    ${c.watch ? `GitHub's own checks are read every ${esc(c.every)}${c.fix ? `, and a failing one gets an agent (up to ${c.maxRounds} round${c.maxRounds === 1 ? "" : "s"} per PR)` : " (fixing is off)"}.`
+      : "Checks on PRs are not being watched (<code>checks.watch = false</code>)."}`;
+}
+
 // ---------- transcripts: what the agent said, each tool call, and what came back ----------
 // The table is rebuilt every refresh, so each open transcript is one DOM node
 // we keep and re-attach: expanded calls stay expanded, and new entries are
 // appended (fetched from where we left off) rather than redrawn. It follows
 // the bottom while you're at the bottom, and stays put once you scroll up.
-const AGENT_KINDS = ["build", "review", "revise"];
+const AGENT_KINDS = ["build", "review", "revise", "ci"];
 const tx = new Map();            // job id → { el, count, top, stick, busy, loaded }
 function attachTx(id, cell) {
   let t = tx.get(id);
@@ -371,6 +474,8 @@ document.addEventListener("click", async (ev) => {
   }
   const row = ev.target.closest("tr[data-job]");
   if (row && !ev.target.closest("a")) { const id = Number(row.dataset.job); if (open.has(id)) { open.delete(id); tx.delete(id); } else open.add(id); render(); }
+  const st = ev.target.closest("tr[data-stack]");
+  if (st && !ev.target.closest("a")) { const k = st.dataset.stack; openStacks.has(k) ? openStacks.delete(k) : openStacks.add(k); renderStacks(); }
 });
 
 $("pause").onclick = async () => { await api("/api/pause", "POST", { paused: !S?.paused }); refresh(); };
@@ -447,30 +552,86 @@ $("setup-copy").onclick = async (e) => {
   setTimeout(() => (b.textContent = "Copy"), 2000);
 };
 
+// ---------- TOML colouring ----------
+// Small enough to keep here: TOML is line-oriented, so one pass per line is
+// plenty. Nothing is fetched and nothing is parsed for meaning — if a line
+// doesn't match, it's printed plain. Everything goes through esc().
+const sp = (cls, s) => `<span class="${cls}">${esc(s)}</span>`;
+function hlToml(text) { return text.split("\n").map(hlLine).join("\n"); }
+function hlLine(line) {
+  let m = /^(\s*)(\[\[?[^\]]*\]\]?)(.*)$/.exec(line);              // [table] / [[list]]
+  if (m) return m[1] + sp("tt", m[2]) + hlValue(m[3]);
+  m = /^(\s*)("[^"]*"|[A-Za-z0-9_.-]+)(\s*=\s*)(.*)$/.exec(line);  // key = value
+  if (m) return m[1] + sp("tk", m[2]) + esc(m[3]) + hlValue(m[4]);
+  return hlValue(line);                                           // a comment, or something we don't know
+}
+/** A value and whatever follows it: strings first, so a "#" inside one isn't a comment. */
+function hlValue(s) {
+  let out = "";
+  for (let i = 0; i < s.length; ) {
+    const c = s[i], rest = s.slice(i);
+    if (c === '"' || c === "'") {
+      const j = s.indexOf(c, i + 1), end = j < 0 ? s.length : j + 1;
+      out += sp("ts", s.slice(i, end)); i = end; continue;
+    }
+    if (c === "#") { out += sp("tc", rest); break; }
+    const n = /^-?\d[\d_]*(\.\d+)?([eE][-+]?\d+)?/.exec(rest);
+    if (n) { out += sp("tn", n[0]); i += n[0].length; continue; }
+    const b = /^(true|false|inf|nan)\b/.exec(rest);
+    if (b) { out += sp("tb", b[0]); i += b[0].length; continue; }
+    out += esc(c); i++;
+  }
+  return out;
+}
+
 // ---------- config tab: loaded on open, never overwritten by the refresh loop ----------
 let loadedCfg = "";
 async function loadConfig() {
   const { text } = await api("/api/config");
   loadedCfg = text; $("cfg").value = text; $("cfg-msg").textContent = ""; $("cfg-path").textContent = S?.configPath ?? "";
+  paintCfg();
 }
+let loadedDefaults = false;
+async function loadDefaults() {
+  if (loadedDefaults) return;
+  const { text } = await api("/api/config/default");
+  $("cfg-default").innerHTML = hlToml(text);
+  loadedDefaults = true;
+}
+/** Repaint the layer under the textarea, and keep the two scrolled together. */
+function paintCfg() { $("cfg-hl").innerHTML = hlToml(`${$("cfg").value}\n`); syncCfg(); }
+function syncCfg() { const t = $("cfg"), h = $("cfg-hl"); h.scrollTop = t.scrollTop; h.scrollLeft = t.scrollLeft; }
+$("cfg").addEventListener("input", paintCfg);
+$("cfg").addEventListener("scroll", syncCfg);
 $("cfg-save").onclick = async () => {
   $("cfg-msg").className = "small"; $("cfg-msg").textContent = "Saving…";
   try { await api("/api/config", "PUT", { text: $("cfg").value }); loadedCfg = $("cfg").value;
     $("cfg-msg").className = "small msg-ok"; $("cfg-msg").textContent = "Saved. Changes apply now (a new port applies after a restart)."; refresh(); }
   catch (e) { $("cfg-msg").className = "small msg-bad"; $("cfg-msg").textContent = `Not saved: ${e.message}`; }
 };
-$("cfg-revert").onclick = () => { $("cfg").value = loadedCfg; $("cfg-msg").textContent = ""; };
+$("cfg-revert").onclick = () => { $("cfg").value = loadedCfg; $("cfg-msg").textContent = ""; paintCfg(); };
 $("cfg").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); $("cfg-save").click(); } });
+$("cfg-copy").onclick = async (e) => {
+  const b = e.currentTarget;
+  try { await navigator.clipboard.writeText($("cfg-default").textContent); b.textContent = "Copied"; }
+  catch { getSelection().selectAllChildren($("cfg-default")); b.textContent = "Press ⌘C"; }
+  setTimeout(() => (b.textContent = "Copy all"), 2000);
+};
 
 function route() {
-  const view = location.hash === "#config" ? "config" : location.hash === "#setup" ? "setup" : "status";
+  const hash = location.hash.replace(/^#/, "");
+  const view = hash.startsWith("config") ? "config" : hash.startsWith("setup") ? "setup" : "status";
   for (const v of ["status", "setup", "config"]) {
     $(`view-${v}`).hidden = v !== view;
     $(`tab-${v}`).className = v === view ? "on" : "";
   }
-  if (view === "config") loadConfig();
+  if (view === "config") {
+    const tab = hash === "config/options" ? "options" : "edit";
+    for (const t of ["edit", "options"]) { $(`cfg-${t}`).hidden = t !== tab; $(`ctab-${t}`).className = t === tab ? "on" : ""; }
+    if (tab === "options") loadDefaults(); else loadConfig();
+  }
   if (view === "setup") setupPaste();
-  const m = /^#job-(\d+)$/.exec(location.hash); if (m) open.add(Number(m[1]));
+  const m = /^job-(\d+)$/.exec(hash); if (m) open.add(Number(m[1]));
 }
 window.addEventListener("hashchange", route);
 route(); notifyButton(); refresh(); setInterval(refresh, 3000);

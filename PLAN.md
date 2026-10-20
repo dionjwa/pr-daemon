@@ -37,6 +37,7 @@ stacks, and serves a status and config page on localhost.
 | **Agents run with no CI variables.** | The stack behaves exactly as it does when you run the project yourself. |
 | **Agent = `claude -p --output-format stream-json`.** | Usage streams live, which drives the budget. `--session-id` / `--resume` let a paused or stalled run continue instead of starting over. |
 | **pr-daemon decides "done"**, not the agent. | It re-runs the check and resumes the same session with the failure, up to N rounds. |
+| **Your repository's CI is the outer check.** | The local check runs before the PR opens; GitHub's own checks know about other platforms, secrets and matrices. A red PR gets an agent, keyed by the failing commit and capped per PR, so it can't loop. |
 | **The reviewer is a fresh session.** | No build context leaks in. It posts a COMMENT review, since you can't approve your own PR. |
 | **One automatic revise round** after a `VERDICT: changes` review. After that, `/pr-daemon` comments. | Cheap fixes happen without you, with no endless back-and-forth between agents. |
 | **Budget = a rolling token window plus a per-issue cap**, in human amounts (`"40M"`). | Matches the 5-hour subscription window. The per-issue cap protects against one runaway issue. |
@@ -68,6 +69,9 @@ stacks, and serves a status and config page on localhost.
 
 ### Phase 3: polish
 
+- [x] Watch the repo's own checks on each PR, and fix a failing one (`[checks]`)
+- [x] Preview health that tells "the app is running" from "a person can open it": two probes, up / degraded / down, with the fix named on the row
+- [x] Status page: stacks first, each row expands to every address; TOML colouring and an "All options" tab in Config
 - Spend per PR in the description, per-repo budgets.
 - Optional access control on previews (basic auth or a shared secret), and a wildcard certificate via a DNS challenge.
 - A form view of the config next to the raw TOML.

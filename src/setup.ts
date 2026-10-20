@@ -29,6 +29,7 @@ export function setupDoc(cfg: Config, command: string): string {
     UP: r?.up ?? "just pr-daemon-up", DOWN: r?.down ?? "just pr-daemon-down", CHECK: r?.check || "just pr-daemon-check",
     HOME: p.home, REPOS: p.repos, WORKTREES: p.worktrees, OUT: p.out,
     MAX_ATTEMPTS: cfg.agent.maxAttempts,
+    CI_ROUNDS: cfg.checks.watch && cfg.checks.fix ? cfg.checks.maxRounds : 0,
     PREVIEW: pv.domain && pv.proxy !== "off" ? `*.${pv.domain}` : "none, so those variables are empty",
   });
 }

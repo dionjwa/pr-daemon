@@ -5,6 +5,90 @@ system works see CLAUDE.md; for the roadmap see PLAN.md.
 
 ---
 
+## 2026-10-18: nobody was watching CI, and a green dot was lying
+
+Two gaps, found by asking two questions.
+
+**"Do we monitor the tests after we push?"** No. The only gate was the local
+`check` command, run in the worktree before the PR opened, and again after a
+revise (which pushed regardless and only mentioned the result in a comment).
+Once the PR existed, nothing read GitHub again except to notice it had closed.
+A branch that passed locally and failed in CI — a different platform, a secret,
+a matrix job, a lint step not in `pr-daemon-check` — sat red with `agent:in-review`
+on the issue and no one told. The reviewer agent didn't know either.
+
+Now `[checks]`. Each poll, for every stack whose PR is open, pr-daemon reads
+GitHub's verdict for the PR's head commit (`gh.checks()`: check runs *and* the
+older commit statuses, since a repo may use either) and stores it on the stack
+row, so the page shows passing / running / failing per preview. When it's
+failing it queues a `ci` job: the builder's own Claude session where we still
+have it, given the failing check names, their notes and the tail of the failed
+job logs, told to fix the cause, never to weaken a test, and never to touch
+`.github/workflows/` (pr-daemon's push would be rejected for want of the
+`workflow` scope). It commits, pr-daemon pushes, and the push makes CI run
+again.
+
+The loop-safety is the part worth remembering: **the trigger key is the head
+sha**. One failing commit gets exactly one agent, however many times it's
+re-run or re-polled; the fix produces a new commit, so a new failure is a new
+decision; and `max_rounds` (default 2) caps the attempts per PR, after which it
+comments on the PR and stops. `fix = false` or `max_rounds = 0` watches without
+acting, and records that it decided not to (an `ignored` job row), so the
+decision isn't retaken every minute. A `ci` job outranks a new `build` in the
+queue: work already in a human's hands comes first.
+
+Verified against the real `metapages/framejs.io` PR #116 — which was, as it
+happens, red and unattended: pr-daemon read `1 failing: Test` at `01db38f3`,
+queued one fix, and queued nothing more on the next poll.
+
+**"Why is this stack green when the preview 404s?"** Because
+`stack.healthy()` asked the wrong address the wrong question: it probed the
+stack's own URL and accepted any status under 500. `115-fix-editor-loading`
+answered 200 at `https://framejs-io.localhost:32974` and 404 at
+`https://115-fix-editor-loading.home.dionjw.dev`, and the page said it was fine.
+The 404 was Caddy relaying a 404 from the upstream, not Caddy failing to route:
+the stack sits behind a gateway that routes on Host, and Caddy sends the public
+host unless `proxy_host = "upstream"`. The documented gotcha, undetected
+because nothing looked.
+
+Health is now two probes and a comparison (`previewHealth`, pure and tested):
+
+- **down** — the stack's own address doesn't answer (or 5xx). A restart may
+  help; `auto_restart` queues one, as before.
+- **degraded** — the stack answers, the public URL doesn't give the app. A
+  restart *cannot* help, so it doesn't happen; the row names the likely fix,
+  including which repo to set `proxy_host = "upstream"` on.
+- **up** — the address people actually open answers. Identical codes count as
+  up, so an app whose `/` is a 404 doesn't read as broken, and neither does a
+  proxy faithfully relaying it.
+
+"Ready" (the desktop and browser notifications) now means *up*, not "the
+process started". `doctor` lists each stack's state too, and `pr-daemon status`
+prints it.
+
+**The page.** Preview stacks moved to the top, where the thing you came to
+click lives. Each row expands to every address the stack has — public URL and
+its status code, the local upstream behind it, every service with its upstream,
+the worktree, the commit its checks are about, its Docker networks — and a
+footer says plainly what does and doesn't stop a stack, because "do these get
+shut down after a while?" is the question a stale preview makes you ask (they
+don't; only a closed PR or issue, a removed label, or Tear down).
+
+**Config colouring, without a dependency.** A highlighted `<pre>` under a
+transparent `<textarea>`, same font, same padding, scroll synced: TOML in
+colour while keeping the textarea's own undo, caret and selection, in one file
+that still works offline. A second tab in Config serves `DEFAULT_TOML` from
+`GET /api/config/default` — every setting, its default and what it does — so
+the documented template stays reachable after the file has been edited past it.
+
+**Learned along the way:** `gh run view --log-failed` can print nothing and
+exit 0 — on gh < 2.73 (this laptop still had 2.60) and whenever GitHub has no
+logs for the run (expired, or a self-hosted runner that uploads none). When
+that happens, `failureLogs()` falls back to the failed job and step names from
+`actions/runs/<id>/jobs`, which at least points the agent at the right step.
+
+---
+
 ## 2026-10-15: there was no way to stop it
 
 You could start pr-daemon four ways and stop it none: Ctrl-C if it had a
@@ -372,6 +456,11 @@ The run cost about 2.8M tokens, around 94% of them cache reads.
 ## Next steps
 
 **Needs the owner**
+
+- **Set `proxy_host = "upstream"` for `metapages/framejs.io`** in the config:
+  its previews answer 404 publicly while the stack answers fine locally (the
+  status page now shows that as degraded and names the fix on the row).
+
 1. **Real preview domain:**
    - set `[preview] domain` (and optionally `email`) in the Config tab
    - point a wildcard DNS record `*.<domain>` at this machine

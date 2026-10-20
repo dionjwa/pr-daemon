@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
 import { Daemon, EXIT_DEADLINE_MS } from "./daemon.ts";
 import { caddyHasDns, CHECK_BODY, CHECK_LABEL, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
-import type { JobKind } from "./db.ts";
+import { openDb, Store, type JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
+import { stackState } from "./stack.ts";
 import { run } from "./util.ts";
 import { serve } from "./web.ts";
 
@@ -19,7 +20,7 @@ const HELP = `pr-daemon — label an issue, get a pull request.
   pr-daemon doctor                        check tools, logins and config
   pr-daemon setup                         print what a project must do to take part (also at /setup)
   pr-daemon run <kind> <owner/repo> <n> [feedback]
-                                         run one job now, in this terminal (kind: build|review|revise|teardown|restart)
+                                         run one job now, in this terminal (kind: build|review|revise|ci|teardown|restart)
   pr-daemon install-service               start pr-daemon at login (macOS launchd / Linux systemd --user)
   pr-daemon uninstall-service
 
@@ -57,7 +58,7 @@ async function main(argv: string[]): Promise<void> {
     case "setup": console.log(setupDoc(loadConfig(), "/pr-daemon")); return;
     case "run": {
       const [kind, repo, n, ...rest] = args;
-      if (!["build", "review", "revise", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
+      if (!["build", "review", "revise", "ci", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
       const d = new Daemon();
       const id = d.store.enqueue({ repo, kind: kind as JobKind, number: Number(n), trigger_key: `manual:${repo}#${n}:${kind}:${Date.now()}`,
         payload: rest.length ? { feedback: rest.join(" ") } : {} });
@@ -82,7 +83,10 @@ async function status(): Promise<void> {
   if (s.github) console.log(`  acting on GitHub as @${s.github.actingAs || "?"} · only ${s.github.allowedUsers.map((u: string) => `@${u}`).join(", ") || "?"} can trigger work`);
   for (const j of s.jobs.filter((x: any) => ["running", "queued", "paused"].includes(x.state)))
     console.log(`  ${j.state.padEnd(8)} ${j.kind.padEnd(8)} ${j.repo}#${j.number}  ${j.tokensText}  ${j.reason}`);
-  for (const st of s.stacks) console.log(`  stack   ${st.branch.padEnd(40)} ${st.url}`);
+  for (const st of s.stacks) {
+    console.log(`  stack   ${st.branch.padEnd(40)} ${String(st.state).padEnd(9)} ${st.public_url || st.url}${st.checks_state ? `  checks: ${st.checks_state}` : ""}`);
+    if (st.error) console.log(`          → ${st.error}`);
+  }
 }
 
 /**
@@ -194,6 +198,17 @@ async function doctor(): Promise<void> {
       console.log(`· no preview domain: previews use local URLs (set [preview] domain to get https://<branch>.<domain>)`);
     }
   } catch (e) { ok(false, "config is valid", (e as Error).message); }
+  // The preview stacks as the daemon last probed them. "degraded" is the case
+  // that used to pass unnoticed: the stack is running, and the address a
+  // person opens answers something that isn't the app.
+  try {
+    const stacks = new Store(openDb()).stacks();
+    if (stacks.length) console.log(`· ${stacks.length} preview stack(s), as pr-daemon last probed them:`);
+    for (const s of stacks) {
+      const state = stackState(s);
+      ok(state === "up" || state === "unknown", `  ${s.branch}: ${state === "unknown" ? "not probed yet" : state}`, s.error);
+    }
+  } catch { /* no database yet: nothing has run */ }
   process.exit(bad ? 1 : 0);
 }
 
