@@ -66,6 +66,10 @@
   .foot { padding: 8px 16px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 12px; }
   .actions { white-space: nowrap; text-align: right; } .actions button { margin-left: 4px; padding: 3px 9px; }
   .reason { color: var(--ink-2); font-size: 12px; max-width: 420px; }
+  /* The whole of a failed `up`, which can be thousands of lines. column-reverse
+     keeps it scrolled to the END (where the failure is), even across re-renders. */
+  .stack-error { margin-top: 4px; max-width: 520px; max-height: 220px; overflow: auto; display: flex; flex-direction: column-reverse; background: var(--bg); border-radius: 6px; }
+  .stack-error pre { margin: 0; padding: 6px 8px; font: 11px/1.45 var(--mono); color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
   pre.activity { margin: 0; padding: 10px 14px; background: var(--bg); font: 12px/1.5 var(--mono); color: var(--ink-2); max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
   .meter { height: 10px; border-radius: 99px; background: var(--chip); overflow: hidden; margin: 8px 0; }
   .meter > div { height: 100%; background: var(--accent); transition: width .4s; }
@@ -349,7 +353,7 @@ function renderStacks() {
         <td class="small">${esc(s.branch)}</td>
         <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
         <td class="small">${url ? a(url) : `<span class="muted">not running</span>`}${
-          s.error ? `<div class="reason" style="margin-top:4px">${esc(s.error)}</div>` : ""}</td>
+          s.error ? `<div class="stack-error"><pre>${esc(s.error)}</pre></div>` : ""}</td>
         <td class="hide-sm small">${ch
           ? `<span class="badge s-${esc(ch)}">${esc(CHECKS_NOTE[ch] ?? ch)}</span>${
               s.checks_detail ? `<div class="muted" style="font-size:11px">${esc(s.checks_detail)}</div>` : ""}`

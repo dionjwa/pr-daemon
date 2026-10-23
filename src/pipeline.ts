@@ -13,6 +13,7 @@ import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
+import { tail } from "./util.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 
@@ -79,6 +80,29 @@ export const withNetworks = (existing: string | undefined, created: string[]): s
 
 /** The last line that says something, for one-line event messages. */
 const lastLine = (s: string) => s.trim().split("\n").filter((l) => l.trim()).pop()?.slice(0, 200) ?? "";
+
+/**
+ * A PR comment reporting finished work, with the preview on its first line
+ * (and again at the end of a long one), so the reviewer can go straight to it.
+ * The public address when there is one, else the stack's local one.
+ */
+function withPreview(ctx: Ctx, branch: string, body: string): string {
+  const url = publicUrl(ctx.cfg(), branch) || ctx.store.stack(ctx.repo.name, branch)?.url;
+  if (!url) return body;
+  const line = `🔗 Preview: ${url}`;
+  const text = `${line}\n\n${body.trim()}`;
+  return text.split("\n").length > 25 ? `${text}\n\n${line}` : text;
+}
+
+/**
+ * Tells the agent `up` failed. The full output can be huge (container log
+ * dumps), so it goes in a file and the prompt gets only its end.
+ */
+function upFailedNote(cmd: string, output: string, out: string): string {
+  const file = join(out, "up-failed.log");
+  writeFileSync(file, output);
+  return `WARNING: \`${cmd}\` FAILED before you started. Fix that first, then continue. The full output is in ${file}; it ends:\n\`\`\`\n${tail(output, 80)}\n\`\`\``;
+}
 
 /** Where an agent job's stream-json log is written (null for jobs without an agent). */
 export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): string | null {
@@ -184,7 +208,7 @@ export async function build(ctx: Ctx): Promise<void> {
   if (!s.ok) store.event(`\`${repo.up}\` failed; the agent has been told to fix it first`, job.id, "warn");
   const stackNote = s.ok
     ? `The stack for this branch is already running at ${stackWhere(cfg, branch, s)} Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
-    : `WARNING: \`${repo.up}\` FAILED before you started. Fix that first, then continue. Output:\n\`\`\`\n${s.error}\n\`\`\``;
+    : upFailedNote(repo.up, s.error, out);
 
   const vars = {
     REPO: repo.name, BRANCH: branch, BASE: base, ISSUE_NUMBER: n, ISSUE_TITLE: issue.title, ISSUE_URL: issue.html_url,
@@ -315,6 +339,11 @@ export async function revise(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const p = await gh.pr(repo.name, job.number);
   if (p.state !== "open") return;
+  // 😈 on the /pr-daemon comment: seen, and being worked on. Cosmetic, so a
+  // failure (the comment was deleted, no rights to edit it) is only logged.
+  const commentId = payload(job).commentId;
+  if (commentId) await gh.markComment(repo.name, commentId, "😈")
+    .catch((e) => store.event(`couldn't mark comment ${commentId}: ${(e as Error).message}`, job.id, "warn"));
   const n = issueOf(p.head.ref);
   await git.ensureClone(repo.name);
   const { branch, wt } = await git.ensureWorktree(repo.name, n, p.base.ref);
@@ -344,10 +373,10 @@ export async function revise(ctx: Ctx): Promise<void> {
   const result = await stack.check(repo.check, wt);
   await git.push(wt, branch);
   const shots = await uploadShots(ctx, branch, out);
-  await gh.comment(repo.name, job.number, `🔁 **pr-daemon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
+  await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🔁 **pr-daemon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
 
 ${summary}
-${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`);
+${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`));
 }
 
 // ---------------------------------------------------------------- ci
@@ -403,17 +432,17 @@ export async function ci(ctx: Ctx): Promise<void> {
   if ((await git.head(wt)) === before) {
     // Nothing changed, so pushing would not make CI run again. Say so on the
     // PR instead of pretending a fix went out.
-    await gh.comment(repo.name, job.number, `🧪 **pr-daemon** looked at the failing checks (${c.summary}) and made no change:\n\n${summary}`);
+    await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🧪 **pr-daemon** looked at the failing checks (${c.summary}) and made no change:\n\n${summary}`));
     store.event("the agent changed nothing; not pushing", job.id, "warn");
     return;
   }
   const local = await stack.check(repo.check, wt);
   await git.push(wt, branch);
   const shots = await uploadShots(ctx, branch, out);
-  await gh.comment(repo.name, job.number, `🧪 **pr-daemon** pushed a fix for the failing checks (${c.summary}). GitHub will re-run them.
+  await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🧪 **pr-daemon** pushed a fix for the failing checks (${c.summary}). GitHub will re-run them.
 ${repo.check && !local.skipped ? `\nLocally, \`${repo.check}\` ${local.ok ? "passes ✅" : `still FAILS ❌:\n\`\`\`\n${local.output}\n\`\`\``}\n` : ""}
 ${summary}
-${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`);
+${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`));
 }
 
 // ---------------------------------------------------------------- teardown / restart
@@ -467,7 +496,7 @@ export async function restart(ctx: Ctx): Promise<void> {
   const r = await stack.up(repo.up, s.worktree, publicEnv(ctx.cfg(), s.branch));
   store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, ...routesOf(r),
     healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now() });
-  if (!r.ok) throw new Error(`restart failed: ${r.error}`);
+  if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 
 export const JOBS = { build, review, revise, ci, teardown, restart } as const;

@@ -88,7 +88,9 @@ export async function up(cmd: string, wt: string, env: Record<string, string>): 
   // What this `up` added, so teardown can take exactly those away again.
   const networks = before ? ((await networkIds()) ?? []).filter((id) => !before.includes(id)) : [];
   const out = `${r.stdout}\n${r.stderr}`;
-  if (r.code !== 0) return { ok: false, error: tail(out, 60) + poolHint(out), networks };
+  // All of it, not a tail: a project's `up` often ends by dumping container
+  // logs, and a tail of those hid the line that said which step had failed.
+  if (r.code !== 0) return { ok: false, error: out.trim() + poolHint(out), networks };
   const parsed = parseUp(r.stdout);
   if ("error" in parsed) return { ok: false, error: parsed.error, networks };
   return { ok: true, ...parsed, networks };

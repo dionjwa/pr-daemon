@@ -266,6 +266,19 @@ export async function comment(repo: string, n: number, body: string): Promise<vo
   await run("gh", ["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body });
 }
 
+/**
+ * Append `mark` to a comment, so whoever wrote it can see pr-daemon took it.
+ * Reactions can't do this: GitHub only offers eight, and none is the mark.
+ * Re-reads the body (it may have been edited since) and does nothing when the
+ * mark is already there, so a resumed job doesn't add it twice. Editing
+ * doesn't re-trigger: triggers are keyed by comment id.
+ */
+export async function markComment(repo: string, id: number, mark: string): Promise<void> {
+  const c = await api<{ body: string }>(`repos/${repo}/issues/comments/${id}`);
+  if (c.body.includes(mark)) return;
+  await must("gh", ["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "--input", "-"], { input: JSON.stringify({ body: `${c.body.trimEnd()}\n\n${mark}` }) });
+}
+
 /** A COMMENT review (you can't approve or request changes on your own PR). */
 export async function review(repo: string, n: number, bodyFile: string): Promise<void> {
   const r = await run("gh", ["pr", "review", String(n), "-R", repo, "--comment", "--body-file", bodyFile]);
