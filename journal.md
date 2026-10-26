@@ -5,6 +5,49 @@ system works see CLAUDE.md; for the roadmap see PLAN.md.
 
 ---
 
+## 2026-10-25: keeping PRs mergeable (`[merge]`)
+
+**"Can it merge main in and deal with the conflicts?"** Before this, a PR that
+stopped merging just sat there: GitHub showed "This branch has conflicts", and
+CI often didn't run on it at all.
+
+Now the poll reads GitHub's `mergeable` / `mergeable_state` from the PR read it
+already makes (free), and shows it in a **Merge** column. When there are
+conflicts (or, with `merge.behind`, the base only moved on), it queues a `merge`
+job, once per head sha. The job:
+
+- merges the base in (`--no-ff`, diff3 markers). It never rebases, so there's
+  no force-push and review comments stay put.
+- **clean:** commits, restarts the stack, runs the check and pushes. No agent.
+- **conflicts:** `assessConflicts()` first. Binary files, workflow files, more
+  than `max_files`, `human_paths`, an exhausted `max_rounds`, or base workflow
+  changes the gh login can't push all go straight to the human, before any
+  tokens are spent. Otherwise the builder's session gets the conflicts and the
+  base's commits touching those files, resolves them, and writes
+  `merge-report.md` ending in `CONFIDENCE` / `NEEDS_HUMAN`.
+- pr-daemon verifies and commits the merge itself (`verifyResolution`): the
+  same merge, the right parents, no markers left. Then the check must pass,
+  with the usual fix rounds. A clean merge that breaks the check gets them too.
+- if anything fails, nothing is pushed. The attempt is kept as a local branch
+  `<branch>-merge-attempt-<job>`, the worktree is reset to the PR head, the
+  issue gets `agent:failed`, and a comment says why and how to do it by hand.
+- after a push, `reviewReasons()` decides whether the comment opens with
+  **Needs your review before merging**: low or missing confidence, agent
+  flags, a delete-vs-modify conflict, files only the agent touched, or no local
+  check. If it does, there's also a desktop notification and a "needs your
+  review" badge.
+
+Design choices: rounds are agent runs (`countAgentRuns`, jobs with tokens > 0),
+so clean merges never use up the cap. `merge` sits above `ci` in the queue,
+since a conflicting PR's CI is moot.
+
+**Not verified yet:** a real conflicting PR end to end, and whether GitHub's
+`update-branch` really gets round the missing `workflow` scope for a clean
+merge (the fallback in `viaGitHub()`). The git mechanics are tested against a
+real local origin in `merge.test.ts`.
+
+---
+
 ## 2026-10-18: nobody was watching CI, and a green dot was lying
 
 Two gaps, found by asking two questions.

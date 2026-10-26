@@ -21,12 +21,15 @@ the owner's machine (`pr-daemon serve`):
 7. watches **the repo's own CI** on the PR (check runs and commit statuses) and,
    when it goes red, runs an agent to fix it: once per failing head commit, up
    to `checks.max_rounds` per PR
-8. `/pr-daemon <feedback>` comments on the PR trigger further revisions
-9. when the PR closes (or the issue, before there's a PR), or the `agent` label
+8. watches whether the PR still **merges into its base** and, when it
+   conflicts, merges the base in (never a rebase or force-push) with an agent
+   resolving the conflicts; risky or uncertain ones go to a human
+9. `/pr-daemon <feedback>` comments on the PR trigger further revisions
+10. when the PR closes (or the issue, before there's a PR), or the `agent` label
    is removed: `just pr-daemon-down`, remove the worktree, clear labels, and
    delete the branch on GitHub. Removing the label also cancels running jobs
    for the issue and closes its open PR. The page's Tear down button keeps the branch.
-10. with `[preview] domain` set: runs Caddy so each branch is at
+11. with `[preview] domain` set: runs Caddy so each branch is at
     `https://<branch>.<domain>`
 
 All agent work happens within a token budget (rolling window plus per-issue cap).
@@ -74,6 +77,17 @@ A human always merges.
   doesn't fix it can't loop. `fix = false` (or `max_rounds = 0`) watches
   without acting. The local `check` command stays the *inner* gate, before any
   PR opens; CI is the one that knows about other platforms, secrets and matrices.
+- **Conflicts with the base are fixed by merging, never rebasing** (`[merge]`).
+  No force-push, review comments stay on their commits. Automate the routine
+  and hand the risky to a human: `merge.assessConflicts()` decides what an
+  agent may try (binary, workflow files, too many files, `human_paths` and the
+  round cap go to a person). pr-daemon, not the agent, verifies and commits
+  the merge. Nothing is pushed unless the check passes. A pushed resolution
+  the agent wasn't sure of is flagged **needs your review** (PR comment
+  `> [!WARNING]`, status page, desktop notification). A hand-over leaves the
+  PR untouched and keeps the attempt on a local branch. One trigger per head
+  sha. Rounds are agent runs (`countAgentRuns`: jobs with tokens > 0), so
+  clean merges are free.
 - **Trigger label is `agent`.** Status labels are `agent:working`,
   `agent:in-review`, `agent:paused` and `agent:failed`.
 - **Budget:** optional tokens per rolling window (default `5h`, one Claude
@@ -96,9 +110,10 @@ A human always merges.
 |---|---|
 | `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
-| `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `ci`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
+| `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `ci`, `merge`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
 | `transcript.ts` | Parses an agent's `*.jsonl` log into what it said, each tool call and its result, for `GET /api/jobs/<id>/transcript?from=N` (the page polls for new entries). `agentLog(job)` in `pipeline.ts` is the one place that knows each job's log path |
+| `merge.ts` | The pure merge decisions: `assessConflicts()` (agent or human), `hasConflictMarkers()`, `parseMergeReport()` (the agent's `CONFIDENCE` / `NEEDS_HUMAN` trailer), `reviewReasons()` (what makes a pushed merge "needs your review"). The git side (`startMerge`, `conflicts`, `abortMerge`, `commitMerge`) is in `git.ts` |
 | `budget.ts` | Rolling-window sum, per-issue sum, `gate()`, and when the window frees up |
 | `proxy.ts` | Caddy supervisor. `caddyConfig()` is pure (unit-tested): routes are rebuilt from the stacks table every 5s and loaded via the admin API when the hash changes |
 | `db.ts` | Schema plus `Store` (jobs, usage, stacks, events, kv) |
@@ -280,6 +295,23 @@ just contract                 # print examples/justfile, the two recipes a proje
   every option with its default, read-only, so the template stays discoverable
   after the file has been edited.
 - **Headless Claude doesn't log its thinking.** `thinking` blocks in stream-json have empty text (`showThinkingSummaries` doesn't change it), so the transcript shows the agent's narration, tool calls and results. Claude doesn't log the `-p` prompt either: `agent.ts` writes a `{"type":"pr-daemon","subtype":"start"}` line with it at the start of each run.
+- **GitHub's `mergeable` is lazy.** It's `null` until GitHub computes it after
+  a push to either side, so `gh.mergeability()` calls that `unknown` and the
+  next poll asks again. Right after pr-daemon pushes a merge, GitHub can still
+  say "dirty" for a moment; the new head gets a new trigger, and that job finds
+  "already up to date" and does nothing. The local `git merge` is the truth,
+  not GitHub's flag.
+- **A merge commit can need the `workflow` scope** (expected from GitHub's
+  rules, not yet seen here) even though the agent never touched a workflow:
+  if the base changed `.github/workflows/`, the merge brings that change in,
+  and GitHub refuses the push. For a clean merge,
+  `viaGitHub()` asks GitHub to do it (`PUT pulls/<n>/update-branch` with
+  `expected_head_sha`). A conflicted one is handed to the human before the
+  agent spends anything (`gh.hasWorkflowScope()`).
+- **Binary conflicts leave no markers,** so a marker check alone would pass
+  them. `git.conflicts()` marks them (`diff --numstat :2:f :3:f` prints
+  `-\t-`), and they always go to a human. `=======` alone isn't counted as a
+  marker: it's a markdown heading underline.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
 - **`up` / `down` / `check` are arbitrary shell command lines**, run as

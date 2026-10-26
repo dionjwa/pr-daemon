@@ -64,6 +64,15 @@ export interface Config {
     fix: boolean;
     maxRounds: number;
   };
+  /** Keeping each PR mergeable with its base branch. */
+  merge: {
+    watch: boolean;
+    fix: boolean;
+    behind: boolean;
+    maxRounds: number;
+    maxFiles: number;
+    humanPaths: string[];
+  };
   preview: PreviewConfig;
   repos: RepoConfig[];
 }
@@ -123,6 +132,23 @@ watch = true             # read each open PR's checks and show them on the statu
 every = "2m"             # how often to ask GitHub (only while a PR's preview stack exists)
 fix = true               # when a check fails, run an agent to fix it (one round per failing commit)
 max_rounds = 2           # automatic fix rounds per PR, then it stops and says so on the PR
+
+[merge]
+# Keeping each PR mergeable with its base branch (usually main). GitHub says
+# when a PR has conflicts; pr-daemon then merges the base into the branch, an
+# agent resolves the conflicts, your check runs, and the merge is pushed. It
+# never rebases or force-pushes. It hands the PR to you instead (a comment, the
+# status page, a desktop notification) when the conflicts are risky, when the
+# check still fails, or when the agent isn't sure; a resolution it did push but
+# wants you to look at is marked "needs your review".
+watch = true             # read each open PR's mergeability and show it on the status page
+fix = true               # on conflicts, merge the base in and have an agent resolve them
+behind = false           # also merge when the base merely moved on (no conflicts, no agent, no tokens):
+                         # for repos whose branch protection requires branches to be up to date
+max_rounds = 2           # agent conflict-resolution rounds per PR, then it stops and says so on the PR
+max_files = 15           # more conflicted files than this is too big to hand to an agent: you're asked instead
+human_paths = []         # conflicts in these paths always go to you, e.g. ["db/migrations/**", "*.lock"]
+                         # (globs: * within a folder, ** across folders, a trailing / means everything under it)
 
 [preview]
 # Public preview URLs: https://<branch>.<domain>, e.g. https://42-dark-mode.preview.example.com
@@ -209,6 +235,11 @@ function bool(v: unknown, d: boolean, name: string): boolean {
   if (typeof v !== "boolean") throw new Error(`${name} must be true or false`);
   return v;
 }
+function strList(v: unknown, name: string): string[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || !x.trim())) throw new Error(`${name} must be a list of strings, e.g. ["db/migrations/**"]`);
+  return v as string[];
+}
 function oneOf<T extends string>(v: unknown, options: readonly T[], d: T, name: string): T {
   if (v === undefined) return d;
   if (typeof v !== "string" || !options.includes(v as T)) throw new Error(`${name} must be one of: ${options.map((o) => o || '""').join(", ")}`);
@@ -236,7 +267,7 @@ export function parseConfig(text: string): Config {
   try { raw = parse(text) as Raw; }
   catch (e) { throw new Error(`TOML syntax: ${(e as Error).message}`); }
   const b = (raw.budget ?? {}) as Raw, a = (raw.agent ?? {}) as Raw, st = (raw.stacks ?? {}) as Raw, pv = (raw.preview ?? {}) as Raw;
-  const ck = (raw.checks ?? {}) as Raw;
+  const ck = (raw.checks ?? {}) as Raw, mg = (raw.merge ?? {}) as Raw;
   const repos = (raw.repos ?? []) as Raw[];
   if (!Array.isArray(repos)) throw new Error(`repos needs DOUBLE brackets, one block per repository:\n\n${REPOS_EXAMPLE}`);
   const users = raw.allowed_users ?? [];
@@ -272,6 +303,14 @@ export function parseConfig(text: string): Config {
       everyMs: dur(ck.every, "2m", "checks.every"),
       fix: bool(ck.fix, true, "checks.fix"),
       maxRounds: Math.max(0, num(ck.max_rounds, 2, "checks.max_rounds")),
+    },
+    merge: {
+      watch: bool(mg.watch, true, "merge.watch"),
+      fix: bool(mg.fix, true, "merge.fix"),
+      behind: bool(mg.behind, false, "merge.behind"),
+      maxRounds: Math.max(0, num(mg.max_rounds, 2, "merge.max_rounds")),
+      maxFiles: Math.max(1, num(mg.max_files, 15, "merge.max_files")),
+      humanPaths: strList(mg.human_paths, "merge.human_paths"),
     },
     preview: {
       domain: str(pv.domain, "").trim().replace(/^\*?\./, "").toLowerCase(),

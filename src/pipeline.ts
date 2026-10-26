@@ -1,4 +1,4 @@
-// The work itself: build, review, revise, teardown, restart.
+// The work itself: build, review, revise, ci, merge, teardown, restart.
 // Each function runs one job end to end and is safe to re-run after a pause
 // or crash: worktrees, stacks and PRs are found and reused, and the agent's
 // Claude session is resumed rather than restarted.
@@ -11,9 +11,10 @@ import type { Config, RepoConfig } from "./config.ts";
 import type { Job, Store } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
+import { assessConflicts, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
 import { publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
-import { tail } from "./util.ts";
+import { notify, tail } from "./util.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 
@@ -50,7 +51,12 @@ export function render(template: string, vars: Record<string, string | number | 
 const prompt = (name: string, vars: Record<string, string | number | undefined>) =>
   render(readFileSync(join(PROMPTS, `${name}.md`), "utf8"), vars);
 
-function payload(job: Job): { feedback?: string; fromReview?: boolean; commentId?: number; deleteBranch?: boolean; closePr?: boolean; why?: string; sha?: string; failing?: string } {
+interface Payload {
+  feedback?: string; fromReview?: boolean; commentId?: number; deleteBranch?: boolean; closePr?: boolean; why?: string; sha?: string; failing?: string;
+  /** merge: what the merge started from, saved so a paused job resumes the same merge. */
+  merge?: { before: string; baseSha: string; mergeBase: string; conflicts: git.Conflict[]; cautions: string[] };
+}
+function payload(job: Job): Payload {
   try { return JSON.parse(job.payload || "{}"); } catch { return {}; }
 }
 
@@ -112,6 +118,7 @@ export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): str
   if (job.kind === "review") return join(out, `review-${job.id}`, "agent.jsonl");
   if (job.kind === "revise") return join(out, `agent-revise-${job.id}.jsonl`);
   if (job.kind === "ci") return join(out, `agent-ci-${job.id}.jsonl`);
+  if (job.kind === "merge") return join(out, `agent-merge-${job.id}.jsonl`);
   return null;
 }
 
@@ -445,6 +452,253 @@ ${summary}
 ${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`));
 }
 
+// ---------------------------------------------------------------- merge
+/**
+ * The PR stopped merging into its base (or, with `merge.behind`, the base
+ * merely moved on). Merge the base in: never a rebase, never a force-push.
+ *
+ * Automate the routine, hand the risky to a human:
+ * - a clean merge is committed, checked and pushed with no agent;
+ * - conflicts go to an agent only when assessConflicts() finds nothing that
+ *   should be a person's call (binary files, workflow files, too many files,
+ *   `merge.human_paths`, the round cap);
+ * - pr-daemon, not the agent, verifies and commits the merge: still the merge
+ *   it started, no markers left, nothing unmerged;
+ * - the check must pass (with `agent.max_attempts` fix rounds) before
+ *   anything is pushed. Otherwise the attempt is kept on a local branch, the
+ *   PR is left as it was, and the human is told;
+ * - a resolution that is pushed but uncertain (low confidence, flags, a
+ *   deleted-vs-changed file, edits outside the conflicts) is marked "needs
+ *   your review" on the PR, the status page and the desktop.
+ */
+export async function merge(ctx: Ctx): Promise<void> {
+  const { store, job, repo } = ctx;
+  const cfg = ctx.cfg();
+  const p = await gh.pr(repo.name, job.number);
+  if (p.state !== "open") { store.event(`PR #${job.number} is closed; nothing to merge`, job.id); return; }
+  const n = issueOf(p.head.ref);
+  const base = p.base.ref;
+  await git.ensureClone(repo.name);
+  const { branch, wt } = await git.ensureWorktree(repo.name, n, base);
+  ctx.current_wt = wt;
+  store.update(job.id, { branch, pr: job.number });
+  const out = git.outDir(repo.name, branch);
+  mkdirSync(out, { recursive: true });
+  const reportFile = join(out, "merge-report.md");
+
+  const note = (level: "ok" | "warn" | "bad", text: string) => store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt,
+    merge_note: text.slice(0, 500), merge_level: level, merge_at: Date.now() });
+  /** Leave the PR exactly as it was and give it to a person, saying why and how. */
+  const handOver = async (headline: string, reasons: string[], o: { before?: string; keep?: boolean; conflicts?: git.Conflict[] } = {}): Promise<never> => {
+    let kept = "";
+    if (o.before) {
+      if (o.keep) { kept = `${branch}-merge-attempt-${job.id}`; await git.keepAttempt(wt, kept).catch(() => { kept = ""; }); }
+      await git.abortMerge(wt, o.before);
+    }
+    if (kept) store.event(`kept the attempt as local branch ${kept} (git -C ${wt} log ${kept})`, job.id, "warn");
+    note("bad", `${headline}: ${reasons.join("; ")}`);
+    await gh.setStatus(repo.name, n, cfg.label, "failed").catch(() => {});
+    await gh.comment(repo.name, job.number, `🔀 **pr-daemon** didn't merge \`${base}\` into this branch: ${headline}. **This one is yours.**
+
+${reasons.map((r) => `- ${r}`).join("\n")}
+${o.conflicts?.length ? `\nConflicted files:\n${conflictTable(o.conflicts)}\n` : ""}${kept ? `\nIts attempt is kept on the pr-daemon machine as the local branch \`${kept}\`; the PR is unchanged.\n` : ""}
+To do it yourself: \`git fetch origin && git checkout ${branch} && git merge origin/${base}\`, resolve, commit and push. Or comment \`/pr-daemon <how to resolve it>\` to have the agent try with your guidance.`);
+    if (cfg.notify) notify("pr-daemon: a merge needs you", `${repo.name} PR #${job.number}: ${headline}`, p.html_url);
+    throw new FailError(`${headline}: ${reasons.join("; ")}`.slice(0, 1500));
+  };
+
+  // 1. Start the merge, or pick it up again after a pause.
+  const saved = payload(job).merge;
+  const resuming = !!job.session_id && !!saved && (await git.mergeInProgress(wt));
+  let before: string, m: git.MergeStart, cautions: string[] = [];
+  if (resuming) {
+    before = saved.before;
+    m = { upToDate: false, clean: false, baseSha: saved.baseSha, mergeBase: saved.mergeBase, conflicts: saved.conflicts, output: "" };
+    cautions = saved.cautions;
+  } else {
+    if (await git.mergeInProgress(wt)) await git.abortMerge(wt, "HEAD");   // left over from an interrupted run
+    if (job.session_id) store.update(job.id, { session_id: "" });          // that session's merge is gone: start clean
+    // This job stopped after committing its merge but before pushing it (a
+    // pause or restart during the check): start over from the PR's head.
+    const here = await git.head(wt);
+    if (saved && saved.before === p.head.sha && here !== p.head.sha && (await git.isAncestor(wt, saved.before, here))) {
+      await git.keepAttempt(wt, `${branch}-merge-attempt-${job.id}`).catch(() => {});
+      await git.abortMerge(wt, saved.before);
+      store.event(`an earlier run of this merge stopped before pushing; starting it again from ${saved.before.slice(0, 7)}`, job.id, "warn");
+    }
+    before = await git.head(wt);
+    // The worktree must be exactly the PR: a merge on top of anything else
+    // would push commits nobody asked for.
+    if (before !== p.head.sha) await handOver("the worktree isn't at the PR's head", [
+      `the worktree is at ${before.slice(0, 7)}, the PR at ${p.head.sha.slice(0, 7)}: someone else pushed, or there are local commits that never went up`]);
+    if (!(await git.isClean(wt))) await handOver("the worktree has uncommitted changes", [`tracked files in ${branch}'s worktree are modified; pr-daemon won't merge over them`]);
+    rmSync(reportFile, { force: true });
+    m = await git.startMerge(wt, base, branch);
+    if (m.upToDate) {
+      note("ok", `already up to date with ${base}`);
+      store.event(`${branch} already contains ${base} (${m.baseSha.slice(0, 7)}); nothing to merge`, job.id);
+      return;
+    }
+    store.update(job.id, { payload: JSON.stringify({ ...payload(job), merge: { before, baseSha: m.baseSha, mergeBase: m.mergeBase, conflicts: m.conflicts, cautions: [] } }) });
+  }
+  const workflowFiles = await git.changedFiles(wt, m.mergeBase, m.baseSha, ".github/workflows");
+  const canPushWorkflows = workflowFiles.length === 0 || (await gh.hasWorkflowScope());
+
+  // 2a. No conflicts. If the merge would carry workflow changes the gh login
+  //     can't push, let GitHub do the same merge itself ("Update branch").
+  if (m.clean && !canPushWorkflows) {
+    await git.abortMerge(wt, before);
+    return viaGitHub(ctx, { before, base, branch, wt, n, note, handOver, why: `${base} changed ${workflowFiles.join(", ")}` });
+  }
+
+  // 2b. Conflicts: is this an agent's to resolve?
+  let report = "";
+  if (!m.clean) {
+    const a = assessConflicts(m.conflicts, { maxFiles: cfg.merge.maxFiles, humanPaths: cfg.merge.humanPaths, workflowsBlocked: !canPushWorkflows });
+    cautions = a.cautions;
+    const blockers = [...a.blockers];
+    if (!resuming) {
+      if (!cfg.merge.fix) blockers.push("`merge.fix` is off");
+      const used = store.countAgentRuns(repo.name, "merge", job.number, job.id);
+      if (used >= cfg.merge.maxRounds) blockers.push(`${used} conflict-resolution round(s) already used on this PR (\`merge.max_rounds = ${cfg.merge.maxRounds}\`)`);
+    }
+    if (blockers.length) await handOver(`${m.conflicts.length} conflict(s) that need a person`, blockers, { before, conflicts: m.conflicts });
+
+    store.update(job.id, { payload: JSON.stringify({ ...payload(job), merge: { before, baseSha: m.baseSha, mergeBase: m.mergeBase, conflicts: m.conflicts, cautions } }) });
+    note("warn", `resolving ${m.conflicts.length} conflict(s) with ${base}`);
+    store.event(`${m.conflicts.length} conflict(s) merging ${base} into ${branch}: ${m.conflicts.map((c) => c.path).join(", ")}`.slice(0, 500), job.id, "warn");
+    const text = prompt("merge", {
+      PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, BASE: base, BASE_SHA: m.baseSha, MERGE_BASE: m.mergeBase, OUT: out,
+      CHECK_CMD: repo.check || "(none: build and test it the way the project's CLAUDE.md says)",
+      CONFLICTS: m.conflicts.map((c) => `- \`${c.path}\`: ${c.kind}`).join("\n"),
+      BASE_LOG: (await git.baseLog(wt, m.mergeBase, m.baseSha, m.conflicts.map((c) => c.path))) || "(none found)",
+    });
+    writeFileSync(join(out, `prompt-merge-${job.id}.md`), text);
+    const builder = store.stack(repo.name, branch)?.builder_session || "";
+    await agentStep(ctx, resuming
+      ? { prompt: "pr-daemon paused you. Continue resolving the merge from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
+      : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, issue: n });
+
+    // Verify, don't trust: the same merge, every conflict gone, then commit it ourselves.
+    const problems = await verifyResolution(wt, before, m);
+    if (problems.length) await handOver("the agent's resolution didn't hold up", problems, { before, keep: true, conflicts: m.conflicts });
+    if (await git.mergeInProgress(wt)) {
+      try { await git.commitMerge(wt); }
+      catch (e) { await handOver("the resolved merge wouldn't commit", [(e as Error).message.slice(0, 600)], { before, keep: true, conflicts: m.conflicts }); }
+    } else store.event("the agent committed the merge itself (it was asked not to); its parents are right, so keeping it", job.id, "warn");
+    report = existsSync(reportFile) ? readFileSync(reportFile, "utf8").trim() : "";
+  }
+  const mergeCommit = await git.head(wt);
+
+  // 3. The stack and the check run on the merged code. A clean merge can still
+  //    break the build (the base renamed something this branch uses), so a
+  //    failing check gets the same fix rounds as a build, under the same caps.
+  const s = await stack.up(repo.up, wt, publicEnv(cfg, branch));
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url: s.ok ? s.url || store.stack(repo.name, branch)?.url || "" : "", pr: job.number,
+    healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
+    networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
+  let local = await stack.check(repo.check, wt);
+  for (let round = 1; !local.ok && round < cfg.agent.maxAttempts; round++) {
+    if (!cfg.merge.fix) break;
+    if (!store.job(job.id)!.session_id && store.countAgentRuns(repo.name, "merge", job.number, job.id) >= cfg.merge.maxRounds) break;
+    store.event(`\`${repo.check}\` fails after merging ${base}; fix round ${round}`, job.id, "warn");
+    const fix = `pr-daemon merged \`${base}\` into \`${branch}\` (the merge commit is ${mergeCommit.slice(0, 7)}), and now \`${repo.check}\` FAILS:\n\n\`\`\`\n${local.output}\n\`\`\`\n\n` +
+      `Fix the cause: usually something this branch uses changed shape in ${base}. Don't undo the base's changes, weaken tests or touch .github/workflows/. ` +
+      `Commit the fix on top (don't amend, reset or rebase; the merge commit stays). Do NOT push. ` +
+      `${report || !m.clean ? `Then update ${reportFile}, keeping its CONFIDENCE and NEEDS_HUMAN lines at the end.` : `Then write ${reportFile}: what broke and what you changed, ending with the lines \`CONFIDENCE: high|low\` and \`NEEDS_HUMAN: none\` (or a bullet list).`} Finish with a two-line summary.`;
+    const session = store.job(job.id)!.session_id;
+    await agentStep(ctx, { prompt: fix, log: agentLog({ ...job, branch })!, resume: session || store.stack(repo.name, branch)?.builder_session || undefined, issue: n });
+    await git.commitLeftovers(wt);
+    if (!(await git.isAncestor(wt, mergeCommit, "HEAD"))) await handOver("the agent rewrote the merge", ["the merge commit is no longer in the branch's history (reset, amend or rebase)"], { before, keep: true });
+    report = existsSync(reportFile) ? readFileSync(reportFile, "utf8").trim() : report;
+    local = await stack.check(repo.check, wt);
+  }
+  if (!local.ok) await handOver(`\`${repo.check}\` fails on the merged code`, [
+    m.clean ? `the merge had no conflicts, but the merged code doesn't pass` : `the conflicts were resolved, but the merged code doesn't pass`,
+    `it ends:\n\n\`\`\`\n${tail(local.output, 30)}\n\`\`\``], { before, keep: true, conflicts: m.conflicts });
+
+  // 4. Push. A workflow-scope refusal is the one push failure with a way round, for a clean merge.
+  try { await git.push(wt, branch); }
+  catch (e) {
+    const msg = (e as Error).message;
+    if (!/workflow/.test(msg)) throw e;
+    if (m.clean && (await git.head(wt)) === mergeCommit) {
+      await git.abortMerge(wt, before);
+      return viaGitHub(ctx, { before, base, branch, wt, n, note, handOver, why: msg });
+    }
+    await handOver("GitHub refused the merge commit", [msg], { before, keep: true, conflicts: m.conflicts });
+  }
+
+  // 5. Say what happened, and how sure to be.
+  const head = await git.head(wt);
+  // Files only the agent touched: changed since the PR's head, but by neither
+  // the base nor a conflict. Often right (a caller of something the base
+  // renamed), always worth a look.
+  const baseFiles = new Set(m.clean ? [] : await git.changedFiles(wt, m.mergeBase, m.baseSha));
+  const outside = m.clean ? [] : (await git.changedFiles(wt, before, head))
+    .filter((f) => !baseFiles.has(f) && !m.conflicts.some((c) => c.path === f));
+  const agentRan = !!store.job(job.id)!.session_id;
+  const r = agentRan ? parseMergeReport(report) : null;
+  const reasons = r ? reviewReasons(r, cautions, outside, local.skipped ? null : local.ok) : [];
+  const commitUrl = `https://github.com/${repo.name}/commit/${mergeCommit}`;
+  const checkLine = local.skipped ? `No local check is configured; your CI runs on the push.` : `Locally, \`${repo.check}\` passes ✅. Your CI runs on the push.`;
+  const what = m.clean
+    ? `merged \`${base}\` into this branch ([merge commit](${commitUrl})). There were no conflicts${agentRan ? `, but the merged code failed the check and the agent fixed it` : ""}.`
+    : `merged \`${base}\` into this branch and resolved ${m.conflicts.length} conflict(s) ([merge commit](${commitUrl}), which GitHub shows as a combined diff).`;
+  const verdict = reasons.length
+    ? `> [!WARNING]\n> **Needs your review before merging:**\n${reasons.map((x) => `> - ${x}`).join("\n")}`
+    : agentRan ? `The check passes and the agent was confident. Review the resolution like any other change.` : "";
+  await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🔀 **pr-daemon** ${what}
+
+${verdict}
+${m.clean ? "" : `\n${conflictTable(m.conflicts)}\n`}
+${checkLine}
+${report ? `\n<details${reasons.length ? " open" : ""}><summary>How it was resolved (the agent's report)</summary>\n\n${report}\n</details>` : ""}`));
+  note(reasons.length ? "warn" : "ok", reasons.length ? `merged ${base} at ${mergeCommit.slice(0, 7)}; needs your review: ${reasons.join("; ")}`
+    : `merged ${base} at ${mergeCommit.slice(0, 7)}${m.clean ? "" : `, ${m.conflicts.length} conflict(s) resolved`}`);
+  if (reasons.length) {
+    store.event(`merged ${base} into ${branch}, but it needs your review: ${reasons.join("; ")}`.slice(0, 600), job.id, "warn");
+    if (cfg.notify) notify("pr-daemon: review a merge", `${repo.name} PR #${job.number}: ${reasons[0]}`, p.html_url);
+  }
+}
+
+/** Markdown table of conflicted files. */
+function conflictTable(cs: git.Conflict[]): string {
+  return `| File | Conflict |\n|---|---|\n${cs.map((c) => `| \`${c.path}\` | ${c.kind}${c.binary ? " (binary)" : ""} |`).join("\n")}`;
+}
+
+/** Why a resolution can't be committed: anything but the merge we started, with every conflict gone. */
+async function verifyResolution(wt: string, before: string, m: git.MergeStart): Promise<string[]> {
+  const problems: string[] = [];
+  if (await git.mergeInProgress(wt)) {
+    if ((await git.head(wt)) !== before) problems.push("the branch moved under the merge (the agent committed or reset something)");
+  } else {
+    const ps = await git.parents(wt);
+    if (ps.length !== 2 || ps[0] !== before || ps[1] !== m.baseSha) problems.push("the merge is no longer in the worktree: it was aborted, reset or rewritten");
+  }
+  for (const c of m.conflicts) {
+    const f = join(wt, c.path);
+    if (existsSync(f) && hasConflictMarkers(readFileSync(f, "utf8"))) problems.push(`conflict markers are still in \`${c.path}\``);
+  }
+  return problems;
+}
+
+/** The merge done by GitHub ("Update branch"), for when the push of our own merge commit would be refused. Clean merges only. */
+async function viaGitHub(ctx: Ctx, o: { before: string; base: string; branch: string; wt: string; n: number; why: string;
+  note: (level: "ok" | "warn" | "bad", text: string) => void; handOver: (h: string, r: string[]) => Promise<never> }): Promise<void> {
+  const { repo, job, store } = ctx;
+  try { await gh.updateBranch(repo.name, job.number, o.before); }
+  catch (e) {
+    await o.handOver(`neither pr-daemon nor GitHub could merge \`${o.base}\` in`, [
+      `pushing the merge needs the \`workflow\` scope (${o.why.slice(0, 300)})`, `GitHub's own "Update branch" failed: ${(e as Error).message.slice(0, 300)}`,
+      "allow it with `gh auth refresh -s workflow` on the pr-daemon machine, or press Update branch on the PR yourself"]);
+  }
+  store.event(`GitHub merged ${o.base} into ${o.branch} (Update branch): ${o.why.slice(0, 200)}`, job.id);
+  o.note("ok", `merged ${o.base} via GitHub's Update branch (the base changed workflow files)`);
+  await gh.comment(repo.name, job.number, `🔀 **pr-daemon** had GitHub merge \`${o.base}\` into this branch (its **Update branch**), with no conflicts. ` +
+    `It couldn't push the merge itself, because \`${o.base}\` changed \`.github/workflows/\` and its gh login lacks the \`workflow\` scope. No local check ran on it; your CI will.`);
+}
+
 // ---------------------------------------------------------------- teardown / restart
 export async function teardown(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
@@ -499,4 +753,4 @@ export async function restart(ctx: Ctx): Promise<void> {
   if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 
-export const JOBS = { build, review, revise, ci, teardown, restart } as const;
+export const JOBS = { build, review, revise, ci, merge, teardown, restart } as const;

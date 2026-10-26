@@ -70,6 +70,8 @@ stacks, and serves a status and config page on localhost.
 ### Phase 3: polish
 
 - [x] Watch the repo's own checks on each PR, and fix a failing one (`[checks]`)
+- [x] Keep each PR mergeable with its base: merge it in, an agent resolves conflicts, risky or uncertain ones go to a human (`[merge]`)
+- [ ] Verify `[merge]` end to end on a real conflicting PR (and the `update-branch` fallback when the base changed workflows)
 - [x] Preview health that tells "the app is running" from "a person can open it": two probes, up / degraded / down, with the fix named on the row
 - [x] Status page: stacks first, each row expands to every address; TOML colouring and an "All options" tab in Config
 - Spend per PR in the description, per-repo budgets.

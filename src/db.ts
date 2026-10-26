@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME } from "./config.ts";
 
-export type JobKind = "build" | "review" | "revise" | "ci" | "teardown" | "restart";
+export type JobKind = "build" | "review" | "revise" | "ci" | "merge" | "teardown" | "restart";
 export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled" | "ignored";
 
 export interface Job {
   id: number;
   repo: string;
   kind: JobKind;
-  number: number;          // issue number (build/teardown/restart) or PR number (review/revise/ci)
+  number: number;          // issue number (build/teardown/restart) or PR number (review/revise/ci/merge)
   trigger_key: string;     // dedupe key: label event id, comment id, failing CI head sha, …
   state: JobState;
   reason: string;          // why it's waiting / failed / ignored
@@ -51,13 +51,20 @@ export interface Stack {
   checks_detail: string;   // one line: what is failing or running
   checks_sha: string;      // the commit those checks are about
   checks_at: number | null;
+  /** GitHub's view of whether the PR merges into its base: see gh.mergeability(). "" until read. */
+  mergeable: string;       // "" | ok | behind | conflicts | unknown
+  /** What pr-daemon last did about it, and how worried to be: ok (routine), warn (look before merging), bad (yours to do). */
+  merge_note: string;
+  merge_level: string;     // "" | ok | warn | bad
+  merge_at: number | null;
   created_at: number;
 }
 
 // Higher-priority work first: finish and clean up before starting new builds.
 // A red PR comes before a new build: it's work already in a human's hands.
-export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, ci: 2, revise: 3, review: 4, build: 5 };
-export const AGENT_KINDS: JobKind[] = ["build", "review", "revise", "ci"];
+// Conflicts come before red CI: CI doesn't run on a PR that can't merge.
+export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, merge: 2, ci: 3, revise: 4, review: 5, build: 6 };
+export const AGENT_KINDS: JobKind[] = ["build", "review", "revise", "ci", "merge"];
 
 export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
   mkdirSync(HOME, { recursive: true });
@@ -104,7 +111,9 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
     ["stacks", "routes", "TEXT NOT NULL DEFAULT ''"], ["stacks", "public_ok", "INTEGER NOT NULL DEFAULT -1"],
     ["stacks", "local_code", "INTEGER"], ["stacks", "public_code", "INTEGER"],
     ["stacks", "checks_state", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_detail", "TEXT NOT NULL DEFAULT ''"],
-    ["stacks", "checks_sha", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_at", "INTEGER"]]) {
+    ["stacks", "checks_sha", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_at", "INTEGER"],
+    ["stacks", "mergeable", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_note", "TEXT NOT NULL DEFAULT ''"],
+    ["stacks", "merge_level", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_at", "INTEGER"]]) {
     const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === col);
     if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
   }
@@ -179,6 +188,11 @@ export class Store {
   countJobs(repo: string, kind: JobKind, number: number): number {
     return Number((this.db.prepare("SELECT COUNT(*) n FROM jobs WHERE repo = ? AND kind = ? AND number = ? AND state != 'ignored'")
       .get(repo, kind, number) as { n: number }).n);
+  }
+  /** Jobs of a kind on this PR that ran an agent (spent tokens), not counting `except`: the rounds a cap is about. */
+  countAgentRuns(repo: string, kind: JobKind, number: number, except = 0): number {
+    return Number((this.db.prepare("SELECT COUNT(*) n FROM jobs WHERE repo = ? AND kind = ? AND number = ? AND tokens > 0 AND id != ?")
+      .get(repo, kind, number, except) as { n: number }).n);
   }
   /** After a crash, running jobs go back to the queue (their Claude session resumes). */
   recoverRunning(): number {

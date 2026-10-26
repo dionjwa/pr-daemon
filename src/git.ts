@@ -133,3 +133,118 @@ export async function uploadScreenshots(repo: string, branch: string, files: str
     return `**${label}**\n\n![${label}](https://github.com/${repo}/blob/${sha}/${branch}/${name}?raw=true)\n`;
   }).join("\n");
 }
+
+// ---------- merging the base branch in ----------
+// Always a merge, never a rebase: no force-push, and review comments stay on
+// the commits they were made on.
+
+export interface MergeStart {
+  /** The base was already in the branch: nothing to do. */
+  upToDate: boolean;
+  clean: boolean;
+  /** The base commit being merged. */
+  baseSha: string;
+  /** Where base and branch last met: the base's own changes are mergeBase..baseSha. */
+  mergeBase: string;
+  conflicts: Conflict[];
+  /** Git's own words, for the event log when something is odd. */
+  output: string;
+}
+
+/** `git status` codes for an unmerged path, in plain words. */
+export const CONFLICT_KINDS: Record<string, string> = {
+  UU: "both modified", AA: "both added", DD: "both deleted",
+  AU: "added by this branch", UA: "added by the base",
+  DU: "deleted by this branch, changed in the base", UD: "changed in this branch, deleted in the base",
+};
+export interface Conflict { path: string; code: string; kind: string; binary: boolean }
+
+/** Unmerged paths from `git status --porcelain=v1 -z`. Pure: unit-tested. */
+export function parseConflicts(z: string): Omit<Conflict, "binary">[] {
+  const out: Omit<Conflict, "binary">[] = [];
+  const parts = z.split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i];
+    if (e.length < 4) continue;
+    const code = e.slice(0, 2);
+    if (code[0] === "R" || code[0] === "C") i++;   // a rename carries its old path in the next field
+    if (CONFLICT_KINDS[code]) out.push({ path: e.slice(3), code, kind: CONFLICT_KINDS[code] });
+  }
+  return out;
+}
+
+/** Unmerged paths right now, with binary ones marked (git leaves no markers in those). */
+export async function conflicts(wt: string): Promise<Conflict[]> {
+  const z = (await run("git", ["-C", wt, "status", "--porcelain=v1", "-z", "--untracked-files=no"])).stdout;
+  const binary = new Set<string>();
+  // numstat shows "-\t-\t<path>" for a binary file; for an unmerged path, diff the two sides.
+  for (const c of parseConflicts(z)) {
+    if (c.code !== "UU" && c.code !== "AA") continue;
+    const r = await run("git", ["-C", wt, "diff", "--numstat", `:2:${c.path}`, `:3:${c.path}`]);
+    if (/^-\t-\t/m.test(r.stdout)) binary.add(c.path);
+  }
+  return parseConflicts(z).map((c) => ({ ...c, binary: binary.has(c.path) }));
+}
+
+/**
+ * Fetch the base and merge it into the worktree's branch. A clean merge is
+ * committed; a conflicted one is left in progress (MERGE_HEAD set, markers in
+ * the files) for an agent or a human to finish.
+ */
+export async function startMerge(wt: string, base: string, branch: string): Promise<MergeStart> {
+  await git(wt, "fetch", "-q", "origin", base);
+  const baseSha = await git(wt, "rev-parse", `origin/${base}`);
+  const mergeBase = await git(wt, "merge-base", "HEAD", baseSha);
+  if (mergeBase === baseSha) return { upToDate: true, clean: true, baseSha, mergeBase, conflicts: [], output: "" };
+  const r = await run("git", ["-C", wt, "-c", "merge.conflictstyle=diff3", "merge", "--no-ff", "--no-edit",
+    "-m", `Merge ${base} into ${branch}`, baseSha]);
+  const output = `${r.stdout}\n${r.stderr}`.trim();
+  if (r.code === 0) return { upToDate: false, clean: true, baseSha, mergeBase, conflicts: [], output };
+  if (!(await mergeInProgress(wt))) throw new Error(`git merge failed before it started: ${output.slice(-800)}`);
+  return { upToDate: false, clean: false, baseSha, mergeBase, conflicts: await conflicts(wt), output };
+}
+
+export async function mergeInProgress(wt: string): Promise<boolean> {
+  return (await run("git", ["-C", wt, "rev-parse", "-q", "--verify", "MERGE_HEAD"])).code === 0;
+}
+
+/** Throw the merge away and go back to `to` (the branch's head before it). */
+export async function abortMerge(wt: string, to: string): Promise<void> {
+  if (await mergeInProgress(wt)) await run("git", ["-C", wt, "merge", "--abort"]);
+  await git(wt, "reset", "-q", "--hard", to);
+}
+
+/** Keep a copy of an attempt that isn't being pushed, so a human can look at it. */
+export async function keepAttempt(wt: string, name: string): Promise<void> {
+  await git(wt, "branch", "-f", name, "HEAD");
+}
+
+export async function isAncestor(wt: string, a: string, b: string): Promise<boolean> {
+  return (await run("git", ["-C", wt, "merge-base", "--is-ancestor", a, b])).code === 0;
+}
+
+export async function parents(wt: string, rev = "HEAD"): Promise<string[]> {
+  return (await git(wt, "rev-list", "--parents", "-n", "1", rev)).split(" ").slice(1);
+}
+
+/** Files that differ between two commits, optionally under some paths. */
+export async function changedFiles(wt: string, a: string, b: string, ...paths: string[]): Promise<string[]> {
+  return (await git(wt, "diff", "--name-only", a, b, ...(paths.length ? ["--", ...paths] : []))).split("\n").filter(Boolean);
+}
+
+/** No tracked file changed, staged or not. */
+export async function isClean(wt: string): Promise<boolean> {
+  return (await git(wt, "status", "--porcelain", "--untracked-files=no")) === "";
+}
+
+/** The base's commits since the branch left it that touch these files: what the other side meant. */
+export async function baseLog(wt: string, mergeBase: string, baseSha: string, files: string[]): Promise<string> {
+  const r = await run("git", ["-C", wt, "log", "--no-merges", "--format=%h %an: %s", "-n", "40", `${mergeBase}..${baseSha}`, "--", ...files]);
+  return r.stdout.trim();
+}
+
+/** Stage what's resolved and finish the merge with git's own message. */
+export async function commitMerge(wt: string): Promise<void> {
+  await git(wt, "add", "-u");
+  await git(wt, "commit", "-q", "--no-edit");
+}

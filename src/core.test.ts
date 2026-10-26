@@ -116,6 +116,7 @@ const stackOf = (branch: string, url: string, repo = "o/r", routes: Record<strin
   repo, branch, issue: Number(branch.split("-")[0]), worktree: "/w", url, pr: null, builder_session: "", healthy: 1, error: "", networks: "",
   routes: JSON.stringify(routes), public_ok: -1, local_code: null, public_code: null,
   checks_state: "", checks_detail: "", checks_sha: "", checks_at: null, checked_at: null, created_at: 0,
+  mergeable: "", merge_note: "", merge_level: "", merge_at: null,
 });
 
 test("branch → DNS label", () => {

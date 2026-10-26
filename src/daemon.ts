@@ -349,6 +349,7 @@ export class Daemon {
         if (id) store.event(`queued teardown of ${s.branch} (${why.text})`, id);
         continue;
       }
+      await this.pollMerge(repo, s, pr);
       await this.pollChecks(repo, s, pr);
       await this.pollHealth(repo, s);
     }
@@ -435,6 +436,56 @@ export class Daemon {
   }
 
   /**
+   * Does the PR still merge into its base? GitHub answers on the PR read the
+   * poll already made, so this costs nothing. Conflicts (or, with
+   * `merge.behind`, a base that moved on) queue a merge job: once per head
+   * commit, so an attempt that hands over to a human isn't repeated until
+   * someone pushes. The round cap is on agent runs, enforced again in the job.
+   */
+  private async pollMerge(repo: string, s: Stack, pr: gh.PR | null): Promise<void> {
+    const { store, cfg } = this;
+    if (!cfg.merge.watch || !pr || pr.state !== "open") return;
+    const state = gh.mergeability(pr);
+    if (state !== s.mergeable) {
+      store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree, mergeable: state });
+      if (state === "conflicts") store.event(`${repo} PR #${pr.number} has conflicts with ${pr.base.ref}`, null, "warn");
+    }
+    const wanted = state === "conflicts" || (state === "behind" && cfg.merge.behind);
+    if (!wanted) return;
+    const key = `merge:${repo}#${pr.number}:${pr.head.sha}`;
+    if (store.hasTrigger(key)) return;
+    const ignore = (reason: string): boolean => !!store.enqueue({ repo, kind: "merge", number: pr.number, branch: s.branch, trigger_key: key, state: "ignored", reason });
+    if (state === "conflicts" && (!cfg.merge.fix || cfg.merge.maxRounds === 0)) {
+      const why = cfg.merge.fix ? "merge.max_rounds is 0" : "merge.fix is off";
+      if (ignore(`conflicts with ${pr.base.ref}; ${why}`)) {
+        store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree, merge_note: `conflicts with ${pr.base.ref}; not resolving them (${why})`, merge_level: "bad", merge_at: Date.now() });
+        store.event(`${repo} PR #${pr.number}: conflicts with ${pr.base.ref}, left to you (${why})`, null, "warn");
+      }
+      return;
+    }
+    const rounds = store.countAgentRuns(repo, "merge", pr.number);
+    if (state === "conflicts" && rounds >= cfg.merge.maxRounds) {
+      if (!ignore(`conflicts with ${pr.base.ref}; ${rounds} resolution round(s) already used`)) return;
+      store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree, merge_note: `conflicts with ${pr.base.ref}; ${rounds} agent round(s) used, so it's yours now`, merge_level: "bad", merge_at: Date.now() });
+      store.event(`${repo} PR #${pr.number}: conflicts with ${pr.base.ref} again after ${rounds} resolution round(s); leaving it to you`, null, "warn");
+      const said = `merge-gave-up:${repo}#${pr.number}`;
+      if (store.get(said)) return;
+      store.set(said, String(Date.now()));
+      await gh.setStatus(repo, s.issue, cfg.label, "failed").catch(() => {});
+      await gh.comment(repo, pr.number, `🔀 **pr-daemon**: this PR conflicts with \`${pr.base.ref}\` again, after ${rounds} automatic resolution round(s), so it stopped trying. **This one is yours.**
+
+` +
+        `Merge \`${pr.base.ref}\` in yourself, comment \`${COMMAND} <how to resolve it>\`, or raise \`merge.max_rounds\` in the config.`).catch(() => {});
+      if (cfg.notify) notify("pr-daemon: a merge needs you", `${repo} PR #${pr.number} conflicts with ${pr.base.ref}`, pr.html_url);
+      return;
+    }
+    const id = store.enqueue({ repo, kind: "merge", number: pr.number, branch: s.branch, trigger_key: key, pr: pr.number, payload: { sha: pr.head.sha } });
+    if (id) store.event(state === "conflicts"
+      ? `${repo} PR #${pr.number}: conflicts with ${pr.base.ref}; queued a merge (agent round ${rounds + 1} of ${cfg.merge.maxRounds} if it needs one)`
+      : `${repo} PR #${pr.number} is behind ${pr.base.ref}; queued a merge`, id, state === "conflicts" ? "warn" : "info");
+  }
+
+  /**
    * Is an issue missing from the labeled list because it closed, or because
    * the label came off? Asked of the issue itself before acting, so a list
    * that lags behind can't tear anything down.
@@ -466,7 +517,7 @@ export class Daemon {
       && j.kind !== "teardown" && (j.branch === branch || (j.kind === "build" && j.number === issue)));
   }
 
-  /** The issue a job is about: builds carry it; review/revise/ci carry the PR, whose branch starts with it. */
+  /** The issue a job is about: builds carry it; review/revise/ci/merge carry the PR, whose branch starts with it. */
   private issueOf(job: Job): number {
     return job.kind === "build" ? job.number : Number(job.branch.split("-")[0]) || job.number;
   }
@@ -542,7 +593,7 @@ export class Daemon {
       .then(async () => {
         this.store.update(job.id, { state: "done", finished_at: Date.now() });
         // A review/revise that was paused set the issue to agent:paused; put it back.
-        if (["review", "revise", "ci"].includes(job.kind)) await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "in-review").catch(() => {});
+        if (["review", "revise", "ci", "merge"].includes(job.kind)) await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "in-review").catch(() => {});
         this.store.event(`finished ${job.kind} ${job.repo}#${job.number}`, job.id);
       })
       .catch(async (e: Error) => {
@@ -674,6 +725,7 @@ export class Daemon {
         state: stack.stackState(s),
         services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) })),
       checks: { watch: this.cfg.checks.watch, fix: this.cfg.checks.fix, maxRounds: this.cfg.checks.maxRounds, every: formatDuration(this.cfg.checks.everyMs) },
+      merge: { watch: this.cfg.merge.watch, fix: this.cfg.merge.fix, behind: this.cfg.merge.behind, maxRounds: this.cfg.merge.maxRounds },
       health: { every: formatDuration(this.cfg.stacks.healthEveryMs), autoRestart: this.cfg.stacks.autoRestart },
       proxy: this.proxy.status,
       ready: this.ready,

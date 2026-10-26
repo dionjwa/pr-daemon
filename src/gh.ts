@@ -115,10 +115,42 @@ export async function commentsSince(repo: string, since: string): Promise<Commen
   return apiAll<Comment>(`repos/${repo}/issues/comments?per_page=100&sort=created&direction=asc&since=${encodeURIComponent(since)}`);
 }
 
-export interface PR { number: number; state: string; merged_at: string | null; head: { ref: string; sha: string }; base: { ref: string }; html_url: string }
+export interface PR {
+  number: number; state: string; merged_at: string | null; head: { ref: string; sha: string }; base: { ref: string; sha: string }; html_url: string;
+  /** GitHub works this out lazily after a push to either side: null means "not known yet, ask again". */
+  mergeable?: boolean | null;
+  /** dirty (conflicts), behind, clean, blocked, unstable, has_hooks, draft, or unknown. */
+  mergeable_state?: string;
+}
 
 export async function pr(repo: string, n: number): Promise<PR> {
   return api<PR>(`repos/${repo}/pulls/${n}`);
+}
+
+/** One word for the status page: GitHub's view of whether a PR can merge. */
+export function mergeability(p: Pick<PR, "mergeable" | "mergeable_state">): string {
+  if (p.mergeable === false || p.mergeable_state === "dirty") return "conflicts";
+  if (p.mergeable === null || p.mergeable === undefined || !p.mergeable_state || p.mergeable_state === "unknown") return "unknown";
+  return p.mergeable_state === "behind" ? "behind" : "ok";
+}
+
+/**
+ * GitHub merges the base into the PR branch itself (the "Update branch"
+ * button). Only for a merge without conflicts. `expected` makes it refuse if
+ * someone pushed in the meantime.
+ */
+export async function updateBranch(repo: string, n: number, expected: string): Promise<void> {
+  await must("gh", ["api", "-X", "PUT", `repos/${repo}/pulls/${n}/update-branch`, "-f", `expected_head_sha=${expected}`]);
+}
+
+/**
+ * Can the gh login push changes to .github/workflows/? A merge that brings in
+ * the base's workflow edits is such a push, and GitHub refuses it without the
+ * `workflow` scope. Unknown counts as no.
+ */
+export async function hasWorkflowScope(): Promise<boolean> {
+  const r = await run("gh", ["auth", "status", "-h", "github.com"]);
+  return /Token scopes:.*\bworkflow\b/.test(r.stdout + r.stderr);
 }
 
 // ---------------------------------------------------------------- checks (the project's own CI)

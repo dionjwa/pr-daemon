@@ -13,6 +13,8 @@ pr-daemon, one process on **your own machine**, then:
    running app
 5. has a second agent, which sees only the PR, review it
 6. watches your repository's own CI on the PR and fixes it if it goes red
+7. keeps the PR mergeable: when it conflicts with `main`, merges `main` in and
+   resolves the conflicts, and hands you the risky ones
 
 **You** try it, then merge it. Merging or closing the PR shuts the app copy
 down, deletes the branch and cleans up. Changed your mind? Remove the `agent`
@@ -26,6 +28,8 @@ label and it stops and cleans up the same way. Everything runs within a **token 
                           → yes: PR + screenshots + preview link
                           → fresh agent reviews the PR
                           → your CI runs: red? ──▶ agent fixes it (twice at most) ─▶  try it, merge
+                          → conflicts with main? ──▶ merge main in, agent resolves
+                            (risky or unsure ──▶ asks you)
                           stop stack, delete worktree  ◀────────────────────────────────┘
 ```
 
@@ -53,6 +57,7 @@ Status and settings are on a local web page: **http://localhost:7377**.
 | Wait. Watch at http://localhost:7377 if you like. | Builds, tests, opens a PR, reviews it, and labels the issue `agent:in-review`. |
 | Open the **Preview** link in the PR and try it. | Keeps the stack running and restarts it if it stops. |
 | Watch your own CI run on the PR, as usual. | If a check fails, an agent fixes it and pushes, up to twice per PR. If it's still red after that, it says so on the PR and stops. |
+| Keep merging other work into `main`. | If the PR stops merging cleanly, it merges `main` in and an agent resolves the conflicts. It pushes only once your check passes, and marks anything uncertain **needs your review**. Risky conflicts are left for you, with a comment saying why. |
 | Want changes? Comment on the PR: `/pr-daemon make the button blue`. | Makes the changes, pushes, and comments with a summary and new screenshots. |
 | Merge (or close) the PR. | Stops the stack, removes the worktree, and deletes the branch on GitHub. |
 | Changed your mind? Remove the **`agent`** label. | Stops any agent working on it, closes its PR, stops the stack, removes the worktree, and deletes the branch. |
@@ -190,6 +195,41 @@ login.
 
 ---
 
+## When a PR conflicts with `main`
+
+Other work lands on `main` while a PR waits for you. When GitHub says the PR
+no longer merges cleanly, pr-daemon merges `main` into the branch. It never
+rebases or force-pushes, so your review comments stay where they were.
+
+1. **No conflicts?** It commits the merge, runs your check, and pushes. No
+   agent, no tokens.
+2. **Conflicts?** First it decides whether they're safe to hand to an agent.
+   They go to **you** instead when:
+   - more than `merge.max_files` files conflict
+   - a binary file conflicts (only one side can be kept)
+   - a file under `.github/workflows/` conflicts
+   - a conflict is in one of your `merge.human_paths`
+   - this PR has already used its `merge.max_rounds`
+3. Otherwise an agent (the one that built the PR, when its session is still
+   around) resolves them. It's told to keep both sides' intent, and it writes
+   a report: one section per file, a confidence level, and anything it wants
+   a person to check.
+4. pr-daemon checks the result itself before it commits the merge: it must
+   still be the same merge, with no conflict markers left. Then your check
+   must pass. A failing check gets the usual fix rounds, and if it still
+   fails, **nothing is pushed**.
+5. It pushes and comments with the files, the report and a link to the merge
+   commit. If the agent wasn't confident or flagged something, or a file was
+   deleted on one side, or it changed files outside the conflicts, the
+   comment starts with **Needs your review before merging** and you get a
+   desktop notification.
+
+When it hands a merge to you, the PR is left exactly as it was, the issue is
+labelled `agent:failed`, and the comment says why and how to do it yourself.
+You can also reply `/pr-daemon <how to resolve it>` to have the agent try
+again with your guidance. The status page's **Merge** column shows each PR's
+state at a glance.
+
 ## The status page
 
 http://localhost:7377. It's only reachable from your own machine.
@@ -199,7 +239,7 @@ http://localhost:7377. It's only reachable from your own machine.
 
 - **Token budget:** tokens used in the current window, the limit, and when it
   frees up.
-- **Work:** every job (build, review, revise, teardown, restart) with its
+- **Work:** every job (build, review, revise, ci, merge, teardown, restart) with its
   state, tokens and the reason it's waiting. Click a row to watch the agent
   live. Buttons: **Cancel**, **Resume** (continue where it stopped) and
   **Retry** (start over).
@@ -353,6 +393,10 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | `checks.watch` | `true` | Read each open PR's checks (your own CI) and show them |
 | `checks.fix` | `true` | Put an agent on a failing check |
 | `checks.max_rounds` | `2` | Automatic fix rounds per PR before it stops and says so |
+| `merge.fix` | `true` | Merge the base in when a PR conflicts with it, with an agent resolving the conflicts |
+| `merge.behind` | `false` | Also merge when the base only moved on (no agent): for repos that require up-to-date branches |
+| `merge.max_rounds` | `2` | Agent conflict-resolution rounds per PR before it stops and says so |
+| `merge.max_files` / `merge.human_paths` | `15` / `[]` | Conflicts bigger than this, or in these paths (globs), always go to you |
 | `preview.domain` | unset | Public preview URLs `https://<branch>.<domain>` (pr-daemon runs Caddy) |
 | `preview.proxy` | `auto` | `auto` / `binary` / `docker` / `off` |
 | `preview.tls` | `auto` | `auto` (Let's Encrypt) / `internal` (testing) / `off` (plain http) |
@@ -365,7 +409,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 pr-daemon serve                      # the process (install-service runs this for you)
 pr-daemon status                     # running, queued and paused jobs, and stacks
 pr-daemon doctor                     # check tools, logins, config
-pr-daemon run build your-org/repo 42 # one job now, in this terminal (build|review|revise|teardown|restart)
+pr-daemon run build your-org/repo 42 # one job now, in this terminal (build|review|revise|ci|merge|teardown|restart)
 pr-daemon stop                       # shut it down (stops the service too, if one is installed)
 pr-daemon install-service | uninstall-service
 ```

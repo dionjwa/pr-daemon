@@ -20,7 +20,7 @@ const HELP = `pr-daemon — label an issue, get a pull request.
   pr-daemon doctor                        check tools, logins and config
   pr-daemon setup                         print what a project must do to take part (also at /setup)
   pr-daemon run <kind> <owner/repo> <n> [feedback]
-                                         run one job now, in this terminal (kind: build|review|revise|ci|teardown|restart)
+                                         run one job now, in this terminal (kind: build|review|revise|ci|merge|teardown|restart)
   pr-daemon install-service               start pr-daemon at login (macOS launchd / Linux systemd --user)
   pr-daemon uninstall-service
 
@@ -58,7 +58,7 @@ async function main(argv: string[]): Promise<void> {
     case "setup": console.log(setupDoc(loadConfig(), "/pr-daemon")); return;
     case "run": {
       const [kind, repo, n, ...rest] = args;
-      if (!["build", "review", "revise", "ci", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
+      if (!["build", "review", "revise", "ci", "merge", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
       const d = new Daemon();
       const id = d.store.enqueue({ repo, kind: kind as JobKind, number: Number(n), trigger_key: `manual:${repo}#${n}:${kind}:${Date.now()}`,
         payload: rest.length ? { feedback: rest.join(" ") } : {} });

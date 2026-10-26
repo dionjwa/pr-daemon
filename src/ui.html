@@ -57,6 +57,7 @@
   .s-success { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .s-pending { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
   .s-failure { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+  .m-warn { color: var(--warn); } .m-bad { color: var(--bad); }
   .s-none { color: var(--ink-3); }
   tr.row { cursor: pointer; } tr.row:hover td { background: color-mix(in srgb, var(--chip) 60%, transparent); }
   .detail { padding: 10px 14px; background: var(--bg); font-size: 12px; }
@@ -279,10 +280,10 @@ name = "your-org/website"</pre>`);
   const jobs = S.jobs;
   $("jobs").innerHTML = jobs.length ? `<table><thead><tr><th>State</th><th>Job</th><th>Issue / PR</th><th class="hide-sm">Branch</th><th>Tokens</th><th class="hide-sm">When</th><th></th></tr></thead><tbody>${
     jobs.map((j) => {
-      const isPr = j.kind === "review" || j.kind === "revise";
+      const isPr = ["review", "revise", "ci", "merge"].includes(j.kind);
       // Stack chores are not agent runs: name them so a queued "restart" row
       // doesn't read as a second build.
-      const kindLabel = { restart: "restart stack", teardown: "tear down stack", ci: "fix failing checks" }[j.kind] ?? j.kind;
+      const kindLabel = { restart: "restart stack", teardown: "tear down stack", ci: "fix failing checks", merge: "merge base in" }[j.kind] ?? j.kind;
       const when = j.state === "running" ? `for ${dur(Date.now() - j.started_at)}` : j.finished_at ? ago(j.finished_at) : ago(j.created_at);
       const btns = [
         ["running", "queued", "paused"].includes(j.state) && btn(`cancel-${j.id}`, "Cancel", "danger"),
@@ -337,12 +338,14 @@ const STACK_STATE = {
   unknown: ["", "not checked", "Not probed yet"],
 };
 const CHECKS_NOTE = { success: "passing", pending: "running", failure: "failing", none: "no checks", "": "—" };
+// GitHub's view of the PR against its base, and the badge class for it.
+const MERGE_NOTE = { ok: ["s-success", "merges cleanly"], behind: ["s-pending", "behind base"], conflicts: ["s-failure", "conflicts"], unknown: ["", "checking…"] };
 
 function renderStacks() {
   const a = (url, text) => `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text ?? url)}</a>`;
   const code = (c) => (c === null || c === undefined ? "—" : c === 0 ? "no answer" : String(c));
   $("stacks").innerHTML = S.stacks.length ? `<table><thead><tr><th>Stack</th><th>Branch</th><th>Issue / PR</th><th>Preview</th>
-    <th class="hide-sm">Checks</th><th class="hide-sm">Probed</th><th></th></tr></thead><tbody>${
+    <th class="hide-sm">Checks</th><th class="hide-sm">Merge</th><th class="hide-sm">Probed</th><th></th></tr></thead><tbody>${
     S.stacks.map((s) => {
       const [cls, word, title] = STACK_STATE[s.state] ?? STACK_STATE.unknown;
       const id = `${s.repo}|${s.branch}`;
@@ -358,6 +361,7 @@ function renderStacks() {
           ? `<span class="badge s-${esc(ch)}">${esc(CHECKS_NOTE[ch] ?? ch)}</span>${
               s.checks_detail ? `<div class="muted" style="font-size:11px">${esc(s.checks_detail)}</div>` : ""}`
           : `<span class="muted">${S.checks?.watch ? "—" : "not watched"}</span>`}</td>
+        <td class="hide-sm small">${mergeCell(s)}</td>
         <td class="hide-sm small muted">${ago(s.checked_at)}</td>
         <td class="actions">${btn(`restart|${id}`, "Restart")}${btn(`teardown|${id}`, "Tear down", "danger")}</td></tr>`;
       if (!openStacks.has(id)) return row;
@@ -372,22 +376,37 @@ function renderStacks() {
         ["worktree", esc(s.worktree)],
         ...(s.checks_sha ? [["checks", `${esc(s.checks_state)}${s.checks_detail ? ` — ${esc(s.checks_detail)}` : ""} <span class="muted">at ${esc(s.checks_sha.slice(0, 7))}, read ${ago(s.checks_at)}</span>${
           s.pr ? ` · ${a(`https://github.com/${s.repo}/pull/${s.pr}/checks`, "on GitHub")}` : ""}`]] : []),
+        ...(s.mergeable || s.merge_note ? [["merge", `${esc((MERGE_NOTE[s.mergeable] ?? ["", s.mergeable || "—"])[1])}${
+          s.merge_note ? ` — <span class="m-${esc(s.merge_level)}">${esc(s.merge_note)}</span> <span class="muted">${ago(s.merge_at)}</span>` : ""}`]] : []),
         ...(s.networks ? [["docker networks", esc(s.networks)]] : []),
         ["started", `${new Date(s.created_at).toLocaleString()} <span class="muted">(${ago(s.created_at)})</span>`],
       ];
-      return row + `<tr><td colspan="7" style="padding:0"><div class="detail"><dl>${
+      return row + `<tr><td colspan="8" style="padding:0"><div class="detail"><dl>${
         rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl></div></td></tr>`;
     }).join("")}</tbody></table>` : `<div class="empty">No preview stacks running.</div>`;
 
   // Say plainly what does and doesn't stop a stack: the question a green dot
   // on a dead preview makes people ask.
-  const h = S.health ?? {}, c = S.checks ?? {};
+  const h = S.health ?? {}, c = S.checks ?? {}, m = S.merge ?? {};
   $("stacks-foot").innerHTML = `Each stack is probed every ${esc(h.every ?? "?")} on its own address and, with a preview domain, on its public URL.
     ${h.autoRestart ? "One that stops answering is restarted automatically." : "<b>auto_restart is off</b>, so one that stops answering stays down."}
     Nothing is stopped on a timer: a stack goes away when its PR or issue closes, when the <span class="badge">${esc(S.label)}</span> label comes off,
     or when you press Tear down &mdash; and the <a href="#">Events</a> log says which.
     ${c.watch ? `GitHub's own checks are read every ${esc(c.every)}${c.fix ? `, and a failing one gets an agent (up to ${c.maxRounds} round${c.maxRounds === 1 ? "" : "s"} per PR)` : " (fixing is off)"}.`
-      : "Checks on PRs are not being watched (<code>checks.watch = false</code>)."}`;
+      : "Checks on PRs are not being watched (<code>checks.watch = false</code>)."}
+    ${m.watch ? `A PR that conflicts with its base ${m.fix && m.maxRounds ? `gets the base merged in, with an agent resolving the conflicts (up to ${m.maxRounds} round${m.maxRounds === 1 ? "" : "s"} per PR); risky or uncertain ones come to you` : "is shown here and left to you (<code>merge.fix</code> is off)"}${m.behind ? ", and one that's merely behind is updated" : ""}.`
+      : "Mergeability is not being watched (<code>merge.watch = false</code>)."}`;
+}
+
+// What pr-daemon did about the merge wins over GitHub's word when it needs you:
+// "needs your review" or "yours" is the thing to see, not "conflicts".
+function mergeCell(s) {
+  const [cls, word] = MERGE_NOTE[s.mergeable] ?? ["", s.mergeable ? esc(s.mergeable) : ""];
+  if (!word && !s.merge_note) return `<span class="muted">${S.merge?.watch ? "—" : "not watched"}</span>`;
+  const flag = s.merge_level === "warn" ? `<span class="badge s-paused">needs your review</span>`
+    : s.merge_level === "bad" ? `<span class="badge s-failed">yours to resolve</span>` : "";
+  return `${word ? `<span class="badge ${cls}">${word}</span>` : ""}${flag}${
+    s.merge_note ? `<div class="muted" style="font-size:11px">${esc(s.merge_note.slice(0, 160))}</div>` : ""}`;
 }
 
 // ---------- transcripts: what the agent said, each tool call, and what came back ----------
@@ -395,7 +414,7 @@ function renderStacks() {
 // we keep and re-attach: expanded calls stay expanded, and new entries are
 // appended (fetched from where we left off) rather than redrawn. It follows
 // the bottom while you're at the bottom, and stays put once you scroll up.
-const AGENT_KINDS = ["build", "review", "revise", "ci"];
+const AGENT_KINDS = ["build", "review", "revise", "ci", "merge"];
 const tx = new Map();            // job id → { el, count, top, stick, busy, loaded }
 function attachTx(id, cell) {
   let t = tx.get(id);
