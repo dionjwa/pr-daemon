@@ -39,7 +39,8 @@ export interface Config {
   allowedUsers: string[];   // empty = only the gh-authenticated user
   concurrency: number;      // agent jobs at once
   preventSleep: boolean;
-  notify: boolean;          // desktop notification when a preview stack is ready
+  notify: boolean;          // desktop notification when the agent needs you (Daemon.attention)
+  notifyOn: NoticeKind[];   // which kinds of notice to send at all
   budget: {
     windowMs: number;
     tokens: number | null;      // per window; null = unlimited
@@ -77,6 +78,47 @@ export interface Config {
   repos: RepoConfig[];
 }
 
+/** The kinds of "your move" notice (Daemon.attention), in the order the Config page lists them. */
+export const NOTICE_KINDS = [
+  { kind: "ready", label: "PR ready", detail: "a build is done: reviewed, and revised once if the review asked" },
+  { kind: "revised", label: "Revised", detail: "a revise you asked for with /pr-daemon was pushed" },
+  { kind: "ci", label: "CI fix", detail: "a fix for failing checks was pushed, or the agent made no change" },
+  { kind: "merge", label: "Merge", detail: "a merge with the base needs you, or needs a look before merging" },
+  { kind: "failed", label: "Failed", detail: "a job failed or gave up" },
+  { kind: "paused", label: "Paused", detail: "a job is waiting for you to press Resume (not budget-window pauses)" },
+] as const;
+export type NoticeKind = (typeof NOTICE_KINDS)[number]["kind"];
+const KIND_NAMES: string[] = NOTICE_KINDS.map((k) => k.kind);
+
+/**
+ * Set one top-level `key = value` in the config TEXT, leaving every other line
+ * (and that line's comment) alone, so the page's checkboxes can save without
+ * flattening the file. A missing key goes after `after` if that is a top-level
+ * key, otherwise before the first [table]. `value` is TOML, written as given.
+ */
+export function setTopLevel(text: string, key: string, value: string, after = "", comment = ""): string {
+  const lines = text.split("\n");
+  const tables = lines.findIndex((l) => /^\s*\[/.test(l));
+  const end = tables < 0 ? lines.length : tables;
+  const at = (k: string) => lines.slice(0, end).findIndex((l) => new RegExp(`^\\s*${k}\\s*=`).test(l));
+  const i = at(key);
+  if (i >= 0) {
+    // A hand-written list can span lines: replace through its closing bracket.
+    let j = i;
+    const depth = (l: string) => (l.replace(/#.*$/, "").match(/\[/g) ?? []).length - (l.replace(/#.*$/, "").match(/\]/g) ?? []).length;
+    for (let d = depth(lines[i]); d > 0 && j + 1 < end; ) d += depth(lines[++j]);
+    const m = /^(\s*[\w-]+\s*=\s*)(.*?)(\s+#.*)?$/.exec(lines[i])!;
+    lines.splice(i, j - i + 1, `${m[1]}${value}${j === i ? m[3] ?? "" : ""}`);
+  } else {
+    const a = after ? at(after) : -1;
+    const line = `${key} = ${value}${comment ? `  # ${comment}` : ""}`;
+    if (a >= 0) lines.splice(a + 1, 0, line);
+    else if (tables >= 0) lines.splice(tables, 0, line, "");
+    else lines.push(line);
+  }
+  return lines.join("\n");
+}
+
 export const DEFAULT_TOML = `# pr-daemon configuration.
 # Edit here or in the web page (http://localhost:7377 → Config). Saved as-is.
 # Changes apply live either way — pr-daemon watches this file. A file that
@@ -103,7 +145,9 @@ allowed_users = []       # who may direct the agent: add the label, write/edit l
                          # /pr-daemon and PR comments the agent reads. [] = only you (the gh user)
 concurrency = 1          # agent runs at the same time
 prevent_sleep = true     # macOS: keep the machine awake while pr-daemon runs
-notify = true            # desktop notification when a preview stack is ready (macOS; notify-send on Linux)
+notify = true            # desktop notification when the agent needs you: a PR ready, a fix pushed, a failure (terminal-notifier on macOS; notify-send on Linux)
+notify_on = ["ready", "revised", "ci", "merge", "failed", "paused"]  # which notices to send (desktop, browser and Needs you);
+                         # ready, revised, ci, merge, failed, paused. The Config page has a checkbox for each
 
 [budget]
 window = "5h"            # rolling window, e.g. one Claude subscription window
@@ -281,6 +325,13 @@ export function parseConfig(text: string): Config {
     concurrency: Math.max(1, num(raw.concurrency, 1, "concurrency")),
     preventSleep: bool(raw.prevent_sleep, true, "prevent_sleep"),
     notify: bool(raw.notify, true, "notify"),
+    notifyOn: (() => {
+      if (raw.notify_on === undefined) return KIND_NAMES as NoticeKind[];
+      const on = strList(raw.notify_on, "notify_on");
+      const bad = on.filter((k) => !KIND_NAMES.includes(k));
+      if (bad.length) throw new Error(`notify_on: unknown ${bad.map((k) => `"${k}"`).join(", ")}; use any of ${KIND_NAMES.join(", ")}`);
+      return on as NoticeKind[];
+    })(),
     budget: {
       windowMs: dur(b.window, "5h", "budget.window"),
       tokens: amount(b.tokens, "budget.tokens"),

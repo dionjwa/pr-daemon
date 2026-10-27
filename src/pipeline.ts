@@ -7,14 +7,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startAgent, type AgentRun } from "./agent.ts";
 import { count, gate } from "./budget.ts";
-import type { Config, RepoConfig } from "./config.ts";
+import type { Config, NoticeKind, RepoConfig } from "./config.ts";
 import type { Job, Store } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { assessConflicts, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
 import { publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
-import { notify, tail } from "./util.ts";
+import { tail } from "./util.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 
@@ -42,6 +42,13 @@ export interface Ctx {
   statusUrl: string;
   /** The worktree the agent runs in (set by each job once it has one). */
   current_wt?: string;
+  /**
+   * What to tell the person if this job is the last in its chain: set by a
+   * job that finished something worth looking at. The daemon sends it only
+   * when no other work is coming on the branch (build → review → revise is
+   * one notice), and always when the job fails, using this if it was set.
+   */
+  notice?: { kind: NoticeKind; level: "ok" | "warn" | "bad"; title: string; body: string; url: string };
 }
 
 /** Fill {{NAME}} from vars in one left-to-right pass (substituted text is never re-scanned). */
@@ -284,6 +291,7 @@ export async function build(ctx: Ctx): Promise<void> {
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, pr: prNumber, builder_session: store.job(job.id)!.session_id });
   await gh.setStatus(repo.name, n, cfg.label, "in-review");
   await gh.comment(repo.name, n, `✅ **pr-daemon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
+  ctx.notice = { kind: "ready", level: "ok", title: `✅ PR ready: ${repo.name} #${prNumber}`, body: issue.title, url: `https://github.com/${repo.name}/pull/${prNumber}` };
   store.enqueue({ repo: repo.name, kind: "review", number: prNumber, branch, trigger_key: `review:${repo.name}#${prNumber}:job${job.id}` });
 }
 
@@ -341,6 +349,9 @@ export async function review(ctx: Ctx): Promise<void> {
   if (!existsSync(file)) { store.event("reviewer wrote no review.md", job.id, "warn"); return; }
   await gh.review(repo.name, job.number, file);
   const reviewText = readFileSync(file, "utf8");
+  const verdict = /^VERDICT:\s*(\w+)/im.exec(reviewText)?.[1].toLowerCase() || "commented";
+  ctx.notice = { kind: "ready", level: verdict === "changes" ? "warn" : "ok", title: `✅ PR ready: ${repo.name} #${job.number}`,
+    body: `${p.title} · review: ${verdict}`, url: p.html_url };
   if (cfg.agent.autoRevise && !payload(job).fromReview && /^VERDICT:\s*changes/im.test(reviewText)) {
     store.event("reviewer asked for changes: one automatic revise round", job.id);
     store.enqueue({ repo: repo.name, kind: "revise", number: job.number, branch, trigger_key: `revise-from-review:job${job.id}`, payload: { feedback: reviewText, fromReview: true } });
@@ -389,6 +400,10 @@ export async function revise(ctx: Ctx): Promise<void> {
   const result = await stack.check(repo.check, wt);
   await git.push(wt, branch);
   const shots = await uploadShots(ctx, branch, out);
+  const checked = result.skipped ? "" : result.ok ? " · check passes" : ` · \`${repo.check}\` fails`;
+  ctx.notice = payload(job).fromReview
+    ? { kind: "ready", level: result.ok ? "ok" : "warn", title: `✅ PR ready: ${repo.name} #${job.number}`, body: `${p.title} · revised after review${checked}`, url: p.html_url }
+    : { kind: "revised", level: result.ok ? "ok" : "warn", title: `🔁 Revised: ${repo.name} #${job.number}`, body: `${p.title}${checked}`, url: p.html_url };
   await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🔁 **pr-daemon** revised this PR. ${result.ok ? "✅ checks pass" : `❌ \`${repo.check}\` fails:\n\`\`\`\n${result.output}\n\`\`\``}
 
 ${summary}
@@ -451,11 +466,14 @@ export async function ci(ctx: Ctx): Promise<void> {
     // PR instead of pretending a fix went out.
     await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🧪 **pr-daemon** looked at the failing checks (${c.summary}) and made no change:\n\n${summary}`));
     store.event("the agent changed nothing; not pushing", job.id, "warn");
+    ctx.notice = { kind: "ci", level: "warn", title: `🧪 CI still red: ${repo.name} #${job.number}`, body: `${c.summary} · the agent made no change`, url: p.html_url };
     return;
   }
   const local = await stack.check(repo.check, wt);
   await git.push(wt, branch);
   const shots = await uploadShots(ctx, branch, out);
+  ctx.notice = { kind: "ci", level: local.ok || local.skipped ? "ok" : "warn", title: `🧪 CI fix pushed: ${repo.name} #${job.number}`,
+    body: `${p.title} · was failing: ${c.summary}`, url: p.html_url };
   await gh.comment(repo.name, job.number, withPreview(ctx, branch, `🧪 **pr-daemon** pushed a fix for the failing checks (${c.summary}). GitHub will re-run them.
 ${repo.check && !local.skipped ? `\nLocally, \`${repo.check}\` ${local.ok ? "passes ✅" : `still FAILS ❌:\n\`\`\`\n${local.output}\n\`\`\``}\n` : ""}
 ${summary}
@@ -513,7 +531,7 @@ export async function merge(ctx: Ctx): Promise<void> {
 ${reasons.map((r) => `- ${r}`).join("\n")}
 ${o.conflicts?.length ? `\nConflicted files:\n${conflictTable(o.conflicts)}\n` : ""}${kept ? `\nIts attempt is kept on the pr-daemon machine as the local branch \`${kept}\`; the PR is unchanged.\n` : ""}
 To do it yourself: \`git fetch origin && git checkout ${branch} && git merge origin/${base}\`, resolve, commit and push. Or comment \`/pr-daemon <how to resolve it>\` to have the agent try with your guidance.`);
-    if (cfg.notify) notify("pr-daemon: a merge needs you", `${repo.name} PR #${job.number}: ${headline}`, p.html_url);
+    ctx.notice = { kind: "merge", level: "bad", title: `🔀 Merge needs you: ${repo.name} #${job.number}`, body: headline, url: p.html_url };
     throw new FailError(`${headline}: ${reasons.join("; ")}`.slice(0, 1500));
   };
 
@@ -668,7 +686,7 @@ ${report ? `\n<details${reasons.length ? " open" : ""}><summary>How it was resol
     : `merged ${base} at ${mergeCommit.slice(0, 7)}${m.clean ? "" : `, ${m.conflicts.length} conflict(s) resolved`}`);
   if (reasons.length) {
     store.event(`merged ${base} into ${branch}, but it needs your review: ${reasons.join("; ")}`.slice(0, 600), job.id, "warn");
-    if (cfg.notify) notify("pr-daemon: review a merge", `${repo.name} PR #${job.number}: ${reasons[0]}`, p.html_url);
+    ctx.notice = { kind: "merge", level: "warn", title: `🔀 Review a merge: ${repo.name} #${job.number}`, body: reasons[0], url: p.html_url };
   }
 }
 

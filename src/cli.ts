@@ -163,6 +163,9 @@ async function doctor(): Promise<void> {
   ok(auth.code === 0, `gh is logged in${login ? ` as @${login}: pr-daemon pushes, opens PRs and comments as this user` : ""}`, "gh auth login");
   const c = await run("claude", ["-p", "Reply with exactly: ok", "--max-turns", "1"], { timeoutMs: 90_000 });
   ok(c.code === 0 && /ok/i.test(c.stdout), "claude works headless", c.stdout.trim() || c.stderr.trim() || "claude (log in), or set CLAUDE_CODE_OAUTH_TOKEN");
+  // Desktop notices: osascript works without it, but shows as "Script Editor", can't open the PR, and is often dropped under launchd.
+  if (process.platform === "darwin") ok((await run("which", ["terminal-notifier"])).code === 0, "terminal-notifier installed (desktop notices you can click)", "brew install terminal-notifier, then allow it in System Settings → Notifications");
+  else if (process.platform === "linux") ok((await run("which", ["notify-send"])).code === 0, "notify-send installed (desktop notices)", "install libnotify (notify-send)");
   const docker = await run("docker", ["info"], { timeoutMs: 20_000 });
   ok(docker.code === 0, "docker is running", "start Docker Desktop");
   if (docker.code === 0) await dockerNetworks(ok);

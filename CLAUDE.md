@@ -100,6 +100,18 @@ A human always merges.
   command can be overridden per repo.
 - **Public previews:** the owner routes `*.<domain>` (DNS plus ports 80/443) to
   the machine. pr-daemon owns Caddy (binary or Docker) and the routing.
+- **Notifications mean "your move".** `Daemon.attention()` records a notice
+  (the `notices` table) and, with `notify`, sends it to the desktop
+  (terminal-notifier on macOS). Each job sets `ctx.notice` to what it would
+  say if it were the last; the daemon sends it only when `pendingOn()` finds
+  no more work coming on the branch, so build → review → revise is one notice.
+  Failures and pauses that need Resume notify too; starts, stacks coming
+  up, clean merges and budget pauses never do. Each notice has a `kind`, and
+  `notify_on` (a checkbox per kind beside the Config editor) switches kinds
+  off. The checkboxes save through `setTopLevel()`, which rewrites that one
+  line of config.toml so the comments survive. The page lists them under
+  Needs you and shows new ones as browser notifications; the Setup tab checks
+  the machine and sends a test.
 - **The repo will be public.** No secrets, hostnames, IPs or personal paths in
   code or docs.
 - Commands in docs are `just` recipes where a project is involved. Keep the

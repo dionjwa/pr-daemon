@@ -85,6 +85,7 @@ You need Node 23.6 or newer, `git`, `gh`, `just`, `docker`, and Claude Code
 
 ```bash
 brew install node git gh just     # macOS; use your package manager on Linux (gh ≥ 2.73)
+brew install terminal-notifier    # macOS: desktop notifications you can click (Linux uses notify-send)
 npm install -g @anthropic-ai/claude-code
 gh auth login                     # pr-daemon acts as you, through gh
 claude                            # log in once, then exit
@@ -234,6 +235,15 @@ state at a glance.
 
 http://localhost:7377. It's only reachable from your own machine.
 
+- **Needs you** (at the top): one line each time the agent stops and the next
+  move is yours — a PR is ready (after its review, and any automatic revise),
+  a revise or CI fix was pushed, a merge needs you, a job failed, or a job
+  paused until you press Resume. The same notice goes to your desktop
+  (`notify = true`) and, if you turn it on with the 🔔 button, to the browser.
+  The tab title shows the unread count. The **Setup** tab checks what's
+  needed for notifications on this machine and can send a test one. Beside
+  the config editor, a checkbox for each kind of notice turns it off or on
+  (saved in the config file as `notify_on`).
 - **Who:** the GitHub user pr-daemon acts as (your `gh` login), and the users
   allowed to trigger work.
 

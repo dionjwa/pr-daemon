@@ -4,7 +4,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { HOME } from "./config.ts";
+import { HOME, type NoticeKind } from "./config.ts";
 
 export type JobKind = "build" | "review" | "revise" | "ci" | "merge" | "teardown" | "restart";
 export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled" | "ignored";
@@ -105,6 +105,11 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
       at INTEGER NOT NULL, job_id INTEGER, level TEXT NOT NULL, message TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS notices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at INTEGER NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL, job_id INTEGER,
+      kind TEXT NOT NULL, level TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, url TEXT NOT NULL
+    );
   `);
   // Columns added after the first release: ALTER is the whole migration story.
   for (const [table, col, def] of [["stacks", "error", "TEXT NOT NULL DEFAULT ''"], ["stacks", "networks", "TEXT NOT NULL DEFAULT ''"],
@@ -113,20 +118,34 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
     ["stacks", "checks_state", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_detail", "TEXT NOT NULL DEFAULT ''"],
     ["stacks", "checks_sha", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_at", "INTEGER"],
     ["stacks", "mergeable", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_note", "TEXT NOT NULL DEFAULT ''"],
-    ["stacks", "merge_level", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_at", "INTEGER"]]) {
+    ["stacks", "merge_level", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_at", "INTEGER"],
+    ["notices", "kind", "TEXT NOT NULL DEFAULT 'ready'"]]) {
     const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === col);
     if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
   }
   return db;
 }
 
-/** A stack worth telling someone about: it answers, and its public URL (if it has one) serves the app. */
-const ready = (s?: Stack): boolean => !!s && s.healthy === 1 && s.public_ok !== 0;
+/**
+ * "The agent stopped and the next move is yours": a finished PR, a revise, a
+ * CI fix, a merge to look at, a failure, a pause only a person can lift. Sent
+ * to the desktop and to every status page that has notifications on.
+ */
+export interface Notice {
+  id: number;
+  at: number;
+  repo: string;
+  number: number;          // the issue or PR it is about
+  job_id: number | null;
+  kind: NoticeKind | "test";  // what config.notify_on switches; the Setup tab's test is always sent
+  level: "ok" | "warn" | "bad";
+  title: string;
+  body: string;
+  url: string;             // what a click opens: the PR, or the job on the status page
+}
 
 export class Store {
   db: DatabaseSync;
-  /** Called when a stack becomes reachable: new, or after being down or unknown. */
-  onStackReady: ((s: Stack) => void) | null = null;
   constructor(db: DatabaseSync) { this.db = db; }
 
   // ---------- kv ----------
@@ -144,6 +163,17 @@ export class Store {
   }
   events(limit = 100): unknown[] {
     return this.db.prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?").all(limit);
+  }
+
+  // ---------- notices ----------
+  notice(n: Omit<Notice, "id" | "at">): Notice {
+    const at = Date.now();
+    const r = this.db.prepare("INSERT INTO notices(at, repo, number, job_id, kind, level, title, body, url) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(at, n.repo, n.number, n.job_id, n.kind, n.level, n.title, n.body, n.url);
+    return { ...n, id: Number(r.lastInsertRowid), at };
+  }
+  notices(limit = 30): Notice[] {
+    return this.db.prepare("SELECT * FROM notices ORDER BY id DESC LIMIT ?").all(limit) as unknown as Notice[];
   }
 
   // ---------- jobs ----------
@@ -183,6 +213,11 @@ export class Store {
   activeFor(repo: string, kind: JobKind, number: number): Job | undefined {
     return this.db.prepare(`SELECT * FROM jobs WHERE repo = ? AND kind = ? AND number = ? AND state IN ('queued','running','paused') LIMIT 1`)
       .get(repo, kind, number) as Job | undefined;
+  }
+  /** Is more work coming on this branch (other than `except`)? A pause that resumes on its own counts; one waiting for a person doesn't. */
+  pendingOn(repo: string, branch: string, except: number): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM jobs WHERE repo = ? AND branch = ? AND id != ?
+      AND (state IN ('queued','running') OR (state = 'paused' AND resume_after IS NOT NULL)) LIMIT 1`).get(repo, branch, except);
   }
   /** How many of a kind of job this issue/PR has had (ignored ones don't count: they never ran). */
   countJobs(repo: string, kind: JobKind, number: number): number {
@@ -235,9 +270,6 @@ export class Store {
       this.db.prepare(`UPDATE stacks SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE repo = ? AND branch = ?`)
         .run(...keys.map((k) => (rest as Record<string, unknown>)[k] as SQLInputValue), repo, branch);
     }
-    // "Ready" means the address a person will click actually serves the app,
-    // so a stack that answers locally while its public URL doesn't is not news.
-    if (!ready(existing) && ready(this.stack(repo, branch))) this.onStackReady?.(this.stack(repo, branch)!);
   }
   deleteStack(repo: string, branch: string): void {
     this.db.prepare("DELETE FROM stacks WHERE repo = ? AND branch = ?").run(repo, branch);

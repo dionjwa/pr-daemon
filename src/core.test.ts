@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount } from "./util.ts";
-import { DEFAULT_TOML, parseConfig } from "./config.ts";
+import { DEFAULT_TOML, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
 import { render } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
@@ -336,17 +336,42 @@ test("one ci job per failing commit, counted per PR", () => {
   assert.equal(store.countJobs("o/r", "ci", 8), 0);
 });
 
-test("a stack is only 'ready' when the address people use serves the app", () => {
+test("a notice waits for the end of the chain: nothing more coming on the branch", () => {
   const store = new Store(openDb(join(mkdtempSync(join(tmpdir(), "prd-")), "t.db")));
-  const ready: string[] = [];
-  store.onStackReady = (s) => ready.push(s.branch);
-  const base = { repo: "o/r", branch: "9-x", issue: 9, worktree: "/w" };
-  store.upsertStack({ ...base, healthy: 1, public_ok: 0 });   // up locally, preview 404s
-  assert.deepEqual(ready, []);
-  store.upsertStack({ ...base, public_ok: 1 });
-  assert.deepEqual(ready, ["9-x"]);
-  store.upsertStack({ ...base, public_ok: 1 });               // still fine: not news twice
-  assert.deepEqual(ready, ["9-x"]);
+  const build = store.enqueue({ repo: "o/r", kind: "build", number: 9, branch: "9-x", trigger_key: "b" })!;
+  const review = store.enqueue({ repo: "o/r", kind: "review", number: 10, branch: "9-x", trigger_key: "r" })!;
+  assert.ok(store.pendingOn("o/r", "9-x", build));            // build done, review queued: not yet
+  store.update(build, { state: "done" });
+  store.update(review, { state: "running" });
+  assert.ok(store.pendingOn("o/r", "9-x", build));
+  assert.ok(!store.pendingOn("o/r", "9-x", review));          // the review is the last: tell the person
+  assert.ok(!store.pendingOn("o/r", "10-y", build));          // other branches don't hold it back
+  store.update(build, { state: "paused", resume_after: null });
+  assert.ok(!store.pendingOn("o/r", "9-x", review));          // waiting for a person isn't "more coming"
+  store.update(build, { resume_after: Date.now() + 1000 });
+  assert.ok(store.pendingOn("o/r", "9-x", review));           // a budget pause resumes on its own: it is
+  const n = store.notice({ repo: "o/r", number: 10, job_id: review, kind: "ready", level: "ok", title: "t", body: "b", url: "u" });
+  assert.equal(store.notices()[0].id, n.id);
+});
+
+test("notify_on: checkboxes rewrite one line of the config and keep the rest", () => {
+  const text = `# top comment\nport = 7377\nnotify = true            # desktop\n\n[budget]\nwindow = "5h"  # keep me\n`;
+  // Missing: goes after notify, before any [table].
+  const a = setTopLevel(text, "notify_on", `["ready"]`, "notify", "which notices");
+  assert.equal(a, `# top comment\nport = 7377\nnotify = true            # desktop\nnotify_on = ["ready"]  # which notices\n\n[budget]\nwindow = "5h"  # keep me\n`);
+  assert.deepEqual(parseConfig(a).notifyOn, ["ready"]);
+  // Present: the value changes, its comment stays.
+  const b = setTopLevel(a, "notify_on", `["ready", "ci"]`);
+  assert.match(b, /^notify_on = \["ready", "ci"\]  # which notices$/m);
+  assert.equal(setTopLevel(b, "notify", "false").split("\n")[2], "notify = false            # desktop");
+  // A list written over several lines is replaced whole.
+  const c = setTopLevel(`notify_on = [\n  "ready",\n  "ci",\n]\nport = 1\n`, "notify_on", "[]");
+  assert.equal(c, `notify_on = []\nport = 1\n`);
+  // A key of the same name inside a table is not the top-level one.
+  assert.equal(setTopLevel(`[x]\nnotify = true\n`, "notify", "false"), `notify = false\n\n[x]\nnotify = true\n`);
+  // Unset means all; an unknown kind is a readable error.
+  assert.equal(parseConfig("").notifyOn.length, NOTICE_KINDS.length);
+  assert.throws(() => parseConfig(`notify_on = ["redy"]`), /notify_on: unknown "redy"/);
 });
 
 test("revision commands: /pr-daemon or a devil, as the first word", () => {

@@ -134,7 +134,7 @@ export async function commentsSince(repo: string, since: string): Promise<Commen
 }
 
 export interface PR {
-  number: number; state: string; merged_at: string | null; head: { ref: string; sha: string }; base: { ref: string; sha: string }; html_url: string;
+  number: number; title: string; state: string; merged_at: string | null; head: { ref: string; sha: string }; base: { ref: string; sha: string }; html_url: string;
   /** GitHub works this out lazily after a push to either side: null means "not known yet, ask again". */
   mergeable?: boolean | null;
   /** dirty (conflicts), behind, clean, blocked, unstable, has_hooks, draft, or unknown. */

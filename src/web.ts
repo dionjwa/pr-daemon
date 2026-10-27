@@ -48,6 +48,12 @@ export function serve(d: Daemon): void {
       if (m === "POST" && url.pathname === "/api/pause") { d.setPaused(Boolean((await body(req)).paused)); return send(res, 200, { ok: true }); }
       if (m === "POST" && url.pathname === "/api/shutdown") { d.requestShutdown(); return send(res, 200, { ok: true }); }
       if (m === "POST" && url.pathname === "/api/poll") { void d.poll(); return send(res, 200, { ok: true }); }
+      if (m === "PUT" && url.pathname === "/api/config/notify") {
+        const { kind, on } = await body(req);
+        try { return send(res, 200, { text: d.setNotify({ kind: kind === undefined ? undefined : String(kind), on: Boolean(on) }) }); }
+        catch (e) { return send(res, 400, { error: (e as Error).message }); }
+      }
+      if (m === "POST" && url.pathname === "/api/notify/test") { d.testNotice(); return send(res, 200, { ok: true }); }
 
       const tx = /^\/api\/jobs\/(\d+)\/transcript$/.exec(url.pathname);
       if (m === "GET" && tx) return send(res, 200, d.transcript(Number(tx[1]), Number(url.searchParams.get("from") ?? 0)));

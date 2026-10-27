@@ -4,8 +4,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
-import { parseConfig, saveConfigText, CONFIG_PATH, readConfigText, type Config } from "./config.ts";
-import { AGENT_KINDS, openDb, Store, type Job, type Stack } from "./db.ts";
+import { parseConfig, saveConfigText, setTopLevel, CONFIG_PATH, NOTICE_KINDS, readConfigText, type Config } from "./config.ts";
+import { AGENT_KINDS, openDb, Store, type Job, type Notice, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { agentLog, CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
@@ -14,7 +14,7 @@ import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { agentPids } from "./agent.ts";
 import { parseTranscript, type Entry } from "./transcript.ts";
-import { formatAmount, formatDuration, notify } from "./util.ts";
+import { formatAmount, formatDuration, notifier, notify } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
@@ -42,8 +42,6 @@ export class Daemon {
   private configOnDisk = "";
   /** The last parse error announced, so one broken save doesn't repeat in the event log. */
   private configError = "";
-  /** Stacks that just became ready, newest last: the status page turns these into browser notifications. */
-  ready: { at: number; repo: string; issue: number; branch: string; url: string }[] = [];
   /** The shutdown in progress, if any. */
   private stopping: Promise<void> | null = null;
   private quitting = false;
@@ -56,16 +54,41 @@ export class Daemon {
     this.configOnDisk = readConfigText();
     this.cfg = parseConfig(this.configOnDisk);
     this.store = new Store(openDb());
-    this.store.onStackReady = (s) => {
-      const url = publicUrl(this.cfg, s.branch) || s.url;
-      this.ready = [...this.ready, { at: Date.now(), repo: s.repo, issue: s.issue, branch: s.branch, url }].slice(-20);
-      if (this.cfg.notify) notify("pr-daemon: preview ready", `${s.repo}#${s.issue} ${s.branch}`, url);
-    };
     this.proxy = new Proxy(this.store, () => this.cfg);
   }
 
   get paused(): boolean { return this.store.get("paused") === "1"; }
   setPaused(p: boolean): void { this.store.set("paused", p ? "1" : "0"); this.store.event(p ? "paused: no new jobs will start" : "resumed"); }
+
+  /**
+   * The next move is the person's: record it (every status page with
+   * notifications on shows it) and, with `notify`, put it on this desktop.
+   */
+  attention(n: Omit<Notice, "id" | "at">): void {
+    this.store.event(`${n.title}: ${n.body}`.slice(0, 500), n.job_id, n.level === "bad" ? "error" : n.level === "warn" ? "warn" : "info");
+    // Switched off in notify_on: the event log above is all it gets.
+    if (n.kind !== "test" && !this.cfg.notifyOn.includes(n.kind)) return;
+    this.store.notice(n);
+    if (this.cfg.notify) notify(n.title, n.body, n.url);
+  }
+
+  /** A checkbox on the Config page: one line of config.toml rewritten, comments and all else kept. */
+  setNotify(o: { kind?: string; on: boolean }): string {
+    const text = this.configText();
+    const next = o.kind === undefined
+      ? setTopLevel(text, "notify", String(o.on))
+      : setTopLevel(text, "notify_on", `[${NOTICE_KINDS.map((k) => k.kind)
+        .filter((k) => (k === o.kind ? o.on : parseConfig(text).notifyOn.includes(k))).map((k) => `"${k}"`).join(", ")}]`, "notify", "which notices to send: ready, revised, ci, merge, failed, paused");
+    this.saveConfig(next);
+    return next;
+  }
+
+  /** From the Setup tab's test button: both paths at once, so a silent one is easy to spot. */
+  testNotice(): void {
+    const n = { title: "🔔 pr-daemon test", body: "If you can read this, notifications reach you.", url: this.statusUrl() };
+    this.store.notice({ repo: "", number: 0, job_id: null, kind: "test", level: "ok", ...n });
+    notify(n.title, n.body, n.url);
+  }
 
   statusUrl(jobId?: number): string { return `http://localhost:${this.cfg.port}/${jobId ? `#job-${jobId}` : ""}`; }
 
@@ -476,7 +499,8 @@ export class Daemon {
 
 ` +
         `Merge \`${pr.base.ref}\` in yourself, comment \`${COMMAND} <how to resolve it>\`, or raise \`merge.max_rounds\` in the config.`).catch(() => {});
-      if (cfg.notify) notify("pr-daemon: a merge needs you", `${repo} PR #${pr.number} conflicts with ${pr.base.ref}`, pr.html_url);
+      this.attention({ repo, number: pr.number, job_id: null, kind: "merge", level: "bad", title: `🔀 Merge needs you: ${repo} #${pr.number}`,
+        body: `conflicts with ${pr.base.ref} again after ${rounds} round(s)`, url: pr.html_url });
       return;
     }
     const id = store.enqueue({ repo, kind: "merge", number: pr.number, branch: s.branch, trigger_key: key, pr: pr.number, payload: { sha: pr.head.sha } });
@@ -595,6 +619,10 @@ export class Daemon {
         // A review/revise that was paused set the issue to agent:paused; put it back.
         if (["review", "revise", "ci", "merge"].includes(job.kind)) await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "in-review").catch(() => {});
         this.store.event(`finished ${job.kind} ${job.repo}#${job.number}`, job.id);
+        // One notice per chain: build → review → revise ends once, at the last of them.
+        const branch = this.store.job(job.id)!.branch;
+        if (ctx.notice && !(branch && this.store.pendingOn(job.repo, branch, job.id)))
+          this.attention({ repo: job.repo, number: job.number, job_id: job.id, ...ctx.notice });
       })
       .catch(async (e: Error) => {
         if (this.quitting) {     // stopped for shutdown: leave it `running`, to resume on the next start
@@ -606,6 +634,9 @@ export class Daemon {
           const when = e.retryAt ? `It resumes on its own in about ${formatDuration(e.retryAt - Date.now())}.` : `Press Resume on the status page when you're ready: ${this.statusUrl(job.id)}`;
           this.store.event(`paused: ${e.message}`, job.id, "warn");
           await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "paused").catch(() => {});
+          // A pause that lifts itself (the budget window) isn't the person's to act on.
+          if (!e.retryAt) this.attention({ repo: job.repo, number: job.number, job_id: job.id, kind: "paused", level: "warn",
+            title: `⏸ Paused: ${job.repo} #${job.number} ${job.kind}`, body: `${e.message}. Press Resume on the status page.`, url: this.statusUrl(job.id) });
           await gh.comment(job.repo, job.number, `⏸️ **pr-daemon** paused: ${e.message}. ${when}`);
         } else if (e instanceof CancelError || ctx.cancelled) {
           this.store.update(job.id, { state: "cancelled", finished_at: Date.now() });
@@ -613,9 +644,13 @@ export class Daemon {
         } else if (e instanceof FailError) {
           this.store.update(job.id, { state: "failed", reason: e.message, finished_at: Date.now() });
           this.store.event(`gave up: ${e.message}`, job.id, "error");
+          this.attention({ repo: job.repo, number: job.number, job_id: job.id, ...(ctx.notice ?? { kind: "failed", level: "bad",
+            title: `❌ Gave up: ${job.repo} #${job.number} ${job.kind}`, body: e.message.slice(0, 200), url: this.statusUrl(job.id) }) });
         } else {
           this.store.update(job.id, { state: "failed", reason: e.message.slice(0, 2000), finished_at: Date.now() });
           this.store.event(`error: ${e.message.slice(0, 500)}`, job.id, "error");
+          if (AGENT_KINDS.includes(job.kind)) this.attention({ repo: job.repo, number: job.number, job_id: job.id, kind: "failed", level: "bad",
+            title: `❌ Failed: ${job.repo} #${job.number} ${job.kind}`, body: e.message.slice(0, 200), url: this.statusUrl(job.id) });
           if (AGENT_KINDS.includes(job.kind)) {
             if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
             await gh.comment(job.repo, job.number, `❌ **pr-daemon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-daemon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
@@ -728,7 +763,9 @@ export class Daemon {
       merge: { watch: this.cfg.merge.watch, fix: this.cfg.merge.fix, behind: this.cfg.merge.behind, maxRounds: this.cfg.merge.maxRounds },
       health: { every: formatDuration(this.cfg.stacks.healthEveryMs), autoRestart: this.cfg.stacks.autoRestart },
       proxy: this.proxy.status,
-      ready: this.ready,
+      notices: this.store.notices(),
+      notify: { desktop: this.cfg.notify, notifier: notifier(), platform: process.platform,
+        kinds: NOTICE_KINDS.map((k) => ({ ...k, on: this.cfg.notifyOn.includes(k.kind) })) },
       events: this.store.events(120),
     };
   }
