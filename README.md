@@ -58,7 +58,7 @@ Status and settings are on a local web page: **http://localhost:7377**.
 | Open the **Preview** link in the PR and try it. | Keeps the stack running and restarts it if it stops. |
 | Watch your own CI run on the PR, as usual. | If a check fails, an agent fixes it and pushes, up to twice per PR. If it's still red after that, it says so on the PR and stops. |
 | Keep merging other work into `main`. | If the PR stops merging cleanly, it merges `main` in and an agent resolves the conflicts. It pushes only once your check passes, and marks anything uncertain **needs your review**. Risky conflicts are left for you, with a comment saying why. |
-| Want changes? Comment on the PR: `/pr-daemon make the button blue`. | Makes the changes, pushes, and comments with a summary and new screenshots. |
+| Want changes? Comment on the PR: `/pr-daemon make the button blue` (or start it with 😈 / 👿 instead). | Makes the changes, pushes, and comments with a summary and new screenshots. |
 | Merge (or close) the PR. | Stops the stack, removes the worktree, and deletes the branch on GitHub. |
 | Changed your mind? Remove the **`agent`** label. | Stops any agent working on it, closes its PR, stops the stack, removes the worktree, and deletes the branch. |
 

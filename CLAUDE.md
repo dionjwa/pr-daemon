@@ -24,7 +24,8 @@ the owner's machine (`pr-daemon serve`):
 8. watches whether the PR still **merges into its base** and, when it
    conflicts, merges the base in (never a rebase or force-push) with an agent
    resolving the conflicts; risky or uncertain ones go to a human
-9. `/pr-daemon <feedback>` comments on the PR trigger further revisions
+9. `/pr-daemon <feedback>` comments on the PR trigger further revisions (a
+   leading 😈, 👿, `:smiling_imp:`, `:imp:` or `:demon:` works too: `gh.parseCommand()`)
 10. when the PR closes (or the issue, before there's a PR), or the `agent` label
    is removed: `just pr-daemon-down`, remove the worktree, clear labels, and
    delete the branch on GitHub. Removing the label also cancels running jobs
@@ -312,6 +313,7 @@ just contract                 # print examples/justfile, the two recipes a proje
   them. `git.conflicts()` marks them (`diff --numstat :2:f :3:f` prints
   `-\t-`), and they always go to a human. `=======` alone isn't counted as a
   marker: it's a markdown heading underline.
+- **A session to resume can vanish.** Revise and CI jobs resume the builder's Claude session (context plus a warm cache), but the transcript under `~/.claude/projects/<cwd>/` can be deleted out from under us, and `--resume` then fails with "No conversation found with session ID". `agentStep()` takes a `fresh` prompt and starts a new session from it in that case; every resume site passes the full prompt, which carries all the context the job needs (issue, PR, trusted discussion). Revise/CI then record the session they used as the stack's `builder_session`.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
 - **`up` / `down` / `check` are arbitrary shell command lines**, run as

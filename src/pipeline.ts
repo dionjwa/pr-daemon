@@ -127,8 +127,11 @@ export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): str
  * Run the agent once, under the budget. Usage is written to the ledger as it
  * streams; the moment a budget is exceeded the run is stopped and the job
  * pauses (its session resumes later). One automatic retry if it stalls.
+ * `fresh` is the full prompt to start a new session with when the one to
+ * resume no longer exists: resuming only saves context and cache, so a lost
+ * transcript must never be what fails the job.
  */
-export async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resume?: string; issue: number; keepSession?: boolean }): Promise<string> {
+export async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resume?: string; fresh?: string; issue: number; keepSession?: boolean }): Promise<string> {
   const { store, job } = ctx;
   const cfg = ctx.cfg();
   const g0 = gate(store, cfg, job.repo, o.issue);
@@ -171,6 +174,11 @@ export async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resu
         resume = run.sessionId; promptText = "You stopped producing output. Continue the task from where you left off.";
         continue;
       case "error":
+        if (resume && o.fresh && /No conversation found with session ID/i.test(end.result)) {
+          store.event(`Claude session ${resume} no longer exists; starting a fresh one`, job.id, "warn");
+          resume = undefined; promptText = o.fresh;
+          continue;
+        }
         throw new Error(`agent failed: ${end.result.slice(0, 1500)}`);
     }
   }
@@ -226,8 +234,8 @@ export async function build(ctx: Ctx): Promise<void> {
   // Build → check → fix, until the project's own check passes. Fix rounds
   // resume the same session: the agent keeps its context (and the cache).
   let summary = await agentStep(ctx, resuming
-    ? { prompt: "pr-daemon paused you (token budget or a restart). Continue the task from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
-    : { prompt: readFileSync(join(out, "prompt-build.md"), "utf8"), log: agentLog({ ...job, branch })!, issue: n });
+    ? { prompt: "pr-daemon paused you (token budget or a restart). Continue the task from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, fresh: prompt("build", vars), issue: n }
+    : { prompt: prompt("build", vars), log: agentLog({ ...job, branch })!, issue: n });
 
   // The agent may have changed what the stack needs — or fixed an `up` that
   // was broken when we started, which is exactly what it was asked to do.
@@ -290,7 +298,7 @@ async function publishPr(ctx: Ctx, o: { n: number; branch: string; base: string;
 ## Try it
 
 ${o.pub ? `- **Preview:** ${o.pub}` : `- **Preview:** ${o.url || "_not running_"} (on the pr-daemon machine)`}
-- Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/pr-daemon\`
+- Branch: \`${o.branch}\` · ask for changes with a PR comment starting with \`/pr-daemon\` or 😈
 ${shots ? `\n## Screenshots\n\n${shots}` : ""}
 Closes #${o.n}
 
@@ -325,11 +333,10 @@ export async function review(ctx: Ctx): Promise<void> {
   // The repo's own CI, as it stands right now: usually still running this
   // soon after the push, which is itself worth telling the reviewer.
   const c = cfg.checks.watch ? await gh.checks(repo.name, p.head.sha).catch(() => null) : null;
-  const text = job.session_id
-    ? "pr-daemon paused you. Continue the review from where you left off."
-    : prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)",
-      CHECKS: c ? `${c.state} (${c.summary})` : "not known" });
-  await agentStep(ctx, { prompt: text, log: agentLog({ ...job, branch })!, resume: job.session_id || undefined, issue: n });
+  const full = prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)",
+    CHECKS: c ? `${c.state} (${c.summary})` : "not known" });
+  const text = job.session_id ? "pr-daemon paused you. Continue the review from where you left off." : full;
+  await agentStep(ctx, { prompt: text, log: agentLog({ ...job, branch })!, resume: job.session_id || undefined, fresh: full, issue: n });
   const file = join(out, "review.md");
   if (!existsSync(file)) { store.event("reviewer wrote no review.md", job.id, "warn"); return; }
   await gh.review(repo.name, job.number, file);
@@ -373,8 +380,10 @@ export async function revise(ctx: Ctx): Promise<void> {
     FEEDBACK: payload(job).feedback ?? "", DISCUSSION: talk.text || "(none)", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
   });
   const summary = await agentStep(ctx, job.session_id
-    ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
-    : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, issue: n });
+    ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, fresh: text, issue: n }
+    : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, fresh: text, issue: n });
+  // The session that now holds this branch's context: the builder's, or a fresh one if that was lost.
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, builder_session: store.job(job.id)!.session_id });
 
   await git.commitLeftovers(wt);
   const result = await stack.check(repo.check, wt);
@@ -432,8 +441,9 @@ export async function ci(ctx: Ctx): Promise<void> {
   const before = await git.head(wt);
   const builder = store.stack(repo.name, branch)?.builder_session || "";
   const summary = await agentStep(ctx, job.session_id
-    ? { prompt: "pr-daemon paused you. Continue fixing the failing checks from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, issue: n }
-    : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, issue: n });
+    ? { prompt: "pr-daemon paused you. Continue fixing the failing checks from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, fresh: text, issue: n }
+    : { prompt: text, log: agentLog({ ...job, branch })!, resume: builder || undefined, fresh: text, issue: n });
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, builder_session: store.job(job.id)!.session_id });
 
   await git.commitLeftovers(wt);
   if ((await git.head(wt)) === before) {

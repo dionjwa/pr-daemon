@@ -8,7 +8,7 @@ import { DEFAULT_TOML, parseConfig } from "./config.ts";
 import { render } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
-import { isListed, untrustedWriters } from "./gh.ts";
+import { isListed, parseCommand, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
 
@@ -347,4 +347,18 @@ test("a stack is only 'ready' when the address people use serves the app", () =>
   assert.deepEqual(ready, ["9-x"]);
   store.upsertStack({ ...base, public_ok: 1 });               // still fine: not news twice
   assert.deepEqual(ready, ["9-x"]);
+});
+
+test("revision commands: /pr-daemon or a devil, as the first word", () => {
+  assert.equal(parseCommand("/pr-daemon make it blue"), "make it blue");
+  assert.equal(parseCommand("  😈 make it blue\n"), "make it blue");
+  assert.equal(parseCommand("😈\uFE0F make it blue"), "make it blue");
+  assert.equal(parseCommand("👿 fix the test"), "fix the test");
+  assert.equal(parseCommand(":imp: a"), "a");
+  assert.equal(parseCommand(":smiling_imp: b"), "b");
+  assert.equal(parseCommand(":demon:\nc"), "c");
+  assert.equal(parseCommand("/pr-daemon"), "");
+  assert.equal(parseCommand("/pr-daemonic x"), null);
+  assert.equal(parseCommand(":impish: x"), null);
+  assert.equal(parseCommand("looks good 😈"), null);
 });

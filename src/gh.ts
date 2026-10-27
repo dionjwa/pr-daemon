@@ -43,6 +43,24 @@ export function isListed(users: string[], login: string): boolean {
   return users.some((u) => u.toLowerCase() === l);
 }
 
+/** What a PR comment may start with to ask for a revision: the command, or a devil. */
+export const COMMANDS = ["/pr-daemon", ":smiling_imp:", ":imp:", ":demon:", "😈", "👿"];
+
+/**
+ * The feedback in a comment that asks for a revision, or null if it doesn't.
+ * The trigger must be the comment's first word: "/pr-daemonic" isn't one.
+ */
+export function parseCommand(body: string): string | null {
+  const text = body.trimStart();
+  for (const c of COMMANDS) {
+    if (!text.startsWith(c)) continue;
+    const rest = text.slice(c.length).replace(/^️/, ""); // emoji variation selector
+    if (rest && !/^\s/.test(rest)) continue;
+    return rest.trim();
+  }
+  return null;
+}
+
 /** Everyone whose words are in an issue's title or body: the author, body editors, title renamers. */
 export interface Provenance { author: string; editors: string[]; renamers: string[] }
 

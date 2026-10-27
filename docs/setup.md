@@ -239,5 +239,5 @@ Then start a second branch's stack at the same time and confirm both answer.
 - [ ] `pr-daemon doctor` is all ✓
 
 Then label an issue **{{LABEL}}** and watch {{STATUS_URL}}. Ask for changes with
-a pull request comment starting `{{COMMAND}}`. A human merges; pr-daemon never
+a pull request comment starting `{{COMMAND}}` (or 😈, 👿, `:smiling_imp:`, `:imp:`, `:demon:`). A human merges; pr-daemon never
 does.

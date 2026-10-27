@@ -305,13 +305,13 @@ export class Daemon {
       if (id) store.event(`queued build for ${repo}#${issue.number} "${issue.title}" (label by @${ev.actor})`, id);
     }
 
-    // 2. "/pr-daemon …" comments on PRs → revise.
+    // 2. "/pr-daemon …" (or 😈/👿/:imp:/:smiling_imp:/:demon: …) comments on PRs → revise.
     const sinceKey = `comments-since:${repo}`;
     const since = store.get(sinceKey) ?? new Date(Date.now() - 10 * 60e3).toISOString(); // first run: don't replay history
     const startedAt = Date.now();
     for (const c of await gh.commentsSince(repo, since)) {
-      const body = c.body.trimStart();
-      if (!body.startsWith(COMMAND) || !c.html_url.includes("/pull/")) continue;
+      const feedback = gh.parseCommand(c.body);
+      if (feedback === null || !c.html_url.includes("/pull/")) continue;
       const key = `comment:${repo}:${c.id}`;
       if (store.hasTrigger(key)) continue;
       const pr = Number(c.issue_url.split("/").pop());
@@ -320,7 +320,7 @@ export class Daemon {
         continue;
       }
       const branch = (await gh.pr(repo, pr)).head.ref;
-      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback: body.slice(COMMAND.length).trim(), commentId: c.id } });
+      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback, commentId: c.id } });
       if (id) store.event(`queued revise for ${repo} PR #${pr} (${COMMAND} by @${c.user.login})`, id);
     }
     store.set(sinceKey, new Date(startedAt - 60e3).toISOString()); // overlap; ids dedupe
