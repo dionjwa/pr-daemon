@@ -14,7 +14,7 @@ import * as git from "./git.ts";
 import { assessConflicts, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
 import { publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import * as stack from "./stack.ts";
-import { tail } from "./util.ts";
+import { tail, unnotify } from "./util.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 
@@ -753,6 +753,9 @@ export async function teardown(ctx: Ctx): Promise<void> {
   // branch from GitHub. The Tear down button doesn't: an open PR needs its branch.
   const p = payload(job);
   if (!p.deleteBranch) return;
+  // The issue or PR is closed (or about to be): its notices are no longer anyone's move.
+  const gone = store.clearNotices(repo.name, [job.number, s?.pr ?? 0]);
+  if (gone.length) { unnotify(gone); store.event(`cleared ${gone.length} notice(s) about #${job.number}${s?.pr ? ` / PR #${s.pr}` : ""}`, job.id); }
   // Only ever a branch pr-daemon named for this issue.
   if (!branch.startsWith(`${job.number}-`)) { store.event(`not deleting ${branch}: not a pr-daemon branch for #${job.number}`, job.id, "warn"); return; }
   if (p.closePr && s?.pr && (await gh.pr(repo.name, s.pr)).state === "open") {

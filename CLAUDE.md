@@ -111,7 +111,9 @@ A human always merges.
   off. The checkboxes save through `setTopLevel()`, which rewrites that one
   line of config.toml so the comments survive. The page lists them under
   Needs you and shows new ones as browser notifications; the Setup tab checks
-  the machine and sends a test.
+  the machine and sends a test. When an issue or PR closes, its notices go
+  too (`Store.clearNotices()`, and `unnotify()` for the desktop): `teardown`
+  clears the ones with a stack, and the poll clears the rest.
 - **The repo will be public.** No secrets, hostnames, IPs or personal paths in
   code or docs.
 - Commands in docs are `just` recipes where a project is involved. Keep the

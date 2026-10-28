@@ -387,3 +387,12 @@ test("revision commands: /pr-daemon or a devil, as the first word", () => {
   assert.equal(parseCommand(":impish: x"), null);
   assert.equal(parseCommand("looks good 😈"), null);
 });
+
+test("a closed issue or PR takes its notices with it", () => {
+  const store = new Store(openDb(join(mkdtempSync(join(tmpdir(), "pr-daemon-")), "t.db")));
+  const n = (repo: string, number: number) => store.notice({ repo, number, job_id: null, kind: "ready", level: "ok", title: `#${number}`, body: "", url: "" });
+  n("o/r", 5); n("o/r", 6); n("o/r", 7); n("o/other", 5);
+  assert.deepEqual(store.clearNotices("o/r", [5, 6, 0]).map((x) => x.number).sort(), [5, 6]);
+  assert.deepEqual(store.notices().map((x) => `${x.repo}#${x.number}`).sort(), ["o/other#5", "o/r#7"]);
+  assert.deepEqual(store.clearNotices("o/r", []), []);
+});

@@ -124,9 +124,24 @@ export function notify(title: string, body: string, url = ""): void {
     // osascript reads the text from argv, so nothing needs escaping.
     const osascript = () => fire("osascript", ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, url ? `${body}\n${url}` : body]);
     // One group per link (a PR, or a job on the status page): a newer notice about it replaces the older.
-    fire("terminal-notifier", ["-title", title, "-message", body, "-group", `pr-daemon:${url || title}`, ...(url ? ["-open", url] : [])], osascript);
+    fire("terminal-notifier", ["-title", title, "-message", body, "-group", notifyGroup(title, url), ...(url ? ["-open", url] : [])], osascript);
   } else if (process.platform === "linux") {
     fire("notify-send", ["--app-name=pr-daemon", title, url ? `${body}\n${url}` : body]);
+  }
+}
+
+const notifyGroup = (title: string, url: string) => `pr-daemon:${url || title}`;
+
+/**
+ * Take notifications off the desktop, best effort: terminal-notifier only
+ * (osascript and notify-send can't remove what they showed). Never throws.
+ */
+export function unnotify(notices: { title: string; url: string }[]): void {
+  if (process.platform !== "darwin") return;
+  for (const g of new Set(notices.map((n) => notifyGroup(n.title, n.url)))) {
+    const child = spawn("terminal-notifier", ["-remove", g], { stdio: "ignore", detached: true });
+    child.on("error", () => {});
+    child.unref();
   }
 }
 

@@ -175,6 +175,13 @@ export class Store {
   notices(limit = 30): Notice[] {
     return this.db.prepare("SELECT * FROM notices ORDER BY id DESC LIMIT ?").all(limit) as unknown as Notice[];
   }
+  /** Delete the notices about these issues/PRs (they closed: nothing left to do). Returns what was removed. */
+  clearNotices(repo: string, numbers: number[]): Notice[] {
+    const ns = [...new Set(numbers.filter((n) => n > 0))];
+    if (!ns.length) return [];
+    const marks = ns.map(() => "?").join(", ");
+    return this.db.prepare(`DELETE FROM notices WHERE repo = ? AND number IN (${marks}) RETURNING *`).all(repo, ...ns) as unknown as Notice[];
+  }
 
   // ---------- jobs ----------
   /** Insert a job unless its trigger_key was seen before. Returns the new id or null. */

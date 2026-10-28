@@ -14,7 +14,7 @@ import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { agentPids } from "./agent.ts";
 import { parseTranscript, type Entry } from "./transcript.ts";
-import { formatAmount, formatDuration, notifier, notify } from "./util.ts";
+import { formatAmount, formatDuration, notifier, notify, unnotify } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
@@ -375,6 +375,17 @@ export class Daemon {
       await this.pollMerge(repo, s, pr);
       await this.pollChecks(repo, s, pr);
       await this.pollHealth(repo, s);
+    }
+
+    // 5. Notices about an issue or PR that closed with no stack left to tear
+    //    down (a build that failed before it had one, a stack torn down by
+    //    hand): clear them. Teardown clears the ones that have a stack.
+    const covered = new Set(store.stacks().filter((x) => x.repo === repo).flatMap((x) => [x.issue, x.pr ?? 0]));
+    const loose = new Set(store.notices().filter((x) => x.repo === repo && x.number > 0 && !covered.has(x.number) && !labeled.has(x.number)).map((x) => x.number));
+    for (const n of loose) {
+      if ((await gh.issue(repo, n).catch(() => null))?.state !== "closed") continue;
+      const gone = store.clearNotices(repo, [n]);
+      if (gone.length) { unnotify(gone); store.event(`cleared ${gone.length} notice(s) about ${repo}#${n}: it closed`); }
     }
   }
 
