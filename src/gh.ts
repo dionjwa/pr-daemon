@@ -153,6 +153,17 @@ export function mergeability(p: Pick<PR, "mergeable" | "mergeable_state">): stri
 }
 
 /**
+ * How far a head commit is behind a branch, and that branch's tip. GitHub's
+ * `mergeable_state` only says "behind" when branch protection requires
+ * up-to-date branches; otherwise a PR that's behind reads "clean", so ask.
+ */
+export async function behind(repo: string, base: string, head: string): Promise<{ by: number; baseSha: string }> {
+  const c = await api<{ behind_by: number; base_commit: { sha: string } }>(
+    `repos/${repo}/compare/${encodeURIComponent(base)}...${head}?per_page=1`);
+  return { by: c.behind_by, baseSha: c.base_commit.sha };
+}
+
+/**
  * GitHub merges the base into the PR branch itself (the "Update branch"
  * button). Only for a merge without conflicts. `expected` makes it refuse if
  * someone pushed in the meantime.

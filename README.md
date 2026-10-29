@@ -405,6 +405,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | `checks.max_rounds` | `2` | Automatic fix rounds per PR before it stops and says so |
 | `merge.fix` | `true` | Merge the base in when a PR conflicts with it, with an agent resolving the conflicts |
 | `merge.behind` | `false` | Also merge when the base only moved on (no agent): for repos that require up-to-date branches |
+| `merge.catch_up` | `true` | When a PR is idle, merges cleanly and its CI isn't failing but it's behind its base, merge the base in, run the check and push (without waiting for running CI) |
 | `merge.max_rounds` | `2` | Agent conflict-resolution rounds per PR before it stops and says so |
 | `merge.max_files` / `merge.human_paths` | `15` / `[]` | Conflicts bigger than this, or in these paths (globs), always go to you |
 | `preview.domain` | unset | Public preview URLs `https://<branch>.<domain>` (pr-daemon runs Caddy) |

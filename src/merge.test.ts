@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assessConflicts, globToRegExp, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
+import { assessConflicts, catchUpBlocker, globToRegExp, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
 import * as git from "./git.ts";
 import type { Conflict } from "./git.ts";
 import { DEFAULT_TOML, parseConfig } from "./config.ts";
@@ -77,10 +77,11 @@ test("GitHub's mergeability, in one word", () => {
 });
 
 test("merge config, queue order, and the round count", () => {
-  assert.deepEqual(parseConfig(DEFAULT_TOML).merge, { watch: true, fix: true, behind: false, maxRounds: 2, maxFiles: 15, humanPaths: [] });
+  assert.deepEqual(parseConfig(DEFAULT_TOML).merge, { watch: true, fix: true, behind: false, catchUp: true, maxRounds: 2, maxFiles: 15, humanPaths: [] });
   assert.deepEqual(parseConfig(`[merge]\nhuman_paths = ["db/**"]\nmax_rounds = 0`).merge.humanPaths, ["db/**"]);
   assert.throws(() => parseConfig(`[merge]\nhuman_paths = "db/**"`), /merge.human_paths/);
   assert.throws(() => parseConfig(`[merge]\nbehind = 1`), /merge.behind/);
+  assert.equal(parseConfig(`[merge]\ncatch_up = false`).merge.catchUp, false);
   assert.ok(PRIORITY.merge < PRIORITY.ci && PRIORITY.merge > PRIORITY.restart);
   assert.ok(AGENT_KINDS.includes("merge"));
   // Only runs that spent tokens are rounds: a clean merge (no agent) or a hand-over doesn't use one up.
@@ -149,4 +150,33 @@ test("a conflict is left in progress, resolved, committed; or thrown away", asyn
   assert.deepEqual(await git.parents(wt), [before, again.baseSha]);
   assert.ok(await git.isAncestor(wt, before, "HEAD"));
   assert.equal(readFileSync(join(wt, "c.txt"), "utf8"), "new on main\n");
+});
+
+test("catch-up: only an idle PR that merges, isn't red on its head, and isn't waiting on a person", () => {
+  const ready = { mergeable: "ok", checksWatched: true, checksState: "success", checksSha: "abc", headSha: "abc", lastJob: { state: "done" }, needsReview: false, held: false };
+  assert.equal(catchUpBlocker(ready), null);
+  assert.equal(catchUpBlocker({ ...ready, mergeable: "behind" }), null);
+  assert.equal(catchUpBlocker({ ...ready, checksState: "none" }), null, "no CI: the merge job's own check is the gate");
+  assert.equal(catchUpBlocker({ ...ready, checksWatched: false, checksState: "", checksSha: "" }), null);
+  assert.match(catchUpBlocker({ ...ready, mergeable: "conflicts" })!, /conflicts/);
+  assert.match(catchUpBlocker({ ...ready, mergeable: "unknown" })!, /hasn't worked out/);
+  assert.equal(catchUpBlocker({ ...ready, checksState: "pending" }), null, "don't wait for CI on a head the merge replaces");
+  assert.equal(catchUpBlocker({ ...ready, checksSha: "old" }), null, "no verdict for this head yet: same");
+  assert.equal(catchUpBlocker({ ...ready, checksSha: "old", checksState: "failure" }), null, "a red verdict for an older head doesn't count");
+  assert.match(catchUpBlocker({ ...ready, checksState: "failure" })!, /failing/);
+  assert.match(catchUpBlocker({ ...ready, lastJob: { state: "failed" }, held: true })!, /waiting for a person/);
+  assert.equal(catchUpBlocker({ ...ready, lastJob: { state: "failed" }, held: false }), null, "someone pushed since the failure");
+  assert.match(catchUpBlocker({ ...ready, needsReview: true, held: true })!, /review/);
+  assert.equal(catchUpBlocker({ ...ready, needsReview: true, held: false }), null);
+});
+
+test("lastJobOn: the newest job that ran on the branch", () => {
+  const store = new Store(openDb(join(mkdtempSync(join(tmpdir(), "prd-")), "t.db")));
+  assert.equal(store.lastJobOn("o/r", "7-x"), undefined);
+  const a = store.enqueue({ repo: "o/r", kind: "review", number: 8, branch: "7-x", trigger_key: "a" })!;
+  store.update(a, { state: "failed" });
+  store.enqueue({ repo: "o/r", kind: "ci", number: 8, branch: "7-x", trigger_key: "b", state: "ignored", reason: "x" });
+  store.enqueue({ repo: "o/r", kind: "ci", number: 9, branch: "9-y", trigger_key: "c" });
+  assert.equal(store.lastJobOn("o/r", "7-x")?.id, a);
+  assert.equal(store.lastJobOn("o/r", "7-x")?.state, "failed");
 });

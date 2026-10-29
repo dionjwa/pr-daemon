@@ -226,6 +226,11 @@ export class Store {
     return !!this.db.prepare(`SELECT 1 FROM jobs WHERE repo = ? AND branch = ? AND id != ?
       AND (state IN ('queued','running') OR (state = 'paused' AND resume_after IS NOT NULL)) LIMIT 1`).get(repo, branch, except);
   }
+  /** The newest job on a branch that ran (ignored ones never did), or undefined. */
+  lastJobOn(repo: string, branch: string): Job | undefined {
+    return this.db.prepare("SELECT * FROM jobs WHERE repo = ? AND branch = ? AND state != 'ignored' ORDER BY id DESC LIMIT 1")
+      .get(repo, branch) as Job | undefined;
+  }
   /** How many of a kind of job this issue/PR has had (ignored ones don't count: they never ran). */
   countJobs(repo: string, kind: JobKind, number: number): number {
     return Number((this.db.prepare("SELECT COUNT(*) n FROM jobs WHERE repo = ? AND kind = ? AND number = ? AND state != 'ignored'")

@@ -23,7 +23,9 @@ the owner's machine (`pr-daemon serve`):
    to `checks.max_rounds` per PR
 8. watches whether the PR still **merges into its base** and, when it
    conflicts, merges the base in (never a rebase or force-push) with an agent
-   resolving the conflicts; risky or uncertain ones go to a human
+   resolving the conflicts; risky or uncertain ones go to a human. A PR
+   that's idle, not red and conflict-free but behind its base gets the same
+   merge (`merge.catch_up`), so it stays ready to merge
 9. `/pr-daemon <feedback>` comments on the PR trigger further revisions (a
    leading 😈, 👿, `:smiling_imp:`, `:imp:` or `:demon:` works too: `gh.parseCommand()`)
 10. when the PR closes (or the issue, before there's a PR), or the `agent` label
@@ -89,6 +91,14 @@ A human always merges.
   PR untouched and keeps the attempt on a local branch. One trigger per head
   sha. Rounds are agent runs (`countAgentRuns`: jobs with tokens > 0), so
   clean merges are free.
+  **Catch-up** (`Daemon.catchUp()`, rules in `merge.catchUpBlocker()`):
+  GitHub only reports `behind` under branch protection, so an idle PR whose
+  CI isn't red asks `gh.behind()` (compare) at most every `checks.every`.
+  Running (or not yet reported) CI doesn't hold it: that run is for a head the
+  merge replaces, so waiting would only run CI twice. Only a failure on the
+  current head blocks (the `ci` job, or a person, deals with that first). The
+  trigger is head sha + base tip. A failed/cancelled last job or a "needs
+  your review" holds it until the PR head moves.
 - **Trigger label is `agent`.** Status labels are `agent:working`,
   `agent:in-review`, `agent:paused` and `agent:failed`.
 - **Budget:** optional tokens per rolling window (default `5h`, one Claude

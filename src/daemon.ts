@@ -8,6 +8,7 @@ import { parseConfig, saveConfigText, setTopLevel, CONFIG_PATH, NOTICE_KINDS, re
 import { AGENT_KINDS, openDb, Store, type Job, type Notice, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
+import { catchUpBlocker } from "./merge.ts";
 import { agentLog, CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
@@ -485,7 +486,7 @@ export class Daemon {
       if (state === "conflicts") store.event(`${repo} PR #${pr.number} has conflicts with ${pr.base.ref}`, null, "warn");
     }
     const wanted = state === "conflicts" || (state === "behind" && cfg.merge.behind);
-    if (!wanted) return;
+    if (!wanted) { if (cfg.merge.catchUp) await this.catchUp(repo, s, pr, state); return; }
     const key = `merge:${repo}#${pr.number}:${pr.head.sha}`;
     if (store.hasTrigger(key)) return;
     const ignore = (reason: string): boolean => !!store.enqueue({ repo, kind: "merge", number: pr.number, branch: s.branch, trigger_key: key, state: "ignored", reason });
@@ -518,6 +519,43 @@ export class Daemon {
     if (id) store.event(state === "conflicts"
       ? `${repo} PR #${pr.number}: conflicts with ${pr.base.ref}; queued a merge (agent round ${rounds + 1} of ${cfg.merge.maxRounds} if it needs one)`
       : `${repo} PR #${pr.number} is behind ${pr.base.ref}; queued a merge`, id, state === "conflicts" ? "warn" : "info");
+  }
+
+  /**
+   * The base moved on under a PR that's otherwise finished: nothing queued,
+   * running or paused on it (the caller checked), it merges cleanly, its CI
+   * isn't red on the current head, and nothing waits on a person. CI that's
+   * still running doesn't hold it: its result is for a head the merge is about
+   * to replace, so waiting for it just runs CI twice. Merge the base
+   * in with the same merge job conflicts get (merge, check, push, or hand
+   * over), so the PR stays ready to merge. The trigger is the head and the
+   * base tip together: one attempt per pair, and a base that moves again gets
+   * another. A failure or a "needs your review" holds it until the PR head
+   * moves (a person pushed). GitHub's `behind` state only shows up under
+   * branch protection, so this asks compare, at most every `checks.every`.
+   */
+  private async catchUp(repo: string, s: Stack, pr: gh.PR, mergeable: string): Promise<void> {
+    const { store, cfg } = this;
+    const last = store.lastJobOn(repo, s.branch);
+    const hold = last && ["failed", "cancelled"].includes(last.state) ? `job${last.id}` : s.merge_level === "warn" ? `review${s.merge_at}` : "";
+    let held = false;
+    if (hold) {
+      const k = `catch-up-hold:${repo}#${pr.number}:${hold}`;
+      const at = store.get(k);
+      if (!at) store.set(k, pr.head.sha);
+      held = !at || at === pr.head.sha;
+    }
+    if (catchUpBlocker({ mergeable, checksWatched: cfg.checks.watch, checksState: s.checks_state, checksSha: s.checks_sha, headSha: pr.head.sha,
+      lastJob: last, needsReview: s.merge_level === "warn", held })) return;
+    const asked = `catch-up-at:${repo}#${pr.number}`;
+    if (Date.now() - Number(store.get(asked) ?? 0) <= cfg.checks.everyMs) return;
+    store.set(asked, String(Date.now()));
+    const b = await gh.behind(repo, pr.base.ref, pr.head.sha).catch(() => null);
+    if (!b || b.by === 0) return;
+    const key = `catch-up:${repo}#${pr.number}:${pr.head.sha}:${b.baseSha}`;
+    if (store.hasTrigger(key)) return;
+    const id = store.enqueue({ repo, kind: "merge", number: pr.number, branch: s.branch, trigger_key: key, pr: pr.number, payload: { sha: pr.head.sha, catchUp: true } });
+    if (id) store.event(`${repo} PR #${pr.number} is ${s.checks_sha === pr.head.sha && s.checks_state === "success" ? "green" : "idle"} but ${b.by} commit(s) behind ${pr.base.ref}; queued a merge`, id, "info");
   }
 
   /**
@@ -771,7 +809,7 @@ export class Daemon {
         state: stack.stackState(s),
         services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) })),
       checks: { watch: this.cfg.checks.watch, fix: this.cfg.checks.fix, maxRounds: this.cfg.checks.maxRounds, every: formatDuration(this.cfg.checks.everyMs) },
-      merge: { watch: this.cfg.merge.watch, fix: this.cfg.merge.fix, behind: this.cfg.merge.behind, maxRounds: this.cfg.merge.maxRounds },
+      merge: { watch: this.cfg.merge.watch, fix: this.cfg.merge.fix, behind: this.cfg.merge.behind, catchUp: this.cfg.merge.catchUp, maxRounds: this.cfg.merge.maxRounds },
       health: { every: formatDuration(this.cfg.stacks.healthEveryMs), autoRestart: this.cfg.stacks.autoRestart },
       proxy: this.proxy.status,
       notices: this.store.notices(),

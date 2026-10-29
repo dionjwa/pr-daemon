@@ -70,6 +70,7 @@ export interface Config {
     watch: boolean;
     fix: boolean;
     behind: boolean;
+    catchUp: boolean;
     maxRounds: number;
     maxFiles: number;
     humanPaths: string[];
@@ -189,6 +190,9 @@ watch = true             # read each open PR's mergeability and show it on the s
 fix = true               # on conflicts, merge the base in and have an agent resolve them
 behind = false           # also merge when the base merely moved on (no conflicts, no agent, no tokens):
                          # for repos whose branch protection requires branches to be up to date
+catch_up = true          # when a PR is idle (nothing running, nothing waiting on you), merges cleanly and
+                         # its CI isn't failing, but the base has moved on: merge the base in, run the check,
+                         # push. It doesn't wait for running CI: that run is for a head the merge replaces
 max_rounds = 2           # agent conflict-resolution rounds per PR, then it stops and says so on the PR
 max_files = 15           # more conflicted files than this is too big to hand to an agent: you're asked instead
 human_paths = []         # conflicts in these paths always go to you, e.g. ["db/migrations/**", "*.lock"]
@@ -359,6 +363,7 @@ export function parseConfig(text: string): Config {
       watch: bool(mg.watch, true, "merge.watch"),
       fix: bool(mg.fix, true, "merge.fix"),
       behind: bool(mg.behind, false, "merge.behind"),
+      catchUp: bool(mg.catch_up, true, "merge.catch_up"),
       maxRounds: Math.max(0, num(mg.max_rounds, 2, "merge.max_rounds")),
       maxFiles: Math.max(1, num(mg.max_files, 15, "merge.max_files")),
       humanPaths: strList(mg.human_paths, "merge.human_paths"),
