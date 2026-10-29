@@ -152,18 +152,13 @@ test("a conflict is left in progress, resolved, committed; or thrown away", asyn
   assert.equal(readFileSync(join(wt, "c.txt"), "utf8"), "new on main\n");
 });
 
-test("catch-up: only an idle PR that merges, isn't red on its head, and isn't waiting on a person", () => {
-  const ready = { mergeable: "ok", checksWatched: true, checksState: "success", checksSha: "abc", headSha: "abc", lastJob: { state: "done" }, needsReview: false, held: false };
+test("catch-up: only an idle PR that merges and isn't waiting on a person (CI doesn't matter)", () => {
+  const ready = { mergeable: "ok", lastJob: { state: "done" }, needsReview: false, held: false };
   assert.equal(catchUpBlocker(ready), null);
   assert.equal(catchUpBlocker({ ...ready, mergeable: "behind" }), null);
-  assert.equal(catchUpBlocker({ ...ready, checksState: "none" }), null, "no CI: the merge job's own check is the gate");
-  assert.equal(catchUpBlocker({ ...ready, checksWatched: false, checksState: "", checksSha: "" }), null);
+  assert.equal(catchUpBlocker({ ...ready, lastJob: undefined }), null);
   assert.match(catchUpBlocker({ ...ready, mergeable: "conflicts" })!, /conflicts/);
   assert.match(catchUpBlocker({ ...ready, mergeable: "unknown" })!, /hasn't worked out/);
-  assert.equal(catchUpBlocker({ ...ready, checksState: "pending" }), null, "don't wait for CI on a head the merge replaces");
-  assert.equal(catchUpBlocker({ ...ready, checksSha: "old" }), null, "no verdict for this head yet: same");
-  assert.equal(catchUpBlocker({ ...ready, checksSha: "old", checksState: "failure" }), null, "a red verdict for an older head doesn't count");
-  assert.match(catchUpBlocker({ ...ready, checksState: "failure" })!, /failing/);
   assert.match(catchUpBlocker({ ...ready, lastJob: { state: "failed" }, held: true })!, /waiting for a person/);
   assert.equal(catchUpBlocker({ ...ready, lastJob: { state: "failed" }, held: false }), null, "someone pushed since the failure");
   assert.match(catchUpBlocker({ ...ready, needsReview: true, held: true })!, /review/);

@@ -24,7 +24,7 @@ the owner's machine (`pr-daemon serve`):
 8. watches whether the PR still **merges into its base** and, when it
    conflicts, merges the base in (never a rebase or force-push) with an agent
    resolving the conflicts; risky or uncertain ones go to a human. A PR
-   that's idle, not red and conflict-free but behind its base gets the same
+   that's idle and conflict-free but behind its base gets the same
    merge (`merge.catch_up`), so it stays ready to merge
 9. `/pr-daemon <feedback>` comments on the PR trigger further revisions (a
    leading 😈, 👿, `:smiling_imp:`, `:imp:` or `:demon:` works too: `gh.parseCommand()`)
@@ -92,11 +92,13 @@ A human always merges.
   sha. Rounds are agent runs (`countAgentRuns`: jobs with tokens > 0), so
   clean merges are free.
   **Catch-up** (`Daemon.catchUp()`, rules in `merge.catchUpBlocker()`):
-  GitHub only reports `behind` under branch protection, so an idle PR whose
-  CI isn't red asks `gh.behind()` (compare) at most every `checks.every`.
-  Running (or not yet reported) CI doesn't hold it: that run is for a head the
-  merge replaces, so waiting would only run CI twice. Only a failure on the
-  current head blocks (the `ci` job, or a person, deals with that first). The
+  GitHub only reports `behind` under branch protection, so an idle PR asks
+  `gh.behind()` (compare) at most every `checks.every`. CI doesn't hold it:
+  running CI is for a head the merge replaces (waiting runs it twice), and red
+  CI may be the base's own failure, fixed there since (seen: superslides.io
+  #177, whose `ci` agent rightly changed nothing). So `pollChecks()` tries a
+  catch-up first when CI goes red and only queues the `ci` agent once that's
+  been tried for the head + base tip. The
   trigger is head sha + base tip. A failed/cancelled last job or a "needs
   your review" holds it until the PR head moves.
 - **Trigger label is `agent`.** Status labels are `agent:working`,

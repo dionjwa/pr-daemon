@@ -436,7 +436,7 @@ function renderStacks() {
     or when you press Tear down &mdash; and the <a href="#">Events</a> log says which.
     ${c.watch ? `GitHub's own checks are read every ${esc(c.every)}${c.fix ? `, and a failing one gets an agent (up to ${c.maxRounds} round${c.maxRounds === 1 ? "" : "s"} per PR)` : " (fixing is off)"}.`
       : "Checks on PRs are not being watched (<code>checks.watch = false</code>)."}
-    ${m.watch ? `A PR that conflicts with its base ${m.fix && m.maxRounds ? `gets the base merged in, with an agent resolving the conflicts (up to ${m.maxRounds} round${m.maxRounds === 1 ? "" : "s"} per PR); risky or uncertain ones come to you` : "is shown here and left to you (<code>merge.fix</code> is off)"}${m.behind ? ", and one that's merely behind is updated" : m.catchUp ? ", and a green, idle one that's behind gets the base merged in and checked" : ""}.`
+    ${m.watch ? `A PR that conflicts with its base ${m.fix && m.maxRounds ? `gets the base merged in, with an agent resolving the conflicts (up to ${m.maxRounds} round${m.maxRounds === 1 ? "" : "s"} per PR); risky or uncertain ones come to you` : "is shown here and left to you (<code>merge.fix</code> is off)"}${m.behind ? ", and one that's merely behind is updated" : m.catchUp ? ", and an idle one that's behind gets the base merged in and checked (before any CI fix)" : ""}.`
       : "Mergeability is not being watched (<code>merge.watch = false</code>)."}`;
 }
 

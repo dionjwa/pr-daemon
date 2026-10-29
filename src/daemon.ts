@@ -436,6 +436,14 @@ export class Daemon {
     store.upsertStack({ repo, branch: s.branch, issue: s.issue, worktree: s.worktree,
       checks_state: c.state, checks_detail: c.summary, checks_sha: pr.head.sha, checks_at: Date.now() });
     if (c.state !== "failure") return;
+    // Something else just queued on the branch (a merge for conflicts): let it
+    // land first; its push gets its own CI run.
+    if (this.busy(repo, s.branch, s.issue)) return;
+    // Behind the base: merge it in before an agent goes looking. The failure
+    // may be the base's own, already fixed there, and either way the fix has
+    // to be tested on the merged code. Once that's been tried for this head
+    // and base tip (catchUp() returns false), a red head gets its agent.
+    if (cfg.merge.watch && cfg.merge.catchUp && await this.catchUp(repo, s, pr, gh.mergeability(pr), true)) return;
 
     // One decision per failing commit: a re-run of the same commit, or another
     // poll, must not queue a second agent.
@@ -523,18 +531,20 @@ export class Daemon {
 
   /**
    * The base moved on under a PR that's otherwise finished: nothing queued,
-   * running or paused on it (the caller checked), it merges cleanly, its CI
-   * isn't red on the current head, and nothing waits on a person. CI that's
-   * still running doesn't hold it: its result is for a head the merge is about
-   * to replace, so waiting for it just runs CI twice. Merge the base
+   * running or paused on it (the caller checked), it merges cleanly, and
+   * nothing waits on a person. CI doesn't hold it: a running result is for a
+   * head the merge replaces, so waiting just runs CI twice, and a red one may
+   * be the base's own failure, fixed there since (pollChecks() calls this
+   * first, with `now`, before putting an agent on a failure). Merge the base
    * in with the same merge job conflicts get (merge, check, push, or hand
    * over), so the PR stays ready to merge. The trigger is the head and the
    * base tip together: one attempt per pair, and a base that moves again gets
    * another. A failure or a "needs your review" holds it until the PR head
    * moves (a person pushed). GitHub's `behind` state only shows up under
-   * branch protection, so this asks compare, at most every `checks.every`.
+   * branch protection, so this asks compare, at most every `checks.every`
+   * unless `now`. Returns whether it queued a merge.
    */
-  private async catchUp(repo: string, s: Stack, pr: gh.PR, mergeable: string): Promise<void> {
+  private async catchUp(repo: string, s: Stack, pr: gh.PR, mergeable: string, now = false): Promise<boolean> {
     const { store, cfg } = this;
     const last = store.lastJobOn(repo, s.branch);
     const hold = last && ["failed", "cancelled"].includes(last.state) ? `job${last.id}` : s.merge_level === "warn" ? `review${s.merge_at}` : "";
@@ -545,17 +555,17 @@ export class Daemon {
       if (!at) store.set(k, pr.head.sha);
       held = !at || at === pr.head.sha;
     }
-    if (catchUpBlocker({ mergeable, checksWatched: cfg.checks.watch, checksState: s.checks_state, checksSha: s.checks_sha, headSha: pr.head.sha,
-      lastJob: last, needsReview: s.merge_level === "warn", held })) return;
+    if (catchUpBlocker({ mergeable, lastJob: last, needsReview: s.merge_level === "warn", held })) return false;
     const asked = `catch-up-at:${repo}#${pr.number}`;
-    if (Date.now() - Number(store.get(asked) ?? 0) <= cfg.checks.everyMs) return;
+    if (!now && Date.now() - Number(store.get(asked) ?? 0) <= cfg.checks.everyMs) return false;
     store.set(asked, String(Date.now()));
     const b = await gh.behind(repo, pr.base.ref, pr.head.sha).catch(() => null);
-    if (!b || b.by === 0) return;
+    if (!b || b.by === 0) return false;
     const key = `catch-up:${repo}#${pr.number}:${pr.head.sha}:${b.baseSha}`;
-    if (store.hasTrigger(key)) return;
+    if (store.hasTrigger(key)) return false;
     const id = store.enqueue({ repo, kind: "merge", number: pr.number, branch: s.branch, trigger_key: key, pr: pr.number, payload: { sha: pr.head.sha, catchUp: true } });
-    if (id) store.event(`${repo} PR #${pr.number} is ${s.checks_sha === pr.head.sha && s.checks_state === "success" ? "green" : "idle"} but ${b.by} commit(s) behind ${pr.base.ref}; queued a merge`, id, "info");
+    if (id) store.event(`${repo} PR #${pr.number} is ${b.by} commit(s) behind ${pr.base.ref}; queued a merge`, id, "info");
+    return !!id;
   }
 
   /**

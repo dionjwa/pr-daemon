@@ -484,7 +484,7 @@ ${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`));
 /**
  * The PR stopped merging into its base (or, with `merge.behind`, the base
  * merely moved on, or, with `merge.catch_up`, it moved on under a PR that's
- * idle and not red). Merge the base in: never a rebase, never a force-push.
+ * idle). Merge the base in: never a rebase, never a force-push.
  *
  * Automate the routine, hand the risky to a human:
  * - a clean merge is committed, checked and pushed with no agent;

@@ -94,12 +94,6 @@ export function reviewReasons(r: MergeReport, cautions: string[], extraFiles: st
 export interface CatchUpState {
   /** gh.mergeability(): only "ok" and "behind" can be caught up. */
   mergeable: string;
-  /** Whether the repo's CI is watched at all (`checks.watch`). */
-  checksWatched: boolean;
-  /** The last checks verdict the poll stored, and the head commit it was for. */
-  checksState: string;
-  checksSha: string;
-  headSha: string;
   /** The newest job on the branch that actually ran (not ignored), if any. */
   lastJob?: { state: string };
   /** A pushed merge is marked "needs your review" (merge_level = warn). */
@@ -111,16 +105,15 @@ export interface CatchUpState {
 /**
  * Why an idle PR shouldn't be caught up with its base right now, or null when
  * it should. "Idle" is the caller's part (nothing queued, running or paused on
- * the branch); this is the rest: it merges, its own CI isn't red on the
- * current head (still running is fine), and nothing is waiting on a person. A failure or a "needs your review"
+ * the branch); this is the rest: it merges, and nothing is waiting on a
+ * person. Its CI, running or red, doesn't hold it. A failure or a "needs your review"
  * holds only until the PR head moves, which is what a person fixing it does.
  */
 export function catchUpBlocker(s: CatchUpState): string | null {
   if (s.mergeable !== "ok" && s.mergeable !== "behind") return s.mergeable === "unknown" ? "GitHub hasn't worked out mergeability yet" : `mergeability is ${s.mergeable}`;
-  // Only a red verdict on the current head blocks. Pending (or not reported
-  // yet) doesn't: those checks run on a head that's about to be replaced by
-  // the merge, so waiting for them only means running them twice.
-  if (s.checksWatched && s.checksSha === s.headSha && s.checksState === "failure") return "checks are failing";
+  // CI doesn't come into it. Running checks are for a head the merge replaces,
+  // so waiting only runs them twice; red ones may be the base's own failure,
+  // fixed upstream since, which no agent on this branch can fix.
   if (s.held && s.lastJob && ["failed", "cancelled"].includes(s.lastJob.state)) return `the last job ${s.lastJob.state}; waiting for a person`;
   if (s.held && s.needsReview) return "a merge is waiting for your review";
   return null;
