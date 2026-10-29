@@ -50,6 +50,11 @@ command that exits non-zero is a failure.
 2. **Return only when the app answers.** Start services in the background, then
    wait (`--wait`, a `curl` loop, whatever fits). Don't exit before the app is
    up, and don't block forever in the foreground. Timeout: 30 minutes.
+   **Background processes must not keep `up`'s output open**: redirect every
+   descriptor they inherit, including any you saved (`exec 3>&1` needs `3>&-`
+   on the background command), e.g.
+   `nohup server >>"$log" 2>&1 </dev/null 3>&- &`. pr-daemon stops reading
+   two seconds after `up` exits, so anything printed later is lost.
 3. **Be idempotent.** If the stack is already running, print the URL and exit 0.
 4. **Isolate per branch.** Two branches' stacks run at the same time, so derive
    ports, container names, volumes and database names from the branch name
@@ -228,6 +233,7 @@ Then start a second branch's stack at the same time and confirm both answer.
 
 - [ ] `up` prints the local URL as the very last line of stdout
 - [ ] `up` returns once the app answers, and is idempotent
+- [ ] background processes `up` starts write to a file, not to `up`'s stdout/stderr
 - [ ] ports, container names and volumes derive from the branch name
 - [ ] `down` deletes the branch's data, networks included, and is safe when nothing runs
 - [ ] `check` (if any) is green on a clean checkout

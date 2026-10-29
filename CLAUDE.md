@@ -249,6 +249,15 @@ just contract                 # print examples/justfile, the two recipes a proje
   **only** when its command line matches `(cli.ts|bin/pr-daemon)\s+serve`.
   Matching a pr-daemon *path* isn't enough: an editor or shell sitting in the
   checkout would match, and a test caught exactly that.
+- **A background child can hold `up`'s pipes open forever.** `run()` used
+  to resolve only on `close`, which waits for every holder of stdout/stderr.
+  superslides' `up` did `exec 3>&1 1>&2` and then started its dev server with
+  `nohup … >>log 2>&1 </dev/null &`, so the server inherited fd 3 (our stdout):
+  three builds sat in `running` for hours with no agent and no stack row, and
+  the 30-minute timeout didn't help because it SIGTERMed a bash that had
+  already exited. `run()` now stops reading `STREAM_GRACE_MS` after `exit` (or
+  after the timeout, which kills the whole group when `detached`). Diagnose
+  with `lsof -p <pr-daemon pid> | grep unix` and `lsof -p <server pid> -d 0-5`.
 - **Caddy is tied to the process:** `serve` traps SIGINT/SIGTERM and calls
   `Daemon.shutdown()` → `Proxy.shutdown()`, which stops the Caddy it manages
   (admin `/stop`, or `docker rm -f`) and sets a `stopped` flag so `tick()`

@@ -72,19 +72,53 @@ export interface RunOptions {
   detached?: boolean;
 }
 
-/** Run a command to completion, capturing output. Never throws on non-zero exit. */
+/** How long output may keep arriving after the process exits (or is killed) before we stop waiting for it. */
+const STREAM_GRACE_MS = 2000;
+
+/**
+ * Run a command to completion, capturing output. Never throws on non-zero exit.
+ *
+ * Resolves on `close` (exit plus all output read), but never waits on the
+ * streams alone: a background child that inherited our pipes (a project's `up`
+ * starting its dev server) keeps them open forever, and `close` never comes.
+ * So once the process has exited, or the timeout has killed it, we wait
+ * STREAM_GRACE_MS for the rest of the output and then stop listening.
+ */
 export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd, env: opts.env ?? cleanEnv(), shell: opts.shell ?? false, detached: opts.detached ?? false,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    let stdout = "", stderr = "";
+    let stdout = "", stderr = "", done = false, timedOut = false, exitCode: number | null = null;
+    let grace: NodeJS.Timeout | undefined;
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    const timer = opts.timeoutMs ? setTimeout(() => child.kill("SIGTERM"), opts.timeoutMs) : undefined;
-    child.on("error", (e) => { stderr += String(e); });
-    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
+    const finish = (code: number | null, note = "") => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer); clearTimeout(grace);
+      child.stdout.destroy(); child.stderr.destroy();
+      resolve({ code: code ?? 1, stdout, stderr: stderr + note });
+    };
+    const waitForStreams = (code: number | null, note: string) => {
+      clearTimeout(grace);
+      grace = setTimeout(() => finish(code, note), STREAM_GRACE_MS);
+    };
+    const timeoutNote = `\n[pr-daemon] timed out after ${Math.round((opts.timeoutMs ?? 0) / 1000)}s`;
+    const timer = opts.timeoutMs ? setTimeout(() => {
+      // The whole group when it has one: the command's own children are what
+      // hold the pipes open, and killing only the shell would leave them.
+      timedOut = true;
+      try { if (opts.detached && child.pid) process.kill(-child.pid, "SIGTERM"); else child.kill("SIGTERM"); } catch { /* already gone */ }
+      waitForStreams(null, timeoutNote);
+    }, opts.timeoutMs) : undefined;
+    child.on("error", (e) => { stderr += String(e); if (child.pid === undefined) finish(null); });
+    child.on("exit", (code) => {
+      exitCode = code;
+      if (!timedOut) waitForStreams(code, "\n[pr-daemon] the command exited but a background process kept its output open; stopped reading it");
+    });
+    child.on("close", (code) => finish(code ?? exitCode, timedOut ? timeoutNote : ""));
     if (opts.input !== undefined) child.stdin.end(opts.input); else child.stdin.end();
   });
 }

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseAmount, parseDuration, formatAmount } from "./util.ts";
+import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
 import { DEFAULT_TOML, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
 import { render } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
@@ -395,4 +395,28 @@ test("a closed issue or PR takes its notices with it", () => {
   assert.deepEqual(store.clearNotices("o/r", [5, 6, 0]).map((x) => x.number).sort(), [5, 6]);
   assert.deepEqual(store.notices().map((x) => `${x.repo}#${x.number}`).sort(), ["o/other#5", "o/r#7"]);
   assert.deepEqual(store.clearNotices("o/r", []), []);
+});
+
+// superslides #178–#180: `up` started its dev server with fd 3 (our stdout)
+// still open, `close` never came, and three builds held their slots for hours.
+test("run() returns when a background child keeps the output pipe open", async () => {
+  const t0 = Date.now();
+  const r = await run("bash", ["-c", "sleep 5 >/dev/null 2>&1 3>&1 & exec 3>&1; sleep 5 >&3 & echo url"]);
+  assert.equal(r.code, 0);
+  assert.equal(r.stdout.trim(), "url");
+  assert.ok(Date.now() - t0 < 4000, `took ${Date.now() - t0}ms`);
+});
+
+test("run() timeout resolves even when children hold the pipes", async () => {
+  const t0 = Date.now();
+  const r = await run("bash", ["-c", "sleep 5 & sleep 5"], { timeoutMs: 200 });
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /timed out/);
+  assert.ok(Date.now() - t0 < 4000, `took ${Date.now() - t0}ms`);
+});
+
+test("run() timeout kills a detached command's whole group", async () => {
+  const r = await run("bash", ["-c", "sleep 5 & sleep 5"], { timeoutMs: 200, detached: true });
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /timed out/);
 });
