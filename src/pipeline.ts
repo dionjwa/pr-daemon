@@ -779,7 +779,9 @@ export async function restart(ctx: Ctx): Promise<void> {
       error: `the worktree is gone (${s.worktree}); tear this down`, checked_at: Date.now() });
     throw new FailError(`the worktree ${s.worktree} no longer exists`);
   }
-  const r = await stack.up(repo.up, s.worktree, publicEnv(ctx.cfg(), s.branch));
+  const cmd = await stack.restartCommand(repo.restart, repo.up, s.worktree);
+  store.event(`restarting ${s.branch}: ${cmd}`, job.id);
+  const r = await stack.up(cmd, s.worktree, publicEnv(ctx.cfg(), s.branch));
   store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, ...routesOf(r),
     healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now() });
   if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);

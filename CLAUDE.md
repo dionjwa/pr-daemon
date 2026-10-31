@@ -108,7 +108,9 @@ A human always merges.
   `per_issue` cap. Hitting the window limit pauses and auto-resumes. Hitting
   the per-issue cap pauses until a human presses Resume.
 - **Portable:** a project only adds `pr-daemon-up` (start in the background,
-  print the URL last) and `pr-daemon-down`. `pr-daemon-check` is optional. Every
+  print the URL last) and `pr-daemon-down`. `pr-daemon-check` is optional, and so is
+  `pr-daemon-restart` (the Restart button; without it the button re-runs the
+  idempotent `up`, which leaves a running stack alone). Every
   command can be overridden per repo.
 - **Public previews:** the owner routes `*.<domain>` (DNS plus ports 80/443) to
   the machine. pr-daemon owns Caddy (binary or Docker) and the routing.

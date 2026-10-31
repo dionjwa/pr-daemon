@@ -96,6 +96,15 @@ export async function up(cmd: string, wt: string, env: Record<string, string>): 
   return { ok: true, ...parsed, networks };
 }
 
+/**
+ * What the Restart button runs: the project's restart command when it has one,
+ * otherwise `up` again. `up` is idempotent, so on a stack that still answers it
+ * changes nothing (a secret added since stays unread) and only helps one that stopped.
+ */
+export async function restartCommand(restart: string, up: string, wt: string): Promise<string> {
+  return restart.trim() && !(await missingRecipe(restart, wt)) ? restart : up;
+}
+
 export async function down(cmd: string, wt: string): Promise<{ ok: boolean; output: string }> {
   if (await missingRecipe(cmd, wt)) return { ok: true, output: "no down recipe" };
   const r = await sh(cmd, wt, { timeoutMs: 10 * 60e3 });

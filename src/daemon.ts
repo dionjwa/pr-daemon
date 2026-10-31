@@ -412,7 +412,7 @@ export class Daemon {
       if (h.state !== "up") store.event(`stack ${s.branch} is ${h.state}: ${error}`, null, "warn");
       else if (was !== "unknown") store.event(`stack ${s.branch} is serving again`, null, "info");
     }
-    // A restart re-runs `up`, which can only help when the stack itself is
+    // A restart (the project's restart command, or `up`) can only help when the stack itself is
     // down. A preview URL that doesn't reach a running stack is the proxy's
     // or the app's Host handling, and restarting would just lose the app.
     if (h.state === "down" && cfg.stacks.autoRestart) {
