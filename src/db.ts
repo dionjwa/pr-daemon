@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME, type NoticeKind } from "./config.ts";
 
-export type JobKind = "build" | "review" | "revise" | "ci" | "merge" | "teardown" | "restart";
+export type JobKind = "build" | "adopt" | "review" | "revise" | "ci" | "merge" | "teardown" | "restart";
 export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled" | "ignored";
 
 export interface Job {
   id: number;
   repo: string;
   kind: JobKind;
-  number: number;          // issue number (build/teardown/restart) or PR number (review/revise/ci/merge)
+  number: number;          // issue number (build/teardown/restart) or PR number (adopt/review/revise/ci/merge)
   trigger_key: string;     // dedupe key: label event id, comment id, failing CI head sha, …
   state: JobState;
   reason: string;          // why it's waiting / failed / ignored
@@ -63,8 +63,10 @@ export interface Stack {
 // Higher-priority work first: finish and clean up before starting new builds.
 // A red PR comes before a new build: it's work already in a human's hands.
 // Conflicts come before red CI: CI doesn't run on a PR that can't merge.
-export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, merge: 2, ci: 3, revise: 4, review: 5, build: 6 };
-export const AGENT_KINDS: JobKind[] = ["build", "review", "revise", "ci", "merge"];
+// `adopt` is a PR a person is already waiting on, so it goes ahead of a build,
+// which could hold the only agent slot for an hour.
+export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, merge: 2, ci: 3, revise: 4, review: 5, adopt: 6, build: 7 };
+export const AGENT_KINDS: JobKind[] = ["build", "adopt", "review", "revise", "ci", "merge"];
 
 export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
   mkdirSync(HOME, { recursive: true });

@@ -5,11 +5,11 @@ import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
 import { parseConfig, saveConfigText, setTopLevel, CONFIG_PATH, NOTICE_KINDS, readConfigText, type Config } from "./config.ts";
-import { AGENT_KINDS, openDb, Store, type Job, type Notice, type Stack } from "./db.ts";
+import { AGENT_KINDS, openDb, Store, type Job, type JobKind, type Notice, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { catchUpBlocker } from "./merge.ts";
-import { agentLog, CancelError, FailError, PauseError, JOBS, type Ctx } from "./pipeline.ts";
+import { agentLog, CancelError, FailError, issueForPr, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
@@ -18,6 +18,8 @@ import { parseTranscript, type Entry } from "./transcript.ts";
 import { formatAmount, formatDuration, notifier, notify, unnotify } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
+/** The kinds the `agent` label itself starts, and that removing it cancels: one per issue (build) or PR (adopt). */
+const TRIGGERED: JobKind[] = ["build", "adopt"];
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
 /** Shutdown waits this long for running agents to exit (agent.ts SIGKILLs after 10s). */
 const AGENT_STOP_MS = 12_000;
@@ -299,34 +301,43 @@ export class Daemon {
     const { store, cfg } = this;
     const allowed = await this.allowed();
 
-    // 1. Issues carrying the label → build. Keyed by the label event, so
-    //    removing and re-adding the label starts a fresh build.
-    const issues = await gh.labeledIssues(repo, cfg.label);
-    const labeled = new Set(issues.map((i) => i.number));
-    for (const issue of issues) {
-      if (store.activeFor(repo, "build", issue.number)) continue;
-      const ev = await gh.lastLabeled(repo, issue.number, cfg.label);
+    // 1. The label on an issue → build it. The label on a PR → adopt it
+    //    (start its stack, then review it). Keyed by the label event, so
+    //    removing and re-adding the label starts a fresh one.
+    const items = await gh.labeled(repo, cfg.label);
+    const labeled = new Set(items.map((i) => i.number));
+    for (const item of items) {
+      const n = item.number;
+      const isPr = gh.isPullRequest(item);
+      const kind: JobKind = isPr ? "adopt" : "build";
+      if (store.activeFor(repo, kind, n)) continue;
+      const ev = await gh.lastLabeled(repo, n, cfg.label);
       if (!ev) continue;
-      const key = `label:${repo}#${issue.number}:${ev.id}`;
+      const key = `label:${repo}#${n}:${ev.id}`;
       if (store.hasTrigger(key)) continue;
       if (!gh.isListed(allowed, ev.actor)) {
-        store.enqueue({ repo, kind: "build", number: issue.number, trigger_key: key, state: "ignored", reason: `label added by @${ev.actor}, who isn't allowed` });
-        store.event(`ignored ${repo}#${issue.number}: label added by @${ev.actor} (not in allowed_users)`, null, "warn");
+        store.enqueue({ repo, kind, number: n, trigger_key: key, state: "ignored", reason: `label added by @${ev.actor}, who isn't allowed` });
+        store.event(`ignored ${repo}#${n}: label added by @${ev.actor} (not in allowed_users)`, null, "warn");
         continue;
       }
-      // Who added the label isn't enough: the issue's text is the agent's
-      // instructions, so whoever wrote it (or edited it since) must be trusted too.
-      const strangers = gh.untrustedWriters(await gh.provenance(repo, issue.number), await gh.trustedAuthors(cfg.allowedUsers));
+      // Who added the label isn't enough: the text is what the agent is given
+      // — an issue's is its instructions, a PR's is what it reviews — so
+      // whoever wrote it (or edited it since) must be trusted too.
+      const strangers = gh.untrustedWriters(await gh.provenance(repo, n), await gh.trustedAuthors(cfg.allowedUsers));
       if (strangers.length) {
-        const why = gh.untrustedIssue(strangers);
-        if (store.enqueue({ repo, kind: "build", number: issue.number, trigger_key: key, state: "ignored", reason: why })) {
-          store.event(`ignored ${repo}#${issue.number}: ${why}`, null, "warn");
-          await gh.comment(repo, issue.number, `🚫 **pr-daemon** won't build this: ${why}. ${gh.UNTRUSTED_HELP}`);
+        const why = gh.untrustedText(strangers);
+        if (store.enqueue({ repo, kind, number: n, trigger_key: key, state: "ignored", reason: why })) {
+          store.event(`ignored ${repo}#${n}: ${why}`, null, "warn");
+          await gh.comment(repo, n, `🚫 **pr-daemon** won't ${isPr ? "work on" : "build"} this: ${why}. ${isPr ? gh.UNTRUSTED_PR_HELP : gh.UNTRUSTED_HELP}`);
         }
         continue;
       }
-      const id = store.enqueue({ repo, kind: "build", number: issue.number, trigger_key: key });
-      if (id) store.event(`queued build for ${repo}#${issue.number} "${issue.title}" (label by @${ev.actor})`, id);
+      // A PR's branch is recorded now, not when the job starts: the scheduler's
+      // per-branch lock is keyed on it, and a `/pr-daemon` comment on the same
+      // PR must not get its own agent in the same worktree.
+      const branch = isPr ? (await gh.pr(repo, n)).head.ref : "";
+      const id = store.enqueue({ repo, kind, number: n, trigger_key: key, branch, pr: isPr ? n : null });
+      if (id) store.event(`queued ${kind} for ${repo}#${n} "${item.title}" (label by @${ev.actor})`, id);
     }
 
     // 2. "/pr-daemon …" (or 😈/👿/:imp:/:smiling_imp:/:demon: …) comments on PRs → revise.
@@ -352,7 +363,7 @@ export class Daemon {
     // 3. The label came off: stop any work on that issue. The stack (if there
     //    is one) is cleaned up below once nothing is running on it.
     for (const j of store.jobs(200)) {
-      if (j.repo !== repo || j.kind !== "build" || !["queued", "running", "paused"].includes(j.state) || labeled.has(j.number)) continue;
+      if (j.repo !== repo || !TRIGGERED.includes(j.kind) || !["queued", "running", "paused"].includes(j.state) || labeled.has(j.number)) continue;
       if ((await this.unlabeled(repo, j.number)) === "removed") this.cancel(j.id, `the ${cfg.label} label was removed`);
     }
 
@@ -412,7 +423,7 @@ export class Daemon {
       if (h.state !== "up") store.event(`stack ${s.branch} is ${h.state}: ${error}`, null, "warn");
       else if (was !== "unknown") store.event(`stack ${s.branch} is serving again`, null, "info");
     }
-    // A restart re-runs `up`, which can only help when the stack itself is
+    // A restart (the project's restart command, or `up`) can only help when the stack itself is
     // down. A preview URL that doesn't reach a running stack is the proxy's
     // or the app's Host handling, and restarting would just lose the app.
     if (h.state === "down" && cfg.stacks.autoRestart) {
@@ -597,12 +608,16 @@ export class Daemon {
   }
   private activeFor(repo: string, branch: string, issue: number): Job[] {
     return this.store.jobs(200).filter((j) => j.repo === repo && ["queued", "running", "paused"].includes(j.state)
-      && j.kind !== "teardown" && (j.branch === branch || (j.kind === "build" && j.number === issue)));
+      && j.kind !== "teardown" && (j.branch === branch || (TRIGGERED.includes(j.kind) && j.number === issue)));
   }
 
-  /** The issue a job is about: builds carry it; review/revise/ci/merge carry the PR, whose branch starts with it. */
+  /**
+   * The issue a job is about: the label's own jobs carry it (a build its
+   * issue, an adopt its PR); the rest carry the PR, so ask what its branch
+   * belongs to.
+   */
   private issueOf(job: Job): number {
-    return job.kind === "build" ? job.number : Number(job.branch.split("-")[0]) || job.number;
+    return TRIGGERED.includes(job.kind) ? job.number : issueForPr(this.store, job.repo, job.branch, job.number);
   }
 
   // ------------------------------------------------------------ scheduling
@@ -708,10 +723,10 @@ export class Daemon {
         } else {
           this.store.update(job.id, { state: "failed", reason: e.message.slice(0, 2000), finished_at: Date.now() });
           this.store.event(`error: ${e.message.slice(0, 500)}`, job.id, "error");
-          if (AGENT_KINDS.includes(job.kind)) this.attention({ repo: job.repo, number: job.number, job_id: job.id, kind: "failed", level: "bad",
-            title: `❌ Failed: ${job.repo} #${job.number} ${job.kind}`, body: e.message.slice(0, 200), url: this.statusUrl(job.id) });
           if (AGENT_KINDS.includes(job.kind)) {
-            if (job.kind === "build") await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
+            this.attention({ repo: job.repo, number: job.number, job_id: job.id, kind: "failed", level: "bad",
+              title: `❌ Failed: ${job.repo} #${job.number} ${job.kind}`, body: e.message.slice(0, 200), url: this.statusUrl(job.id) });
+            if (TRIGGERED.includes(job.kind)) await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
             await gh.comment(job.repo, job.number, `❌ **pr-daemon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-daemon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
           }
         }

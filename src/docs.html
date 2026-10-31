@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pr-daemon · how it works</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>😈</text></svg>">
+<style>
+  /* Same tokens as ui.html, so the two pages are obviously one thing. */
+  :root {
+    --bg: #f6f5f2; --panel: #fff; --ink: #1d1d1b; --ink-2: #55534e; --ink-3: #8a877f; --line: #e4e1da;
+    --accent: #5b3fd1; --ok: #1f8a4c; --warn: #b26b00; --bad: #c0392b; --info: #2b6cb0; --chip: #efede8;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecebe7; --ink-2: #b6b3ab; --ink-3: #7d7a73; --line: #33322f;
+      --accent: #9d86ff; --ok: #4cc27f; --warn: #e3a33a; --bad: #ef6b5b; --info: #6aa8ef; --chip: #2a2a27; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
+  nav { display: flex; gap: 4px; margin-left: 8px; }
+  nav a { padding: 4px 10px; border-radius: 6px; color: var(--ink-2); }
+  nav a.on { background: var(--chip); color: var(--ink); }
+  .grow { flex: 1; }
+  /* Wide for the diagrams; the prose inside keeps a readable measure. */
+  main { max-width: 1320px; margin: 0 auto; padding: 18px 20px 80px; display: grid; gap: 18px; }
+  .pad > p, .pad > figure > figcaption { max-width: 880px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--ink-2); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .pad { padding: 14px 16px; }
+  .pad > :first-child { margin-top: 0; } .pad > :last-child { margin-bottom: 0; }
+  h3 { font-size: 14px; margin: 18px 0 6px; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+  .muted { color: var(--ink-3); } .small { font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; font-weight: 500; color: var(--ink-3); }
+  tr:last-child td { border-bottom: 0; }
+  td b { font-weight: 600; }
+  .yes { color: var(--ok); } .no { color: var(--ink-3); } .never { color: var(--bad); }
+  .scroll { overflow-x: auto; }
+  .note { border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); padding: 10px 14px; border-radius: 0 6px 6px 0; }
+  .warn { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); padding: 10px 14px; border-radius: 0 6px 6px 0; }
+  /* Until mermaid has run (or when it can't be fetched, see the script) a
+     diagram is its own source: readable, and it pastes into any viewer. */
+  pre.mermaid { margin: 0; padding: 12px 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    font: 12px/1.5 var(--mono); color: var(--ink-2); overflow-x: auto; }
+  pre.mermaid[data-processed] { padding: 8px 4px; background: transparent; border: 0; text-align: center; overflow-x: auto; }
+  pre.mermaid[data-processed] svg { max-width: 100%; height: auto; }
+  figure { margin: 10px 0 0; }
+  figcaption { color: var(--ink-3); font-size: 12px; padding-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>😈 pr-daemon</h1>
+  <nav><a href="/">Status</a><a href="/#setup">Setup</a><a href="/#config">Config</a><a href="/docs" class="on">How it works</a></nav>
+  <span class="grow"></span>
+  <a class="small" href="/setup">the project contract (/setup)</a>
+</header>
+
+<main>
+
+<section>
+  <h2>The one thing to know</h2>
+  <div class="pad">
+    <p>The <code>agent</code> label is the only trigger, and it works on <b>an issue</b> or <b>a pull request</b>.
+      Either way the branch gets the <b>same bring-up</b> — a worktree, your <code>up</code> command, and a
+      <b>public preview route</b> (<code>https://&lt;branch&gt;.&lt;domain&gt;</code>, plus one host per service
+      the stack declares) — and is then driven green against your <code>check</code> before anybody reviews it.
+      The only difference is whether there is a feature to write.</p>
+
+    <div class="scroll"><table>
+      <thead><tr><th>Labelling…</th><th>an issue</th><th>a pull request</th></tr></thead>
+      <tbody>
+        <tr><td>branch</td><td>created, named <code>42-dark-mode</code></td><td>the PR's own, whatever it is called</td></tr>
+        <tr><td>worktree + <code>up</code> + <b>public preview URL</b></td><td class="yes">yes</td><td class="yes">yes — the same command, the same env, the same Caddy route</td></tr>
+        <tr><td>health probes, auto-restart</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+        <tr><td>an agent writes the feature</td><td class="yes">yes, from the issue text</td><td class="no">nothing to write: the code is already in the PR</td></tr>
+        <tr><td>driven green against your <code>check</code></td><td class="yes">yes, before the PR opens</td><td class="yes">yes, before the review — the same fix rounds, committed and pushed to your branch</td></tr>
+        <tr><td>review by a fresh agent</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+        <tr><td><code>/pr-daemon</code> revisions, CI fixes, merging the base in</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+        <tr><td>teardown deletes the branch / closes the PR</td><td class="yes">yes, both</td><td class="never">never — it is your branch and your PR</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<section>
+  <h2>1 · The thing you labelled</h2>
+  <div class="pad">
+    <p>The states are the labels you can see on GitHub, so the status page and the issue (or PR) always agree.
+      Exactly one <code>agent:*</code> label is set at a time.</p>
+    <figure>
+<pre class="mermaid">
+stateDiagram-v2
+  direction TB
+
+  state "agent (queued)" as Queued
+  state "agent:working" as Working
+  state "agent:in-review" as InReview
+  state "agent:paused" as Paused
+  state "agent:failed" as Failed
+  state "ignored" as Ignored
+  state "labels cleared, stack gone" as Gone
+
+  [*] --> Queued : you add the agent label
+  Queued --> Ignored : untrusted
+  Queued --> Working : an issue, so build it
+  Queued --> Working : a pull request, so adopt it
+
+  Working --> InReview : green, and the review is queued
+  Working --> Paused : out of budget
+  Working --> Failed : no commits, check still red,<br/>a fork, or untrusted text
+  InReview --> Paused : out of budget
+  InReview --> Failed : CI red, or conflicts for you
+  Paused --> Working : a resumed build or adopt
+  Paused --> InReview : any other resumed job
+  Failed --> Queued : Retry
+
+  Working --> Gone : label removed
+  InReview --> Gone : merged, closed, or label removed
+  Ignored --> [*]
+  Gone --> [*]
+
+  note right of Working
+    build: a new branch, the stack, write the
+    feature and its tests, check until green,
+    open the PR.
+    adopt: the PR's own branch, the same stack
+    and public route, check until green.
+  end note
+
+  classDef entry fill:#5b3fd1,stroke:#5b3fd1,color:#fff
+  classDef rest fill:#1f8a4c,stroke:#1f8a4c,color:#fff
+  classDef hold fill:#b26b00,stroke:#b26b00,color:#fff
+  classDef stop fill:#c0392b,stroke:#c0392b,color:#fff
+  class Working entry
+  class InReview rest
+  class Paused hold
+  class Failed stop
+</pre>
+      <figcaption><code>agent:working</code> is one state reached two ways. Removing the label cancels whatever is
+        running, shuts the stack down and clears the labels; for a PR you labelled, that is all it does — the branch
+        and the PR stay.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>2 · While it is agent:in-review</h2>
+  <div class="pad">
+    <p>This is where a PR spends most of its life. Each loop is triggered once per cause — a comment id, a failing
+      head commit, a base tip — so nothing can spin.</p>
+    <figure>
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+
+  state "waiting for you" as Idle
+  state "revising" as Revising
+  state "fixing your CI" as Ci
+  state "merging the base in" as Merging
+  state "needs your review" as Needs
+  state "handed to you" as Yours
+
+  [*] --> Idle : the PR is open, previewed and reviewed
+
+  Idle --> Revising : a /pr-daemon comment
+  Revising --> Idle : pushed
+
+  Idle --> Ci : your CI went red
+  Ci --> Idle : a fix is pushed
+  Ci --> Yours : still red after max_rounds
+
+  Idle --> Merging : conflicts, or behind the base
+  Merging --> Idle : merged and pushed
+  Merging --> Needs : pushed, but uncertain
+  Merging --> Yours : risky conflicts
+  Needs --> Idle : you looked
+
+  Idle --> [*] : you merge or close it
+  Yours --> [*] : you finish it by hand
+
+  classDef rest fill:#1f8a4c,stroke:#1f8a4c,color:#fff
+  classDef hold fill:#b26b00,stroke:#b26b00,color:#fff
+  classDef stop fill:#c0392b,stroke:#c0392b,color:#fff
+  class Idle rest
+  class Needs hold
+  class Yours stop
+</pre>
+      <figcaption>pr-daemon never merges the PR itself. Every arrow out of this diagram is yours.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>3 · One job</h2>
+  <div class="pad">
+    <p>Every arrow in the two diagrams above is a row in the job queue: <code>build</code>, <code>adopt</code>,
+      <code>review</code>, <code>revise</code>, <code>ci</code>, <code>merge</code>, <code>teardown</code>,
+      <code>restart</code>. Each has a unique trigger key (the label event id, the comment id, the failing head
+      sha…), so one thing happening on GitHub starts exactly one job, ever.</p>
+    <figure>
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+
+  state "queued" as Queued
+  state "running" as Running
+  state "paused" as Paused
+  state "done" as Done
+  state "failed" as Failed
+  state "cancelled" as Cancelled
+  state "ignored" as Ignored
+
+  [*] --> Queued : a trigger not seen before
+  [*] --> Ignored : a trigger it will not act on
+  Queued --> Running : a slot, the branch lock, budget
+  Running --> Done
+  Running --> Failed : an error, or a clean give-up
+  Running --> Cancelled : you, or the label came off
+  Running --> Paused : out of budget
+  Running --> Queued : pr-daemon restarted
+  Paused --> Queued : the window freed up, or Resume
+  Failed --> Queued : Resume or Retry
+  Cancelled --> Queued : Resume or Retry
+  Done --> Queued : Retry
+  Done --> [*]
+  Ignored --> [*]
+
+  classDef rest fill:#1f8a4c,stroke:#1f8a4c,color:#fff
+  classDef hold fill:#b26b00,stroke:#b26b00,color:#fff
+  classDef stop fill:#c0392b,stroke:#c0392b,color:#fff
+  class Done rest
+  class Paused hold
+  class Failed stop
+</pre>
+      <figcaption><code>teardown</code> and <code>restart</code> run no agent, so they spend no tokens and are not
+        held by the budget gate. The other six are, and each can pause and continue in the same Claude session.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>4 · One preview stack</h2>
+  <div class="pad">
+    <p>Two probes, because they answer different questions: the stack's own address says whether the app is
+      running, and the public preview URL says whether a person can use it. Only the first is something a restart
+      can fix.</p>
+    <figure>
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+
+  state "unknown" as Unknown
+  state "up" as Up
+  state "degraded" as Degraded
+  state "down" as Down
+  state "restarting" as Restarting
+
+  [*] --> Unknown : up runs
+  Unknown --> Up : both probes agree
+  Unknown --> Down : up failed, or nothing answers
+  Up --> Down : it stopped answering here
+  Up --> Degraded : it answers here, the public URL does not
+  Down --> Restarting : stacks.auto_restart
+  Restarting --> Up : the restart worked
+  Restarting --> Down : it did not
+  Degraded --> Up : you fix DNS, Caddy or proxy_host
+  Up --> [*] : teardown
+
+  classDef rest fill:#1f8a4c,stroke:#1f8a4c,color:#fff
+  classDef hold fill:#b26b00,stroke:#b26b00,color:#fff
+  classDef stop fill:#c0392b,stroke:#c0392b,color:#fff
+  class Up rest
+  class Degraded hold
+  class Down stop
+</pre>
+      <figcaption>Only <b>up</b> counts as ready, so the "your PR is waiting" notification never fires for a
+        preview nobody can open.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>Who may start any of this</h2>
+  <div class="pad">
+    <p class="warn">Everything an agent is given has to come from <code>allowed_users</code>: whoever added the
+      label, whoever wrote and edited the <b>issue's</b> title and body — and, for a PR you label, whoever wrote and
+      edited <b>the PR's</b> title and body, because that is the reviewer's input. A PR from a <b>fork</b> is
+      refused: pr-daemon makes a worktree from the branch and pushes fixes back to it, which a fork's branch cannot
+      do. Both refusals are said on the issue or PR itself.</p>
+    <p class="small muted">This page is served by pr-daemon from <code>src/docs.html</code>. The diagrams are
+      <a href="https://mermaid.js.org/syntax/stateDiagram.html" target="_blank" rel="noopener">mermaid</a> state
+      diagrams; their source is this page's text, so they still read as text if the library cannot be fetched.</p>
+  </div>
+</section>
+
+</main>
+
+<div id="offline" class="pad small" hidden style="max-width:1320px;margin:0 auto 40px">
+  <div class="warn">The mermaid library could not be fetched (no internet, most likely), so the diagrams above are
+    shown as their own source. Everything else on this page, and all of pr-daemon, works offline — this is the one
+    thing on any of its pages that is loaded from the network.</div>
+</div>
+
+<script type="module">
+  // The only fetched dependency pr-daemon has, and it fails soft: a diagram
+  // that is not rendered is still its own source, in a code block.
+  try {
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    const { default: mermaid } = await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs");
+    mermaid.initialize({
+      startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "neutral",
+      fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+      state: { nodeSpacing: 60, rankSpacing: 60 },
+    });
+    await mermaid.run({ querySelector: "pre.mermaid" });
+  } catch (e) {
+    document.getElementById("offline").hidden = false;
+    console.warn("[pr-daemon] mermaid not available:", e);
+  }
+</script>
+</body>
+</html>

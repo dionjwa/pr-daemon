@@ -140,7 +140,7 @@
 <body>
 <header>
   <h1>😈 pr-daemon</h1>
-  <nav><a href="#" id="tab-status">Status</a><a href="#setup" id="tab-setup">Setup</a><a href="#config" id="tab-config">Config</a></nav>
+  <nav><a href="#" id="tab-status">Status</a><a href="#setup" id="tab-setup">Setup</a><a href="#config" id="tab-config">Config</a><a href="/docs" title="The state machines: what the agent label starts, and what watches the PR afterwards">How it works</a></nav>
   <span class="grow"></span>
   <span id="proxy" class="badge" hidden></span>
   <span id="pill" class="badge">…</span>
@@ -310,7 +310,9 @@ function render() {
        Only ${g.allowedUsers?.length ? g.allowedUsers.map(at).join(", ") : "<i>(checking gh…)</i>"} can start work${g.allowedFromConfig ? " (allowed_users)" : ""};
        a label or <code>/pr-daemon</code> comment from anyone else is ignored.</div>`;
   $("howto").innerHTML = who + (S.repos.length
-    ? `Add the <span class="badge">${esc(S.label)}</span> label to an issue in ${S.repos.map((r) => `<a href="https://github.com/${esc(r)}/issues" target="_blank">${esc(r)}</a>`).join(", ")}.
+    ? `Add the <span class="badge">${esc(S.label)}</span> label to an issue in ${S.repos.map((r) => `<a href="https://github.com/${esc(r)}/issues" target="_blank">${esc(r)}</a>`).join(", ")}
+       to get a PR, or to a PR that already exists to get the same preview stack and a review.
+       <a href="/docs">How it works</a> has the state machines.
        Ask for changes with a PR comment starting <code>/pr-daemon</code>. Merge or close the PR, or remove the label, to clean up (stack, worktree and branch).`
     : `<b>No repos configured yet.</b> Open <a href="#config">Config</a> and add one block per repository &mdash;
        the double brackets are what make it a list:<pre style="margin:8px 0">[[repos]]
@@ -322,10 +324,11 @@ name = "your-org/website"</pre>`);
   const jobs = S.jobs;
   $("jobs").innerHTML = jobs.length ? `<table><thead><tr><th>State</th><th>Job</th><th>Issue / PR</th><th class="hide-sm">Branch</th><th>Tokens</th><th class="hide-sm">When</th><th></th></tr></thead><tbody>${
     jobs.map((j) => {
-      const isPr = ["review", "revise", "ci", "merge"].includes(j.kind);
+      const isPr = ["adopt", "review", "revise", "ci", "merge"].includes(j.kind);
       // Stack chores are not agent runs: name them so a queued "restart" row
       // doesn't read as a second build.
-      const kindLabel = { restart: "restart stack", teardown: "tear down stack", ci: "fix failing checks", merge: "merge base in" }[j.kind] ?? j.kind;
+      const kindLabel = { restart: "restart stack", teardown: "tear down stack", ci: "fix failing checks", merge: "merge base in",
+        adopt: "adopt PR: stack, check, review" }[j.kind] ?? j.kind;
       const when = j.state === "running" ? `for ${dur(Date.now() - j.started_at)}` : j.finished_at ? ago(j.finished_at) : ago(j.created_at);
       const btns = [
         ["running", "queued", "paused"].includes(j.state) && btn(`cancel-${j.id}`, "Cancel", "danger"),
@@ -347,7 +350,7 @@ name = "your-org/website"</pre>`);
         ? `<tr><td colspan="7" style="padding:0"><div data-tx="${j.id}"></div>${where ? `<div class="tx-foot">${where}</div>` : ""}</td></tr>`
         : `<tr><td colspan="7" style="padding:0"><pre class="activity">No agent runs in this job.${where ? `\n\n${where}` : ""}</pre></td></tr>`;
       return row + detail;
-    }).join("")}</tbody></table>` : `<div class="empty">Nothing yet. Label an issue <span class="badge">${esc(S.label)}</span> to start.</div>`;
+    }).join("")}</tbody></table>` : `<div class="empty">Nothing yet. Label an issue <span class="badge">${esc(S.label)}</span> to build it, or a PR to have it reviewed.</div>`;
 
   for (const cell of document.querySelectorAll("[data-tx]")) attachTx(Number(cell.dataset.tx), cell);
 
@@ -396,7 +399,7 @@ function renderStacks() {
       const row = `<tr class="row" data-stack="${esc(id)}" title="${esc(title)}">
         <td><span class="badge s-${esc(s.state)}"><span class="dot ${cls}"></span>${esc(word)}</span></td>
         <td class="small">${esc(s.branch)}</td>
-        <td>${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}</td>
+        <td>${s.issue === s.pr ? link(s.repo, s.pr, true) : `${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}`}</td>
         <td class="small">${url ? a(url) : `<span class="muted">not running</span>`}${
           s.error ? `<div class="stack-error"><pre>${esc(s.error)}</pre></div>` : ""}</td>
         <td class="hide-sm small">${ch
@@ -456,7 +459,7 @@ function mergeCell(s) {
 // we keep and re-attach: expanded calls stay expanded, and new entries are
 // appended (fetched from where we left off) rather than redrawn. It follows
 // the bottom while you're at the bottom, and stays put once you scroll up.
-const AGENT_KINDS = ["build", "review", "revise", "ci", "merge"];
+const AGENT_KINDS = ["build", "adopt", "review", "revise", "ci", "merge"];
 const tx = new Map();            // job id → { el, count, top, stick, busy, loaded }
 function attachTx(id, cell) {
   let t = tx.get(id);

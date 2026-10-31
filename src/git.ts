@@ -1,7 +1,7 @@
 // One cached clone per repo; every issue branch is a worktree off it.
 // Auth goes through `gh auth git-credential`, so no token is written to disk.
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { HOME } from "./config.ts";
 import { must, run, slugify } from "./util.ts";
 
@@ -70,6 +70,23 @@ export async function ensureWorktree(repo: string, n: number, base: string, titl
   return { branch, wt };
 }
 
+/**
+ * Find or create the worktree for a branch that already exists on the remote.
+ * Keyed by the branch itself, not by an issue number: pr-daemon names its own
+ * branches "<issue>-<summary>", but a PR it adopted was named by somebody else
+ * and can look like anything (slashes included, hence the mkdir).
+ */
+export async function ensureBranchWorktree(repo: string, branch: string): Promise<string> {
+  const wt = join(worktreeRoot(repo), branch);
+  if (existsSync(join(wt, ".git"))) {
+    await run("git", ["-C", wt, "pull", "-q", "--ff-only", "origin", branch]);
+    return wt;
+  }
+  mkdirSync(dirname(wt), { recursive: true });
+  await git(repoDir(repo), "worktree", "add", "-q", "-B", branch, wt, `origin/${branch}`);
+  return wt;
+}
+
 /** Commit tracked edits the agent left behind. Untracked files (tool caches, logs) are left alone. */
 export async function commitLeftovers(wt: string): Promise<string[]> {
   await git(wt, "add", "-u");
@@ -85,6 +102,16 @@ export async function head(wt: string): Promise<string> {
 
 export async function commitsAhead(wt: string, base: string): Promise<number> {
   return Number(await git(wt, "rev-list", "--count", `origin/${base}..HEAD`));
+}
+
+/**
+ * Commits on this branch that the remote hasn't got: what a push would send.
+ * Asked instead of comparing HEAD against a snapshot, because a job that
+ * paused mid-round resumes with its earlier rounds already committed here.
+ */
+export async function unpushed(wt: string, branch: string): Promise<number> {
+  const r = await run("git", ["-C", wt, "rev-list", "--count", `origin/${branch}..HEAD`]);
+  return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
 }
 
 export async function push(wt: string, branch: string): Promise<void> {

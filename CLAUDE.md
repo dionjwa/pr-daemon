@@ -6,10 +6,12 @@ together, and what we learned the hard way. User-facing docs are in README.md
 
 ## What it is
 
-Label a GitHub issue `agent`, get a pull request. One long-running process on
-the owner's machine (`pr-daemon serve`):
+Label a GitHub issue `agent`, get a pull request. Label an existing PR `agent`,
+get its stack and a review. One long-running process on the owner's machine
+(`pr-daemon serve`):
 
-1. polls GitHub for issues that just got the `agent` label, checking **who** added it
+1. polls GitHub for issues (and PRs: see below) that just got the `agent`
+   label, checking **who** added it
 2. creates a worktree on a branch `<issue>-<short-kebab-summary>`
 3. starts that branch's full stack (`just pr-daemon-up`, which prints the local URL)
 4. runs headless Claude Code to build the feature and tests, then re-runs the
@@ -34,6 +36,26 @@ the owner's machine (`pr-daemon serve`):
    for the issue and closes its open PR. The page's Tear down button keeps the branch.
 11. with `[preview] domain` set: runs Caddy so each branch is at
     `https://<branch>.<domain>`
+
+**A second way in:** the `agent` label on a **PR** instead of an issue runs
+`adopt` (`pipeline.adopt()`). It does the whole of steps 2–4 — worktree, the
+project's own `up` with the same `publicEnv`, so the branch gets its **public
+preview route** and service hosts exactly as a built one does; then `check`,
+and `agent.max_attempts` fix rounds (`prompts/green.md`) to drive it green,
+committed and pushed — and then the review of 6; 7–11 watch it afterwards like
+any other PR. The only thing it skips is writing a feature, because the code
+is already in the PR. The branch is somebody else's, so teardown never deletes
+it and the PR is never closed; a fork, or a PR whose title/body has a writer
+outside `allowed_users`, is refused with a comment on the PR.
+
+**The state machines are a page:** `src/docs.html`, served at
+`GET /docs` (linked from the status page's nav). Four `stateDiagram-v2`
+diagrams — the labelled issue/PR, the in-review watch loop, one job, one stack
+— plus the issue-vs-PR table that says what each entry point gets. Keep it
+true when the lifecycle changes; it is the fastest way to see what pr-daemon
+does. Mermaid is fetched from a CDN there and **fails soft** (an unrendered
+diagram is still its own source), which is the one network dependency any
+pr-daemon page has.
 
 All agent work happens within a token budget (rolling window plus per-issue cap).
 A human always merges.
@@ -101,14 +123,40 @@ A human always merges.
   been tried for the head + base tip. The
   trigger is head sha + base tip. A failed/cancelled last job or a "needs
   your review" holds it until the PR head moves.
-- **Trigger label is `agent`.** Status labels are `agent:working`,
-  `agent:in-review`, `agent:paused` and `agent:failed`.
+- **Trigger label is `agent`,** on an issue (build it) or on a PR (adopt it).
+  Status labels are `agent:working`, `agent:in-review`, `agent:paused` and
+  `agent:failed`, on whichever was labelled.
+- **An adopted PR gets the same treatment as a built one**, minus writing the
+  feature. Same `up`, same `publicEnv`, same stack row, so the same
+  `https://<branch>.<domain>` route, health probes and auto-restart; and the
+  same `check` + fix rounds, so a human never reviews a red PR. The owner
+  always wants to try the public URL and always wants it green first, so "it
+  only reviews" is never the right shortcut. The reviewing agent is told the
+  address too (`previewNote()` → the review prompt's `{{PREVIEW}}`), since an
+  adopted PR's body doesn't carry it.
+- **`prompts/green.md` is written for somebody else's code.** Fix the cause,
+  never the check; no refactors, no reverting the author; "a human has to do
+  this" is an allowed outcome. That restraint is the whole prompt — don't
+  turn it into a second builder. A round that changes nothing is reported as
+  such and the PR is still reviewed: a red check is a reason to read the code,
+  not to skip reading it.
+- **An adopted PR is somebody else's work.** Keep it that way: no force-push,
+  no branch deletion, no closing the PR, and its description is left alone
+  (the preview link is a comment). A fork is refused — pr-daemon makes a
+  worktree from the branch and pushes fixes to it, which a fork's branch
+  can't do — and so is a PR whose title or body has an untrusted writer,
+  since that text is the reviewer's input. One number for everything: an adopted stack's
+  `issue` **is** its PR number, and `pipeline.issueForPr()` is the one place
+  that knows how a branch maps to the number its budget and status label use
+  (the stack row first, then pr-daemon's own `<issue>-…` prefix).
 - **Budget:** optional tokens per rolling window (default `5h`, one Claude
   subscription window), in human amounts (`"40M"`), plus an optional
   `per_issue` cap. Hitting the window limit pauses and auto-resumes. Hitting
   the per-issue cap pauses until a human presses Resume.
 - **Portable:** a project only adds `pr-daemon-up` (start in the background,
-  print the URL last) and `pr-daemon-down`. `pr-daemon-check` is optional. Every
+  print the URL last) and `pr-daemon-down`. `pr-daemon-check` is optional, and so is
+  `pr-daemon-restart` (the Restart button; without it the button re-runs the
+  idempotent `up`, which leaves a running stack alone). Every
   command can be overridden per repo.
 - **Public previews:** the owner routes `*.<domain>` (DNS plus ports 80/443) to
   the machine. pr-daemon owns Caddy (binary or Docker) and the routing.
@@ -137,7 +185,7 @@ A human always merges.
 |---|---|
 | `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
-| `pipeline.ts` | The jobs (`JOBS`): `build`, `review`, `revise`, `ci`, `merge`, `teardown`, `restart`. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
+| `pipeline.ts` | The jobs (`JOBS`): `build`, `adopt`, `review`, `revise`, `ci`, `merge`, `teardown`, `restart`. `bringUp()` is the one place that runs `up` and writes the stack row. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
 | `transcript.ts` | Parses an agent's `*.jsonl` log into what it said, each tool call and its result, for `GET /api/jobs/<id>/transcript?from=N` (the page polls for new entries). `agentLog(job)` in `pipeline.ts` is the one place that knows each job's log path |
 | `merge.ts` | The pure merge decisions: `assessConflicts()` (agent or human), `hasConflictMarkers()`, `parseMergeReport()` (the agent's `CONFIDENCE` / `NEEDS_HUMAN` trailer), `reviewReasons()` (what makes a pushed merge "needs your review"). The git side (`startMerge`, `conflicts`, `abortMerge`, `commitMerge`) is in `git.ts` |
@@ -146,11 +194,17 @@ A human always merges.
 | `db.ts` | Schema plus `Store` (jobs, usage, stacks, events, kv) |
 | `gh.ts` / `git.ts` / `stack.ts` | Wrappers for `gh` (as the user), the cached clone plus worktrees plus the screenshot branch, and the project's up/down/check commands. `gh.summarizeChecks()` reduces check runs + commit statuses to one verdict; `stack.previewHealth()` turns the two health probes into up/degraded/down (both pure, unit-tested) |
 | `config.ts` | `DEFAULT_TOML` (the documented template), `parseConfig()` with readable errors, atomic save |
-| `web.ts` / `ui.html` | The localhost API (Host check; writes need `X-PR-Daemon: 1`) and the page |
+| `web.ts` / `ui.html` / `docs.html` | The localhost API (Host check; writes need `X-PR-Daemon: 1`), the status page, and `GET /docs`: the state machines as mermaid diagrams |
 | `setup.ts` / `docs/setup.md` | `paths()` (the runtime directories) and `setupDoc()`: the project contract with this machine's real paths and commands filled in, served as plain text at `GET /setup` and printed by `pr-daemon setup` |
 | `util.ts` | Amounts/durations, `run`/`sh`/`must`, `cleanEnv` |
 
 The repo's own `justfile` wraps the CLI plus the dev commands; `examples/justfile` is the contract a target project implements.
+
+**One PR, two origins:** a PR pr-daemon opened sits on a branch it named
+`<issue>-<summary>`; an adopted one sits on a branch a person named, which can
+be anything (slashes included). So no PR job guesses a worktree from a number:
+`prWorktree()` takes the PR's own head ref and `git.ensureBranchWorktree()`
+makes or reuses the worktree for it.
 
 **Job lifecycle:** `queued → running → done | failed | cancelled | paused`, and
 `ignored` for a trigger pr-daemon decided not to act on (a disallowed user, or

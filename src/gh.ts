@@ -61,28 +61,37 @@ export function parseCommand(body: string): string | null {
   return null;
 }
 
-/** Everyone whose words are in an issue's title or body: the author, body editors, title renamers. */
+/** Everyone whose words are in an issue's or PR's title or body: the author, body editors, title renamers. */
 export interface Provenance { author: string; editors: string[]; renamers: string[] }
 
-/** The writers of an issue's title and body who aren't trusted (deleted accounts show as "ghost"). */
+/** The writers of an issue's or PR's title and body who aren't trusted (deleted accounts show as "ghost"). */
 export function untrustedWriters(p: Provenance, trusted: string[]): string[] {
   return [...new Set([p.author, ...p.editors, ...p.renamers])].filter((u) => !isListed(trusted, u));
 }
 
-/** Why an issue's text isn't safe to hand an agent, and what to do about it. */
-export const untrustedIssue = (who: string[]) =>
+/** Why an issue's or PR's text isn't safe to hand an agent, and what to do about it. */
+export const untrustedText = (who: string[]) =>
   `its title or text was written or edited by ${who.map((u) => `@${u}`).join(", ")}, who ${who.length === 1 ? "isn't" : "aren't"} in allowed_users`;
 export const UNTRUSTED_HELP = "The issue is the agent's instructions, so only allowed users may write it. Open a new issue in your own words (or add them to allowed_users), then label that.";
+export const UNTRUSTED_PR_HELP = "A labelled PR's title and text are agent input too, so only allowed users may write them. Add them to allowed_users if you trust them, then label it again.";
 
+/**
+ * Who wrote an issue or a PR. One query for both: issues and PRs share a
+ * number space, and a labelled PR's text is agent input exactly as an issue's
+ * is, so `issueOrPullRequest` asks without having to know which it is.
+ */
 export async function provenance(repo: string, n: number): Promise<Provenance> {
   const [owner, name] = repo.split("/");
-  const query = `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { issue(number: $n) {
-    author { login }
+  const wrote = `author { login }
     userContentEdits(last: 100) { nodes { editor { login } } }
-    timelineItems(last: 100, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { actor { login } } } } } } }`;
+    timelineItems(last: 100, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { actor { login } } } }`;
+  const query = `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { issueOrPullRequest(number: $n) {
+    ... on Issue { ${wrote} }
+    ... on PullRequest { ${wrote} } } } }`;
   type Who = { login: string } | null;
   const r = JSON.parse(await must("gh", ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `n=${n}`]));
-  const i = r.data.repository.issue as { author: Who; userContentEdits: { nodes: { editor: Who }[] }; timelineItems: { nodes: { actor?: Who }[] } };
+  const i = r.data.repository.issueOrPullRequest as { author: Who; userContentEdits: { nodes: { editor: Who }[] }; timelineItems: { nodes: { actor?: Who }[] } };
+  if (!i) throw new Error(`${repo}#${n}: GitHub has no issue or PR with that number`);
   const who = (w: Who | undefined) => w?.login ?? "ghost";
   return { author: who(i.author), editors: i.userContentEdits.nodes.map((e) => who(e.editor)), renamers: i.timelineItems.nodes.map((e) => who(e.actor)) };
 }
@@ -108,16 +117,22 @@ export async function defaultBranch(repo: string): Promise<string> {
 
 export interface Issue { number: number; title: string; body: string | null; state: string; html_url: string; labels: { name: string }[]; pull_request?: unknown }
 
-export async function labeledIssues(repo: string, label: string): Promise<Issue[]> {
-  const items = await apiAll<Issue>(`repos/${repo}/issues?state=open&per_page=100&labels=${encodeURIComponent(label)}`);
-  return items.filter((i) => !i.pull_request);
+/**
+ * Everything open carrying the label: issues to build, and PRs a human
+ * labelled for pr-daemon to adopt. One call for both — GitHub's issues
+ * endpoint serves PRs too, and marks them with `pull_request`.
+ */
+export async function labeled(repo: string, label: string): Promise<Issue[]> {
+  return apiAll<Issue>(`repos/${repo}/issues?state=open&per_page=100&labels=${encodeURIComponent(label)}`);
 }
+
+export const isPullRequest = (i: Issue): boolean => !!i.pull_request;
 
 export async function issue(repo: string, n: number): Promise<Issue> {
   return api<Issue>(`repos/${repo}/issues/${n}`);
 }
 
-/** The most recent time `label` was added to the issue: event id + who added it. */
+/** The most recent time `label` was added to the issue or PR: event id + who added it. */
 export async function lastLabeled(repo: string, n: number, label: string): Promise<{ id: number; actor: string } | null> {
   const events = await apiAll<{ id: number; event: string; label?: { name: string }; actor?: { login: string } }>(
     `repos/${repo}/issues/${n}/events?per_page=100`);
@@ -134,7 +149,9 @@ export async function commentsSince(repo: string, since: string): Promise<Commen
 }
 
 export interface PR {
-  number: number; title: string; state: string; merged_at: string | null; head: { ref: string; sha: string }; base: { ref: string; sha: string }; html_url: string;
+  number: number; title: string; state: string; merged_at: string | null; base: { ref: string; sha: string }; html_url: string;
+  /** `repo` is null for a fork whose repository is gone; a fork's full_name isn't this repo. */
+  head: { ref: string; sha: string; repo: { full_name: string } | null };
   /** GitHub works this out lazily after a push to either side: null means "not known yet, ask again". */
   mergeable?: boolean | null;
   /** dirty (conflicts), behind, clean, blocked, unstable, has_hooks, draft, or unknown. */

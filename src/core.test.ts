@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
 import { DEFAULT_TOML, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
-import { render } from "./pipeline.ts";
+import { issueForPr, render } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
-import { isListed, parseCommand, untrustedWriters } from "./gh.ts";
+import { isListed, isPullRequest, parseCommand, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
 
@@ -334,6 +334,31 @@ test("one ci job per failing commit, counted per PR", () => {
   store.enqueue({ repo: "o/r", kind: "ci", number: 7, trigger_key: key("ccc"), state: "ignored", reason: "cap" });
   assert.equal(store.countJobs("o/r", "ci", 7), 2);
   assert.equal(store.countJobs("o/r", "ci", 8), 0);
+});
+
+test("a labelled PR is adopted, not built", () => {
+  // The label on an issue and on a PR come from the same list: GitHub's issues
+  // endpoint serves both, and only `pull_request` tells them apart.
+  assert.ok(isPullRequest({ number: 1, title: "t", body: "", state: "open", html_url: "", labels: [], pull_request: { url: "…" } }));
+  assert.ok(!isPullRequest({ number: 1, title: "t", body: "", state: "open", html_url: "", labels: [] }));
+  // It drives the check green before the review, so it runs an agent under the
+  // budget, and comes before a build: somebody is already waiting on that PR.
+  assert.ok(AGENT_KINDS.includes("adopt"));
+  assert.ok(PRIORITY.adopt < PRIORITY.build && PRIORITY.adopt > PRIORITY.review);
+});
+
+test("what a PR's work is accounted to: its issue, or the PR when it was adopted", () => {
+  const store = new Store(openDb(join(mkdtempSync(join(tmpdir(), "prd-")), "t.db")));
+  // No stack row: pr-daemon's own branches carry the issue number, anything else can't.
+  assert.equal(issueForPr(store, "o/r", "42-dark-mode", 99), 42);
+  assert.equal(issueForPr(store, "o/r", "feature/dark-mode", 99), 99);
+  assert.equal(issueForPr(store, "o/r", "", 99), 99);
+  // The stack row is the authority once the branch has been set up: a human's
+  // branch that happens to start with digits is still accounted to its PR.
+  store.upsertStack({ repo: "o/r", branch: "42-dark-mode", issue: 42, worktree: "/wt/a" });
+  store.upsertStack({ repo: "o/r", branch: "7-not-an-issue", issue: 99, worktree: "/wt/b" });
+  assert.equal(issueForPr(store, "o/r", "42-dark-mode", 43), 42);
+  assert.equal(issueForPr(store, "o/r", "7-not-an-issue", 99), 99);
 });
 
 test("a notice waits for the end of the chain: nothing more coming on the branch", () => {

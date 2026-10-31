@@ -1,4 +1,4 @@
-// The work itself: build, review, revise, ci, merge, teardown, restart.
+// The work itself: build, adopt, review, revise, ci, merge, teardown, restart.
 // Each function runs one job end to end and is safe to re-run after a pause
 // or crash: worktrees, stacks and PRs are found and reused, and the agent's
 // Claude session is resumed rather than restarted.
@@ -12,7 +12,7 @@ import type { Job, Store } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { assessConflicts, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
-import { publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
+import { publicEnv, publicUrl, serviceUrl, stackRoutes } from "./proxy.ts";
 import * as stack from "./stack.ts";
 import { tail, unnotify } from "./util.ts";
 
@@ -67,8 +67,34 @@ function payload(job: Job): Payload {
   try { return JSON.parse(job.payload || "{}"); } catch { return {}; }
 }
 
-const issueOf = (branch: string) => Number(branch.split("-")[0]);
-/** Docker networks this stack has created so far, as one space-separated field. */
+/**
+ * Which number a PR's work is accounted to (its token budget, its status
+ * label): the issue it was built for, or the PR itself when pr-daemon adopted
+ * it. The stack row written when the branch was set up is the authority — an
+ * adopted branch was named by somebody else, so the name says nothing — and
+ * the "<issue>-…" prefix of pr-daemon's own branches is the fallback when
+ * there is no row (a stack torn down by hand, a comment on an old branch).
+ */
+export function issueForPr(store: Store, repo: string, branch: string, pr: number): number {
+  const s = branch ? store.stack(repo, branch) : undefined;
+  if (s) return s.issue;
+  return Number(/^(\d+)-/.exec(branch)?.[1]) || pr;
+}
+
+/**
+ * The worktree for a job that works on an open PR, and the number to account
+ * it to. Always the PR's own head branch: it is the one thing that is true for
+ * both a branch pr-daemon named after an issue and one it adopted.
+ */
+async function prWorktree(ctx: Ctx, p: gh.PR): Promise<{ branch: string; wt: string; issue: number }> {
+  const repo = ctx.repo.name;
+  await git.ensureClone(repo);
+  const branch = p.head.ref;
+  const wt = await git.ensureBranchWorktree(repo, branch);
+  ctx.current_wt = wt;
+  return { branch, wt, issue: issueForPr(ctx.store, repo, branch, p.number) };
+}
+
 /** The routes column for a successful `up`. */
 const routesOf = (r: stack.UpResult): { routes?: string } => (r.ok ? { routes: JSON.stringify(r.routes) } : {});
 
@@ -88,6 +114,7 @@ export function stackWhere(cfg: Config, branch: string, r: stack.UpResult): stri
     (services.length ? ` Its services: ${services.map((n) => `${n} → ${serviceUrl(cfg, branch, n)}`).join(", ")}.` : "");
 }
 
+/** Docker networks this stack has created so far, as one space-separated field. */
 export const withNetworks = (existing: string | undefined, created: string[]): string =>
   [...new Set([...(existing ?? "").split(" ").filter(Boolean), ...created])].join(" ");
 
@@ -122,6 +149,7 @@ export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): str
   if (!job.branch) return null;
   const out = git.outDir(job.repo, job.branch);
   if (job.kind === "build") return join(out, "agent-build.jsonl");
+  if (job.kind === "adopt") return join(out, "agent-adopt.jsonl");
   if (job.kind === "review") return join(out, `review-${job.id}`, "agent.jsonl");
   if (job.kind === "revise") return join(out, `agent-revise-${job.id}.jsonl`);
   if (job.kind === "ci") return join(out, `agent-ci-${job.id}.jsonl`);
@@ -201,7 +229,7 @@ export async function build(ctx: Ctx): Promise<void> {
   // Checked when the label was added, and again now: the text may have been edited since.
   const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
   if (strangers.length) {
-    const why = gh.untrustedIssue(strangers);
+    const why = gh.untrustedText(strangers);
     await gh.comment(repo.name, n, `🚫 **pr-daemon** stopped: ${why}. ${gh.UNTRUSTED_HELP}`);
     throw new FailError(why);
   }
@@ -325,24 +353,177 @@ async function uploadShots(ctx: Ctx, branch: string, out: string): Promise<strin
   catch (e) { ctx.store.event(`screenshot upload failed: ${(e as Error).message}`, ctx.job.id, "warn"); return ""; }
 }
 
+// ---------------------------------------------------------------- adopt
+/**
+ * A PR a human labelled. pr-daemon didn't open it, so there is nothing to
+ * build from an issue — but everything else a built PR gets, this gets:
+ *
+ * 1. the branch's worktree and its stack, on the same **public preview URL**
+ *    a build would give it (same `up`, same `publicEnv`, same Caddy route),
+ * 2. the project's own `check`, and if it fails, an agent to drive it green,
+ *    the same fix rounds a build uses, pushed to the branch,
+ * 3. a review by a fresh agent.
+ *
+ * Afterwards it is an ordinary pr-daemon branch: `/pr-daemon` comments revise
+ * it, red CI and a moving base are watched, and closing the PR (or taking the
+ * label off) tears the stack down. The branch is somebody else's, so teardown
+ * never deletes it, the PR is never closed for you, and nothing is ever
+ * force-pushed.
+ */
+export async function adopt(ctx: Ctx): Promise<void> {
+  const { store, job, repo } = ctx;
+  const cfg = ctx.cfg();
+  const n = job.number;
+  const p = await gh.pr(repo.name, n);
+  if (p.state !== "open") throw new FailError(`PR #${n} is closed`);
+  const branch = p.head.ref;
+  const base = p.base.ref;
+
+  // pr-daemon's own PR, labelled by hand (or by a label-copying action): the
+  // issue's own build owns this branch, and its stack row must keep saying so.
+  const existing = store.stack(repo.name, branch);
+  if (existing && existing.issue !== n) {
+    store.event(`#${n} is pr-daemon's own PR for #${existing.issue}; nothing to adopt`, job.id);
+    return;
+  }
+  // A fork's branch isn't in this remote: no worktree to make from it, and
+  // nothing could be pushed back to it either.
+  if (p.head.repo?.full_name !== repo.name) {
+    const where = p.head.repo?.full_name ?? "a repository that has since been deleted";
+    await gh.setStatus(repo.name, n, cfg.label, "failed").catch(() => {});
+    await gh.comment(repo.name, n, `🚫 **pr-daemon** can't work on this: its branch \`${branch}\` is in \`${where}\`, not in \`${repo.name}\`. ` +
+      `pr-daemon builds a worktree from the branch and pushes fixes back to it, so the branch has to live in this repository.`);
+    throw new FailError(`PR #${n} comes from a fork (${where})`);
+  }
+  // Checked when the label was added, and again now: the title and body are
+  // the reviewer's input, and they may have been edited since.
+  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
+  if (strangers.length) {
+    const why = gh.untrustedText(strangers);
+    await gh.setStatus(repo.name, n, cfg.label, "failed").catch(() => {});
+    await gh.comment(repo.name, n, `🚫 **pr-daemon** won't work on this: ${why}. ${gh.UNTRUSTED_PR_HELP}`);
+    throw new FailError(why);
+  }
+
+  await git.ensureClone(repo.name);
+  await gh.ensureLabels(repo.name, cfg.label);
+  const wt = await git.ensureBranchWorktree(repo.name, branch);
+  ctx.current_wt = wt;
+  store.update(job.id, { branch, pr: n });
+  const out = git.outDir(repo.name, branch);
+  mkdirSync(out, { recursive: true });
+  await gh.setStatus(repo.name, n, cfg.label, "working");
+
+  // The stack first, and say hello with its address straight away: the point
+  // of labelling a PR is to open its public preview, and the check below can
+  // take a while.
+  const s = await bringUp(ctx, { branch, wt, issue: n, pr: n });
+  if (!s.ok) store.event(`\`${repo.up}\` failed: ${lastLine(s.error)}`, job.id, "warn");
+  if (!existing) {
+    await gh.comment(repo.name, n, `🛠️ **pr-daemon** picked this up (you labelled it \`${cfg.label}\`).
+- preview: ${s.ok ? publicUrl(cfg, branch) || s.url || "started, but it printed no URL" : `\`${repo.up}\` failed — see the status page`}
+- branch: \`${branch}\` (yours — pr-daemon won't delete it or close this PR)
+- next: ${repo.check ? `\`${repo.check}\`, fixing it if it fails, then a review` : "a review"}
+- status: ${ctx.statusUrl} (on the pr-daemon machine)
+
+Ask for changes with a comment starting \`/pr-daemon\`. Remove the \`${cfg.label}\` label to stop and shut the preview down.`);
+  }
+
+  // Drive it green before anyone reviews it. Same rounds as a build's, and
+  // the same rule: fix the cause, never the check. A job that paused mid-round
+  // re-runs the check first, so a resume that is already green costs nothing.
+  const vars = {
+    REPO: repo.name, BRANCH: branch, BASE: base, PR_NUMBER: n, PR_TITLE: p.title, PR_URL: p.html_url,
+    OUT: out, UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
+    STACK_NOTE: s.ok
+      ? `The stack for this branch is already running at ${stackWhere(cfg, branch, s)} Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
+      : upFailedNote(repo.up, s.error, out),
+  };
+  let result = await stack.check(repo.check, wt);
+  let summary = "";
+  let rounds = 0;
+  for (; !result.ok && rounds < cfg.agent.maxAttempts; rounds++) {
+    store.event(`\`${repo.check}\` fails; fix round ${rounds + 1} of ${cfg.agent.maxAttempts}`, job.id, "warn");
+    const text = prompt("green", { ...vars, CHECK_OUT: result.output });
+    summary = await agentStep(ctx, { prompt: text, log: agentLog({ ...job, branch })!, issue: n,
+      resume: store.job(job.id)!.session_id || undefined, fresh: text });
+    await bringUp(ctx, { branch, wt, issue: n, pr: n });   // the agent may have changed what the stack needs
+    result = await stack.check(repo.check, wt);
+  }
+
+  if (rounds) {
+    const untracked = await git.commitLeftovers(wt);
+    if (untracked.length) store.event(`left untracked (not committed): ${untracked.join(" ")}`, job.id, "warn");
+    // The session that now holds this branch's context, for a later revise or CI fix.
+    store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, builder_session: store.job(job.id)!.session_id });
+    const commits = await git.unpushed(wt, branch);
+    if (commits) await git.push(wt, branch);
+    const failing = `<details><summary>\`${repo.check}\`, still failing</summary>\n\n\`\`\`\n${result.output}\n\`\`\`\n</details>`;
+    if (result.ok) {
+      store.event(`\`${repo.check}\` passes after ${rounds} round(s); pushed ${commits} commit(s)`, job.id);
+      await gh.comment(repo.name, n, withPreview(ctx, branch, commits
+        ? `🟢 **pr-daemon** pushed ${commits} commit(s): \`${repo.check}\` passes now.\n\n${summary}`
+        : `🟢 **pr-daemon** gets \`${repo.check}\` passing with nothing to push — the failure it saw didn't reproduce.\n\n${summary}`));
+    } else {
+      store.event(`\`${repo.check}\` is still failing after ${rounds} round(s); this one is the human's`, job.id, "error");
+      await gh.comment(repo.name, n, `> [!WARNING]\n> **pr-daemon** couldn't get \`${repo.check}\` green in ${rounds} round(s)` +
+        `${commits ? `. It pushed ${commits} commit(s) on the way` : " and pushed nothing: its agent found no change it was sure of"}. ` +
+        `**The rest is yours.** It is reviewing the PR anyway.\n\n${summary}\n\n${failing}`);
+      ctx.notice = { kind: "failed", level: "warn", title: `⚠️ ${repo.name} #${n}: \`${repo.check}\` is still red`,
+        body: `${p.title} · pr-daemon gave it ${rounds} round(s) and is reviewing it anyway`, url: p.html_url };
+    }
+  }
+
+  // The review happens either way: a red check is a reason to read the code,
+  // not to skip reading it.
+  store.enqueue({ repo: repo.name, kind: "review", number: n, branch, trigger_key: `review:${repo.name}#${n}:job${job.id}` });
+  await gh.setStatus(repo.name, n, cfg.label, "in-review");
+}
+
+/**
+ * Run the project's `up` and write what it did to the stack row, which is
+ * what publishes the branch's public preview route. Idempotent by contract,
+ * so it is also how a stack is picked back up after an agent changed
+ * something it depends on.
+ */
+async function bringUp(ctx: Ctx, o: { branch: string; wt: string; issue: number; pr?: number }): Promise<stack.UpResult> {
+  const { store, repo } = ctx;
+  const r = await stack.up(repo.up, o.wt, publicEnv(ctx.cfg(), o.branch));
+  const prev = store.stack(repo.name, o.branch);
+  store.upsertStack({ repo: repo.name, branch: o.branch, issue: o.issue, worktree: o.wt, ...(o.pr ? { pr: o.pr } : {}),
+    url: r.ok ? r.url || prev?.url || "" : "", healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
+    networks: withNetworks(prev?.networks, r.networks), checked_at: Date.now() });
+  return r;
+}
+
+/**
+ * Where the reviewer can open the running branch, from the stack row the
+ * build or the adopt left behind. It has to be told: the preview address is
+ * in the PR body only for a PR pr-daemon wrote, and an adopted PR's is in a
+ * comment, which the reviewer is told not to read.
+ */
+function previewNote(ctx: Ctx, branch: string): string {
+  const s = ctx.store.stack(ctx.repo.name, branch);
+  if (!s || s.healthy !== 1) return "no stack is running for this branch, so judge it from the code alone.";
+  return stackWhere(ctx.cfg(), branch, { ok: true, url: s.url, routes: stackRoutes(s), networks: [] });
+}
+
 // ---------------------------------------------------------------- review
-// A fresh agent with no build context: it sees only the PR and the code.
+// A fresh agent with no build context: it sees only the PR, the code, and the
+// branch running at its preview address.
 export async function review(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const cfg = ctx.cfg();
   const p = await gh.pr(repo.name, job.number);
   if (p.state !== "open") return;
-  const n = issueOf(p.head.ref);
-  await git.ensureClone(repo.name);
-  const { branch, wt } = await git.ensureWorktree(repo.name, n, p.base.ref);
-  ctx.current_wt = wt;
+  const { branch, wt, issue: n } = await prWorktree(ctx, p);
   const out = join(git.outDir(repo.name, branch), `review-${job.id}`);
   mkdirSync(out, { recursive: true });
   // The repo's own CI, as it stands right now: usually still running this
   // soon after the push, which is itself worth telling the reviewer.
   const c = cfg.checks.watch ? await gh.checks(repo.name, p.head.sha).catch(() => null) : null;
   const full = prompt("review", { PR_NUMBER: job.number, REPO: repo.name, OUT: out, CHECK_CMD: repo.check || "(none)",
-    CHECKS: c ? `${c.state} (${c.summary})` : "not known" });
+    CHECKS: c ? `${c.state} (${c.summary})` : "not known", PREVIEW: previewNote(ctx, branch) });
   const text = job.session_id ? "pr-daemon paused you. Continue the review from where you left off." : full;
   await agentStep(ctx, { prompt: text, log: agentLog({ ...job, branch })!, resume: job.session_id || undefined, fresh: full, issue: n });
   const file = join(out, "review.md");
@@ -369,10 +550,7 @@ export async function revise(ctx: Ctx): Promise<void> {
   const commentId = payload(job).commentId;
   if (commentId) await gh.markComment(repo.name, commentId, "😈")
     .catch((e) => store.event(`couldn't mark comment ${commentId}: ${(e as Error).message}`, job.id, "warn"));
-  const n = issueOf(p.head.ref);
-  await git.ensureClone(repo.name);
-  const { branch, wt } = await git.ensureWorktree(repo.name, n, p.base.ref);
-  ctx.current_wt = wt;
+  const { branch, wt, issue: n } = await prWorktree(ctx, p);
   const out = git.outDir(repo.name, branch);
   const shotsDir = join(out, "screenshots");
   rmSync(shotsDir, { recursive: true, force: true });
@@ -425,10 +603,7 @@ export async function ci(ctx: Ctx): Promise<void> {
   const cfg = ctx.cfg();
   const p = await gh.pr(repo.name, job.number);
   if (p.state !== "open") { store.event(`PR #${job.number} is closed; nothing to fix`, job.id); return; }
-  const n = issueOf(p.head.ref);
-  await git.ensureClone(repo.name);
-  const { branch, wt } = await git.ensureWorktree(repo.name, n, p.base.ref);
-  ctx.current_wt = wt;
+  const { branch, wt, issue: n } = await prWorktree(ctx, p);
   store.update(job.id, { branch, pr: job.number });
   const out = git.outDir(repo.name, branch);
   mkdirSync(out, { recursive: true });
@@ -505,11 +680,8 @@ export async function merge(ctx: Ctx): Promise<void> {
   const cfg = ctx.cfg();
   const p = await gh.pr(repo.name, job.number);
   if (p.state !== "open") { store.event(`PR #${job.number} is closed; nothing to merge`, job.id); return; }
-  const n = issueOf(p.head.ref);
   const base = p.base.ref;
-  await git.ensureClone(repo.name);
-  const { branch, wt } = await git.ensureWorktree(repo.name, n, base);
-  ctx.current_wt = wt;
+  const { branch, wt, issue: n } = await prWorktree(ctx, p);
   store.update(job.id, { branch, pr: job.number });
   const out = git.outDir(repo.name, branch);
   mkdirSync(out, { recursive: true });
@@ -757,13 +929,19 @@ export async function teardown(ctx: Ctx): Promise<void> {
   // The issue or PR is closed (or about to be): its notices are no longer anyone's move.
   const gone = store.clearNotices(repo.name, [job.number, s?.pr ?? 0]);
   if (gone.length) { unnotify(gone); store.event(`cleared ${gone.length} notice(s) about #${job.number}${s?.pr ? ` / PR #${s.pr}` : ""}`, job.id); }
-  // Only ever a branch pr-daemon named for this issue.
-  if (!branch.startsWith(`${job.number}-`)) { store.event(`not deleting ${branch}: not a pr-daemon branch for #${job.number}`, job.id, "warn"); return; }
-  if (p.closePr && s?.pr && (await gh.pr(repo.name, s.pr)).state === "open") {
+  // Only ever a branch pr-daemon named for this issue: an adopted PR's branch
+  // (and the PR itself) belongs to whoever opened it, whatever happens here.
+  // An adopted stack's issue *is* its PR; a built one's never can be, since
+  // issues and PRs share one number space.
+  const adopted = !!s && s.pr === s.issue;
+  const ours = !adopted && branch.startsWith(`${job.number}-`);
+  if (p.closePr && ours && s?.pr && (await gh.pr(repo.name, s.pr)).state === "open") {
     await gh.closePr(repo.name, s.pr, `🧹 **pr-daemon** closed this: ${p.why ?? "the label was removed"}. The preview is shut down and the branch deleted (GitHub's "Restore branch" brings it back).`);
   } else if (p.closePr) {
-    await gh.comment(repo.name, job.number, `🧹 **pr-daemon** stopped: ${p.why ?? "the label was removed"}. The preview is shut down and the branch \`${branch}\` deleted.`);
+    await gh.comment(repo.name, job.number, `🧹 **pr-daemon** stopped: ${p.why ?? "the label was removed"}. The preview is shut down` +
+      `${ours ? ` and the branch \`${branch}\` deleted` : `; \`${branch}\` and this PR are untouched`}.`);
   }
+  if (!ours) { store.event(`leaving branch ${branch} on GitHub: pr-daemon didn't create it`, job.id); return; }
   const r = await gh.deleteBranch(repo.name, branch);
   store.event(r === "deleted" ? `deleted branch ${branch} on GitHub` : `branch ${branch} was already gone from GitHub`, job.id);
 }
@@ -779,10 +957,12 @@ export async function restart(ctx: Ctx): Promise<void> {
       error: `the worktree is gone (${s.worktree}); tear this down`, checked_at: Date.now() });
     throw new FailError(`the worktree ${s.worktree} no longer exists`);
   }
-  const r = await stack.up(repo.up, s.worktree, publicEnv(ctx.cfg(), s.branch));
+  const cmd = await stack.restartCommand(repo.restart, repo.up, s.worktree);
+  store.event(`restarting ${s.branch}: ${cmd}`, job.id);
+  const r = await stack.up(cmd, s.worktree, publicEnv(ctx.cfg(), s.branch));
   store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, ...routesOf(r),
     healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now() });
   if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 
-export const JOBS = { build, review, revise, ci, merge, teardown, restart } as const;
+export const JOBS = { build, adopt, review, revise, ci, merge, teardown, restart } as const;

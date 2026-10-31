@@ -16,6 +16,14 @@ pr-daemon, one process on **your own machine**, then:
 7. keeps the PR mergeable: when it conflicts with `main`, merges `main` in and
    resolves the conflicts, and hands you the risky ones
 
+**Already have a pull request?** Label *it* `agent` instead. It gets steps 2,
+3 and 5–7: the **same** app copy on the **same public preview URL** as a PR
+pr-daemon wrote, your checks driven green (an agent fixes failures and pushes
+to the branch), a review from a fresh agent, then `/pr-daemon` revisions, CI
+fixes and base merges for the rest of its life. The only thing it doesn't do
+is write a feature — the code is already there. It never force-pushes, never
+deletes your branch and never closes your PR.
+
 **You** try it, then merge it. Merging or closing the PR shuts the app copy
 down, deletes the branch and cleans up. Changed your mind? Remove the `agent`
 label and it stops and cleans up the same way. Everything runs within a **token budget** you set.
@@ -33,7 +41,8 @@ label and it stops and cleans up the same way. Everything runs within a **token 
                           stop stack, delete worktree  ◀────────────────────────────────┘
 ```
 
-Status and settings are on a local web page: **http://localhost:7377**.
+Status and settings are on a local web page: **http://localhost:7377** —
+and **http://localhost:7377/docs** draws the whole thing as state machines.
 
 > **pr-daemon acts as you.** It uses your own `gh` login, so every branch,
 > push, PR and comment it makes is made **as your GitHub user**, and the agent
@@ -59,6 +68,7 @@ Status and settings are on a local web page: **http://localhost:7377**.
 | Watch your own CI run on the PR, as usual. | If a check fails, an agent fixes it and pushes, up to twice per PR. If it's still red after that, it says so on the PR and stops. |
 | Keep merging other work into `main`. | If the PR stops merging cleanly, it merges `main` in and an agent resolves the conflicts. It pushes only once your check passes, and marks anything uncertain **needs your review**. Risky conflicts are left for you, with a comment saying why. |
 | Want changes? Comment on the PR: `/pr-daemon make the button blue` (or start it with 😈 / 👿 instead). | Makes the changes, pushes, and comments with a summary and new screenshots. |
+| Have a PR already (yours or a teammate's in this repo)? Add the **`agent`** label to the **PR**. | Starts that branch's stack, comments with the preview link, runs your `check` and has an agent fix it until it passes, then reviews the PR. Everything below applies from then on. |
 | Merge (or close) the PR. | Stops the stack, removes the worktree, and deletes the branch on GitHub. |
 | Changed your mind? Remove the **`agent`** label. | Stops any agent working on it, closes its PR, stops the stack, removes the worktree, and deletes the branch. |
 
@@ -73,6 +83,48 @@ Status and settings are on a local web page: **http://localhost:7377**.
   issue, and everything it does on GitHub is done as you. An issue someone
   else wrote is refused with a comment: open your own issue that says the
   same thing, and label that.
+
+### Labelling a PR that already exists
+
+The `agent` label works on a pull request too, whoever opened it. The branch
+gets the full treatment:
+
+1. **The stack, on its public preview URL.** A worktree, your `up` command with
+   the same environment a build gets, and so the same
+   `https://<branch>.<domain>` — plus a host for each service the stack
+   declares — with the same health probes and automatic restart. pr-daemon
+   comments with the address as soon as it is up, before anything else.
+2. **Driven green.** It runs your `check`. If that fails, an agent fixes the
+   cause (never the check: it is told not to delete or weaken tests, not to
+   refactor, and not to revert your work), commits, and pr-daemon pushes —
+   up to `agent.max_attempts` rounds, as a build gets. It comments with what
+   it changed. If it can't get there, it says so on the PR and leaves the rest
+   to you.
+3. **Reviewed** by a fresh agent that sees only the PR, the code, and that
+   running preview.
+
+After that the PR is watched like any other: `/pr-daemon` comments revise it,
+a red CI run gets a fix, and a base branch that has moved on is merged in.
+
+The one thing it never does is write a feature: the code is already in the PR.
+If you want the review without the fixing, set `check = ""` for that repo (or
+leave the `pr-daemon-check` recipe out) — then nothing but the review touches
+the branch.
+
+It is **your** branch, so:
+
+- the branch is never deleted and the PR is never closed, not even when you
+  take the label off — that only shuts the preview down;
+- nothing is ever force-pushed: fixes and merges are ordinary commits on top,
+  and a push that would clobber work you pushed meanwhile just fails;
+- the PR's own description is left alone: the preview link comes as a comment.
+
+Two things it won't take on, each said on the PR: a branch **from a fork**
+(pr-daemon needs a branch in the repository itself, to make a worktree from and
+push fixes back to), and a PR whose **title or body** was written by somebody
+outside `allowed_users` — the same rule as for issues, because that text is
+what the reviewing agent is given. The diff is agent input too, so this is for
+repositories whose writers you trust; see [Safety](#safety).
 
 ---
 
@@ -146,6 +198,10 @@ Your project needs two commands:
 
 A third, `check`, is optional: whatever must pass before a PR opens, such as
 type-check, lint and tests. Leave it out to trust the agent's own testing.
+A fourth, `restart`, is also optional: what the status page's **Restart**
+button runs, so a running stack picks up a changed environment (a new API key,
+say). It prints what `up` prints. Without it, Restart runs `up` again, and that
+leaves a stack that already answers as it was.
 
 **Any shell command will do.** Each is run with `bash -lc` from the root of the
 branch's worktree, so all of these are fine:
@@ -158,7 +214,7 @@ down = "docker compose down -v --remove-orphans"
 check = "npm test"
 ```
 
-The defaults (`just pr-daemon-up` / `-down` / `-check`) just mean that if you
+The defaults (`just pr-daemon-up` / `-down` / `-check` / `-restart`) just mean that if you
 add recipes with those names to your project, there's nothing to configure.
 [`examples/justfile`](examples/justfile) is one to copy (`just contract`
 prints it).
@@ -230,6 +286,13 @@ labelled `agent:failed`, and the comment says why and how to do it yourself.
 You can also reply `/pr-daemon <how to resolve it>` to have the agent try
 again with your guidance. The status page's **Merge** column shows each PR's
 state at a glance.
+
+## How it works, as state machines
+
+**http://localhost:7377/docs** draws the lifecycle: what the `agent` label
+starts on an issue and on a PR (and what each one gets), what watches the PR
+while it waits for you, what one job does, and what one preview stack does.
+It's the quickest way to see where something is stuck.
 
 ## The status page
 
@@ -469,6 +532,7 @@ it at one.
   |---|---|---|
   | The `agent` label | who added it | ignored (shown as `ignored` on the status page) |
   | The issue's title and body | who wrote it, everyone who edited the body, everyone who renamed it: when the label is added, and again each time a build starts or resumes | refused, with a comment on the issue saying who and why |
+  | A labelled PR's title and body | the same, when the label is added and again when it is taken on | refused, with a comment on the PR saying who and why |
   | A `/pr-daemon` comment | who wrote it | ignored |
   | The PR conversation given to a revision | each comment's and review's author | left out of the prompt (the event log says how many) |
 
@@ -490,7 +554,9 @@ it at one.
   conversation itself, and the prompts tell it not to fetch comments on its
   own. That last part is a prompt, not a guarantee: the agent has `gh`, so it
   *could* read other issues and comments, and the project's own files (code,
-  READMEs, dependencies) reach it too. On a **private repository** everyone
+  READMEs, dependencies) reach it too. **Labelling a PR** adds that PR's diff
+  to the list: the reviewing agent reads it, and `up` runs the branch's code on
+  your machine. Label one the way you'd check out and run the branch yourself. On a **private repository** everyone
   who can write any of that is someone you already trust, which is why it's
   the recommended setup. On a public one the checks keep strangers' issues and
   comments out of the prompts; review what you merge as you would any

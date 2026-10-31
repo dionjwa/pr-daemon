@@ -12,7 +12,11 @@ the code. The working directory is a checkout of the PR branch.
    issue asked for; security problems; missing or weak tests; needless
    complexity. Run `{{CHECK_CMD}}` or tests if that helps you verify a claim.
    Do not edit, commit or push anything.
-4. The repository's own checks on this PR are **{{CHECKS}}** right now. Don't
+4. The preview: {{PREVIEW}}
+   Anything that is easier to judge in the running app than in the diff
+   (does the screen actually render, does the flow work) is worth looking at
+   there. Change nothing, and don't restart the stack.
+5. The repository's own checks on this PR are **{{CHECKS}}** right now. Don't
    block on a run that is still going, and don't ask for a fix to a failing
    check: pr-daemon watches them itself and puts an agent on a failure. Review
    the change on its merits.

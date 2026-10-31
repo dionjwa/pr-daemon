@@ -5,6 +5,74 @@ system works see CLAUDE.md; for the roadmap see PLAN.md.
 
 ---
 
+## 2026-10-30: the label on a PR (`adopt`)
+
+**"If I label a PR that didn't start here, review it and give it a stack."**
+The label only ever meant an issue before, and `gh.labeledIssues()` filtered
+PRs out of the list GitHub already returns.
+
+Now a labelled PR queues `adopt` (`pipeline.adopt()`): worktree, `up` with the
+same `publicEnv` a build gets — so the branch is on its **public preview
+route**, with the same health probes and auto-restart — then the project's
+`check`, with `agent.max_attempts` fix rounds to drive it green, committed and
+pushed, and then a `review`. The build's steps minus writing the feature.
+Neither the preview nor the check is the part that gets skipped: trying the
+public URL is the whole point of having one, and nobody should be asked to
+review a red PR.
+
+`prompts/green.md` is the fix-round prompt, and it is mostly restraint,
+because the code belongs to someone else: fix the cause and never the check,
+the smallest diff the failure forces, no refactors, never revert the author,
+and "a human has to decide this" is an allowed answer. If the rounds change
+nothing, or end still red, the PR says so (a `> [!WARNING]` block with the
+output) — and it is **still reviewed**. A red check is a reason to read the
+code, not an excuse to skip it. That also means `adopt` is an agent kind: it
+spends tokens, takes an agent slot, and pauses and resumes like any other. After that the PR
+is indistinguishable from one pr-daemon opened: `/pr-daemon` comments revise
+it, red CI gets a fix, a base that moved on is merged in, and closing it (or
+taking the label off) tears the stack down. It is not an agent job, so it
+costs nothing and waits on a chore slot, not the budget gate; the review it
+queues is where the tokens go.
+
+What it refuses, each with a comment on the PR: a **fork** (there is no local
+branch to make a worktree from, and no way to push a fix back), and a title or
+body with a writer outside `allowed_users` — the same provenance rule as an
+issue's, because that text is the reviewer's input. `gh.provenance()` now asks
+for `issueOrPullRequest`, so one query covers both.
+
+**It stays somebody else's PR.** Teardown deletes neither the branch nor the
+PR, nothing is force-pushed, and the PR description is left alone (the preview
+link arrives as a comment). "Is this ours?" used to be
+`branch.startsWith("<n>-")`; it is now that *and* `stack.pr !== stack.issue`,
+which can't collide — an adopted stack's issue **is** its PR number, and
+issues and PRs share one number space, so a built branch's two numbers never
+match.
+
+The reviewer is now told where that preview is (`previewNote()` →
+`{{PREVIEW}}` in `prompts/review.md`). It had no way to find out: the address
+is in the PR body only when pr-daemon wrote the body, and an adopted PR's is
+in a comment, which the review prompt tells the agent not to read.
+
+**`GET /docs`** (`src/docs.html`, linked from the status page nav) draws all
+of this as four mermaid state machines — the labelled issue or PR, the
+in-review watch loop, one job, one stack — with a table of what each entry
+point gets. Mermaid comes from a CDN and fails soft: an unrendered diagram is
+still its own source, in a code block. Two things that bit while writing it: a
+`;` in a mermaid edge label is a statement separator (it silently turned the
+rest of the label into stray nodes), and the label machine has no
+in-review → working edge, because only `build` and `adopt` ever set
+`agent:working`.
+
+Learned on the way: the four PR jobs each guessed their worktree from
+`Number(branch.split("-")[0])`, which is `NaN` for any branch pr-daemon didn't
+name. A `/pr-daemon` comment on such a PR would have made a *new* branch
+called `NaN-…` and pushed it. They now share `prWorktree()`, which takes the
+PR's own head ref, and `issueForPr()` is the one place that maps a branch to
+the number its budget and status label belong to (the stack row first, the
+`<issue>-` prefix as fallback).
+
+---
+
 ## 2026-10-25: keeping PRs mergeable (`[merge]`)
 
 **"Can it merge main in and deal with the conflicts?"** Before this, a PR that

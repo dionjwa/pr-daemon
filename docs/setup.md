@@ -8,7 +8,7 @@ Status page: {{STATUS_URL}} · config file: {{CONFIG_PATH}}
 
 ## What pr-daemon runs
 
-Three command lines, per repository:
+Four command lines, per repository:
 
     up       REQUIRED   start this branch's whole stack, and print its local URL
              on this machine: {{UP}}
@@ -16,6 +16,8 @@ Three command lines, per repository:
              on this machine: {{DOWN}}
     check    optional   must pass before a PR opens; "" trusts the agent's testing
              on this machine: {{CHECK}}
+    restart  optional   restart a running stack (the status page's Restart button)
+             on this machine: {{RESTART}}
 
 **They can be any shell command.** Each one is run as
 
@@ -60,6 +62,17 @@ command that exits non-zero is a failure.
    ports, container names, volumes and database names from the branch name
    (`git rev-parse --abbrev-ref HEAD`). Nothing may collide.
 5. **Never open a browser**, never prompt, never wait on a TTY. There isn't one.
+
+### `restart` — restart a running stack (optional)
+
+The status page's **Restart** button, and the automatic restart of a stack
+that stopped answering, run this. Because `up` is idempotent, running it on a
+stack that still answers changes nothing, so a key added to a secrets file
+since the stack started would never be read. `restart` stops whatever needs to
+pick up a new environment (usually just the app server; containers and data
+can stay) and then starts it the way `up` does. **Its output follows `up`'s
+rules:** the URL last, plus any `PR_DAEMON_ROUTE` lines; ending with the `up`
+command does both. Without one, the button runs `up` again.
 
 ### `down` — stop it and delete its data
 
@@ -244,6 +257,7 @@ Then start a second branch's stack at the same time and confirm both answer.
 - [ ] the repo is listed in {{CONFIG_PATH}} as a `[[repos]]` block
 - [ ] `pr-daemon doctor` is all ✓
 
-Then label an issue **{{LABEL}}** and watch {{STATUS_URL}}. Ask for changes with
+Then label an issue **{{LABEL}}** (or an existing pull request, to get its
+stack and a review instead of a build) and watch {{STATUS_URL}}. Ask for changes with
 a pull request comment starting `{{COMMAND}}` (or 😈, 👿, `:smiling_imp:`, `:imp:`, `:demon:`). A human merges; pr-daemon never
 does.
