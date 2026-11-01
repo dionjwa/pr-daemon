@@ -27,7 +27,6 @@ export function setupDoc(cfg: Config, command: string): string {
   return render(readFileSync(DOC, "utf8"), {
     STATUS_URL: `http://localhost:${cfg.port}/`, CONFIG_PATH: p.config, LABEL: cfg.label, COMMAND: command,
     UP: r?.up ?? "just pr-daemon-up", DOWN: r?.down ?? "just pr-daemon-down", CHECK: r?.check || "just pr-daemon-check",
-    RESTART: r?.restart || "just pr-daemon-restart",
     HOME: p.home, REPOS: p.repos, WORKTREES: p.worktrees, OUT: p.out,
     MAX_ATTEMPTS: cfg.agent.maxAttempts,
     CI_ROUNDS: cfg.checks.watch && cfg.checks.fix ? cfg.checks.maxRounds : 0,

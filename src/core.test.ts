@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
 import { DEFAULT_TOML, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
-import { issueForPr, render } from "./pipeline.ts";
+import { issueForPr, render, restart, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
 import { isListed, isPullRequest, parseCommand, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
+import * as stack from "./stack.ts";
 
 test("human amounts", () => {
   assert.equal(parseAmount("40M"), 40_000_000);
@@ -438,6 +439,22 @@ test("run() timeout resolves even when children hold the pipes", async () => {
   assert.notEqual(r.code, 0);
   assert.match(r.stderr, /timed out/);
   assert.ok(Date.now() - t0 < 4000, `took ${Date.now() - t0}ms`);
+});
+
+test("restart: down, then up, even when down fails", async () => {
+  const wt = mkdtempSync(join(tmpdir(), "prd-"));
+  const store = new Store(openDb(join(wt, "t.db")));
+  const cfg = parseConfig('[[repos]]\nname = "o/r"\n');
+  store.upsertStack({ repo: "o/r", branch: "9-x", issue: 9, worktree: wt, url: "http://old" });
+  const id = store.enqueue({ repo: "o/r", kind: "restart", number: 9, branch: "9-x", trigger_key: "k" })!;
+  const go = (down: string) => restart({ store, cfg: () => cfg, job: store.job(id)!,
+    repo: { ...cfg.repos[0], down, up: "echo up >> log; echo http://new" } } as unknown as Ctx);
+  await go('echo "down keep=$PR_DAEMON_KEEP_DATA" >> log');
+  await go("echo down >> log; exit 1");
+  assert.equal(readFileSync(join(wt, "log"), "utf8"), "down keep=1\nup\ndown\nup\n");
+  await stack.down('echo "down keep=${PR_DAEMON_KEEP_DATA:-no}" > log', wt);   // what teardown calls: deletes
+  assert.equal(readFileSync(join(wt, "log"), "utf8"), "down keep=no\n");
+  assert.equal(store.stack("o/r", "9-x")!.url, "http://new");
 });
 
 test("run() timeout kills a detached command's whole group", async () => {

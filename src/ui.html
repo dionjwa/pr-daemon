@@ -408,7 +408,7 @@ function renderStacks() {
           : `<span class="muted">${S.checks?.watch ? "—" : "not watched"}</span>`}</td>
         <td class="hide-sm small">${mergeCell(s)}</td>
         <td class="hide-sm small muted">${ago(s.checked_at)}</td>
-        <td class="actions">${btn(`restart|${id}`, "Restart")}${btn(`teardown|${id}`, "Tear down", "danger")}</td></tr>`;
+        <td class="actions">${btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${btn(`teardown|${id}`, "Tear down", "danger")}</td></tr>`;
       if (!openStacks.has(id)) return row;
       // Expanded: every address this stack has, and what each one really is.
       // With a preview domain the app is wired for its public origin, so the
@@ -531,7 +531,7 @@ document.addEventListener("click", async (ev) => {
   if (b) {
     ev.stopPropagation();
     const key = b.dataset.act;
-    const destructive = key.startsWith("cancel-") || key.startsWith("teardown|") || key.startsWith("retry-");
+    const destructive = key.startsWith("cancel-") || key.startsWith("teardown|") || key.startsWith("restart|") || key.startsWith("retry-");
     if (destructive && !armed.has(key)) {            // confirm by clicking twice, no browser dialogs
       armed.set(key, setTimeout(() => { armed.delete(key); render(); }, 3000)); render(); return;
     }

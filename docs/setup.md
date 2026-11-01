@@ -8,7 +8,7 @@ Status page: {{STATUS_URL}} · config file: {{CONFIG_PATH}}
 
 ## What pr-daemon runs
 
-Four command lines, per repository:
+Three command lines, per repository:
 
     up       REQUIRED   start this branch's whole stack, and print its local URL
              on this machine: {{UP}}
@@ -16,8 +16,6 @@ Four command lines, per repository:
              on this machine: {{DOWN}}
     check    optional   must pass before a PR opens; "" trusts the agent's testing
              on this machine: {{CHECK}}
-    restart  optional   restart a running stack (the status page's Restart button)
-             on this machine: {{RESTART}}
 
 **They can be any shell command.** Each one is run as
 
@@ -63,22 +61,24 @@ command that exits non-zero is a failure.
    (`git rev-parse --abbrev-ref HEAD`). Nothing may collide.
 5. **Never open a browser**, never prompt, never wait on a TTY. There isn't one.
 
-### `restart` — restart a running stack (optional)
-
-The status page's **Restart** button, and the automatic restart of a stack
-that stopped answering, run this. Because `up` is idempotent, running it on a
-stack that still answers changes nothing, so a key added to a secrets file
-since the stack started would never be read. `restart` stops whatever needs to
-pick up a new environment (usually just the app server; containers and data
-can stay) and then starts it the way `up` does. **Its output follows `up`'s
-rules:** the URL last, plus any `PR_DAEMON_ROUTE` lines; ending with the `up`
-command does both. Without one, the button runs `up` again.
-
 ### `down` — stop it and delete its data
 
 Stop this branch's services and delete its volumes and data. It runs when the
 PR or the issue is closed, and before the worktree is removed. It must be safe
 to run when nothing is up.
+
+A restart is this followed by `up`: the status page's **Restart** button, and
+the automatic restart of a stack that stopped answering. For a restart, and
+only then, pr-daemon sets `PR_DAEMON_KEEP_DATA=1`. **Honour it:** stop the
+services as usual but keep the volumes and data, so the branch's database
+survives. Without it, delete everything. With docker compose:
+
+    docker compose -p "<project>" down --remove-orphans $([ -n "${PR_DAEMON_KEEP_DATA:-}" ] || echo -v)
+
+A project that ignores the variable still works, but loses its data on every
+restart. Either way `up` runs next, so it must start cleanly both from nothing
+and on the data a previous run left: migrations and seeds have to be safe to
+run again.
 
 With docker compose, use `down -v --remove-orphans` so volumes **and the
 project's networks** go with it. Docker's default address pool only fits about
@@ -251,6 +251,8 @@ Then start a second branch's stack at the same time and confirm both answer.
 - [ ] `down` deletes the branch's data, networks included, and is safe when nothing runs
 - [ ] `check` (if any) is green on a clean checkout
 - [ ] nothing prompts, and nothing opens a browser
+- [ ] `down` keeps the data when `PR_DAEMON_KEEP_DATA` is set and deletes it otherwise, and
+      `up` starts cleanly on data that's already there
 - [ ] if previews are on: the app uses `PR_DAEMON_PUBLIC_URL` as its origin, every
       backend the browser calls is declared with `PR_DAEMON_ROUTE` and reached at
       its public service URL, and the public URL works in a browser with a clean console

@@ -251,7 +251,8 @@ stateDiagram-v2
   <div class="pad">
     <p>Two probes, because they answer different questions: the stack's own address says whether the app is
       running, and the public preview URL says whether a person can use it. Only the first is something a restart
-      can fix.</p>
+      can fix. A restart is <code>down</code> then <code>up</code>, with <code>PR_DAEMON_KEEP_DATA=1</code> set for
+      <code>down</code>: the stack's data survives if the project honours it, and goes if it doesn't.</p>
     <figure>
 <pre class="mermaid">
 stateDiagram-v2
@@ -268,7 +269,7 @@ stateDiagram-v2
   Unknown --> Down : up failed, or nothing answers
   Up --> Down : it stopped answering here
   Up --> Degraded : it answers here, the public URL does not
-  Down --> Restarting : stacks.auto_restart
+  Down --> Restarting : stacks.auto_restart (down, then up)
   Restarting --> Up : the restart worked
   Restarting --> Down : it did not
   Degraded --> Up : you fix DNS, Caddy or proxy_host

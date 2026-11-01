@@ -154,10 +154,17 @@ A human always merges.
   `per_issue` cap. Hitting the window limit pauses and auto-resumes. Hitting
   the per-issue cap pauses until a human presses Resume.
 - **Portable:** a project only adds `pr-daemon-up` (start in the background,
-  print the URL last) and `pr-daemon-down`. `pr-daemon-check` is optional, and so is
-  `pr-daemon-restart` (the Restart button; without it the button re-runs the
-  idempotent `up`, which leaves a running stack alone). Every
+  print the URL last) and `pr-daemon-down`. `pr-daemon-check` is optional. Every
   command can be overridden per repo.
+- **A restart is `down` then `up`, for every project.** Not a per-project
+  command: that was tried and dropped as too complicated for each stack to
+  implement. `up` alone won't do, because it leaves a running stack as it was.
+  `down` gets `PR_DAEMON_KEEP_DATA=1` on a restart and on nothing else, an
+  environment variable because `down` is an arbitrary command line and a flag
+  would break the ones that don't expect it. Deleting stays the default: a
+  project that ignores it loses the branch's data on every restart, automatic
+  ones too, so the button confirms and `pollHealth()` won't queue one while
+  work is on the branch.
 - **Public previews:** the owner routes `*.<domain>` (DNS plus ports 80/443) to
   the machine. pr-daemon owns Caddy (binary or Docker) and the routing.
 - **Notifications mean "your move".** `Daemon.attention()` records a notice

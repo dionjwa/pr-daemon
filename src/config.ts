@@ -16,7 +16,6 @@ export interface RepoConfig {
   up: string;            // start this branch's stack; last line of output = preview URL
   down: string;          // stop it
   check: string;         // "" = no harness check (trust the agent)
-  restart: string;       // the Restart button; "" or a missing recipe = run `up` again
   /** Host header the app receives through the preview proxy: the public one, or its local one. */
   proxyHost: "public" | "upstream";
 }
@@ -254,7 +253,7 @@ admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
 #
 # The settings, with their defaults.
 #
-# up, down, check and restart are ANY shell command: each is run with bash -lc from the
+# up, down and check are ANY shell command: each is run with bash -lc from the
 # root of the branch's worktree. "npm run preview", "docker compose up -d
 # --wait && echo http://localhost:3000", "make up", "./scripts/up.sh" — all
 # fine. The defaults name just recipes only by convention.
@@ -264,10 +263,8 @@ admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
 #
 #   base = ""                       # branch to build from; unset = the repo's default branch
 #   up = "just pr-daemon-up"        # start the stack in the background; print its URL last
-#   down = "just pr-daemon-down"    # stop it and delete its data
+#   down = "just pr-daemon-down"    # stop it and delete its data (a restart sets PR_DAEMON_KEEP_DATA=1: keep it)
 #   check = "just pr-daemon-check"  # must pass before a PR opens; "" = trust the agent
-#   restart = "just pr-daemon-restart"  # the Restart button: restart a running stack so it picks up
-#                                   # new env/secrets; prints like up. "" or missing = run up again
 #   proxy_host = "public"           # Host header the app gets via the preview URL: "public" (the
 #                                   # branch's public host) or "upstream" (its local host, for
 #                                   # dev servers that reject unknown hosts)
@@ -395,7 +392,6 @@ export function parseConfig(text: string): Config {
         up: str(r.up, "just pr-daemon-up"),
         down: str(r.down, "just pr-daemon-down"),
         check: str(r.check, "just pr-daemon-check"),
-        restart: str(r.restart, "just pr-daemon-restart"),
         proxyHost: oneOf(r.proxy_host, ["public", "upstream"], "public", `${at}: proxy_host`),
       };
     }),

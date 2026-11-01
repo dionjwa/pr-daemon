@@ -5,6 +5,22 @@ system works see CLAUDE.md; for the roadmap see PLAN.md.
 
 ---
 
+## 2026-11-01: a restart is `down` then `up`
+
+The optional per-project `restart` command is gone: too complicated for each
+stack to implement. The `restart` job now runs `down`, then `up`, so a changed
+environment is always read. `down` deletes data, so Restart confirms with a
+second click, and the health poll no longer queues a restart while other work
+is on the branch (it could run behind that work, on a stack that had recovered).
+
+For a restart `down` gets `PR_DAEMON_KEEP_DATA=1`, so a project can keep its
+volumes. It's a variable, not a flag, because `down` is any command line: an
+extra argument fails `just` recipes and `docker compose` alike, and a variable
+is ignored by anything that doesn't read it. Each configured repo got an issue
+to honour it.
+
+---
+
 ## 2026-10-30: the label on a PR (`adopt`)
 
 **"If I label a PR that didn't start here, review it and give it a stack."**

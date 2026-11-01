@@ -194,14 +194,10 @@ Your project needs two commands:
 | Command | What it must do |
 |---|---|
 | `up` | Start **this branch's** whole stack **in the background**, wait until it answers, then **print its URL as the last line**. If it's already running, just print the URL. |
-| `down` | Stop this branch's stack and delete its data. |
+| `down` | Stop this branch's stack and delete its data. On a restart `PR_DAEMON_KEEP_DATA=1` is set: keep the data then. |
 
 A third, `check`, is optional: whatever must pass before a PR opens, such as
 type-check, lint and tests. Leave it out to trust the agent's own testing.
-A fourth, `restart`, is also optional: what the status page's **Restart**
-button runs, so a running stack picks up a changed environment (a new API key,
-say). It prints what `up` prints. Without it, Restart runs `up` again, and that
-leaves a stack that already answers as it was.
 
 **Any shell command will do.** Each is run with `bash -lc` from the root of the
 branch's worktree, so all of these are fine:
@@ -214,7 +210,7 @@ down = "docker compose down -v --remove-orphans"
 check = "npm test"
 ```
 
-The defaults (`just pr-daemon-up` / `-down` / `-check` / `-restart`) just mean that if you
+The defaults (`just pr-daemon-up` / `-down` / `-check`) just mean that if you
 add recipes with those names to your project, there's nothing to configure.
 [`examples/justfile`](examples/justfile) is one to copy (`just contract`
 prints it).
@@ -323,10 +319,12 @@ http://localhost:7377. It's only reachable from your own machine.
   **up** (the address people open answers with the app),
   **degraded** (the app is running here, but its preview URL doesn't serve it —
   usually DNS, the proxy, or the Host the app is given, and the row says which),
-  and **down** (the app isn't answering at all; it's restarted automatically).
+  and **down** (the app isn't answering at all; it's restarted automatically, the same way as the Restart button).
   Nothing is stopped on a timer: a stack goes away when its PR or issue closes,
   when the label comes off, or when you press Tear down.
-  Buttons: **Restart**, **Tear down** (stops the stack and removes the worktree,
+  Buttons: **Restart** (runs `down`, then `up`, so the stack picks up a changed
+  environment such as a new API key; its data goes too unless `down` honours
+  `PR_DAEMON_KEEP_DATA`), **Tear down** (stops the stack and removes the worktree,
   but keeps the branch and any PR open).
 - **Events:** what happened, newest first.
 - **Pause:** stops new jobs from starting. Running ones finish.

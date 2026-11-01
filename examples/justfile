@@ -29,17 +29,10 @@ pr-daemon-up:
     echo "PR_DAEMON_ROUTE api http://localhost:8081"
     echo "http://localhost:8080"
 
-# REQUIRED. Stop this branch's stack and delete its data.
+# REQUIRED. Stop this branch's stack and delete its data. A restart sets
+# PR_DAEMON_KEEP_DATA=1 to keep the data: everything else about it is the same.
 pr-daemon-down:
-    docker compose -p "app-$(git rev-parse --abbrev-ref HEAD | tr -c 'a-z0-9\n' '-')" down -v --remove-orphans
-
-# OPTIONAL. The status page's Restart button: restart a running stack so it
-# picks up a changed environment (a new secret). Prints what pr-daemon-up prints;
-# ending with it does that. Without this recipe the button runs pr-daemon-up,
-# which leaves a stack that already answers as it was.
-pr-daemon-restart:
-    docker compose -p "app-$(git rev-parse --abbrev-ref HEAD | tr -c 'a-z0-9\n' '-')" restart >&2
-    just pr-daemon-up
+    docker compose -p "app-$(git rev-parse --abbrev-ref HEAD | tr -c 'a-z0-9\n' '-')" down --remove-orphans $([ -n "${PR_DAEMON_KEEP_DATA:-}" ] || echo -v)
 
 # OPTIONAL. Must pass before a PR is opened (leave it out to trust the agent's testing).
 pr-daemon-check:

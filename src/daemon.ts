@@ -423,10 +423,12 @@ export class Daemon {
       if (h.state !== "up") store.event(`stack ${s.branch} is ${h.state}: ${error}`, null, "warn");
       else if (was !== "unknown") store.event(`stack ${s.branch} is serving again`, null, "info");
     }
-    // A restart (the project's restart command, or `up`) can only help when the stack itself is
-    // down. A preview URL that doesn't reach a running stack is the proxy's
-    // or the app's Host handling, and restarting would just lose the app.
-    if (h.state === "down" && cfg.stacks.autoRestart) {
+    // A restart can only help when the stack itself is down. A preview URL
+    // that doesn't reach a running stack is the proxy's or the app's Host
+    // handling, and restarting would just lose the app. Nor while work is on
+    // the branch: its stack may be mid-`up`, and a restart queued behind that
+    // work would run `down` on a stack that has since come back.
+    if (h.state === "down" && cfg.stacks.autoRestart && !store.pendingOn(repo, s.branch, 0)) {
       const id = store.enqueue({ repo, kind: "restart", number: s.issue, branch: s.branch, trigger_key: `restart:${repo}:${s.branch}:${Math.floor(Date.now() / cfg.stacks.healthEveryMs)}` });
       if (id) store.event(`stack ${s.branch} isn't answering; queued restart`, id, "warn");
     }
