@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { HOME } from "./config.ts";
-import { must, run, slugify } from "./util.ts";
+import { must, run, sleep, slugify } from "./util.ts";
 
 const key = (repo: string) => repo.replace("/", "__");
 export const repoDir = (repo: string) => join(HOME, "repos", key(repo));
@@ -11,17 +11,41 @@ export const worktreeRoot = (repo: string) => join(HOME, "worktrees", key(repo))
 export const outDir = (repo: string, branch: string) => join(HOME, "out", key(repo), branch);
 export const refsDir = (repo: string, branch: string) => join(HOME, "refs", key(repo), branch);
 
-const git = (dir: string, ...args: string[]) => must("git", ["-C", dir, ...args]);
+// Every worktree shares the clone's .git (config, refs), and jobs on different
+// branches of one repo run at once, so git's lock files can collide: two merge
+// jobs started together both rewrote .git/config and one failed with "could
+// not lock config file". A command that hits a lock did nothing, so try again.
+const LOCKED = /could not lock config file|cannot lock ref|\.lock'?: File exists/i;
+async function git(dir: string, ...args: string[]): Promise<string> {
+  for (let i = 0; ; i++) {
+    try { return await must("git", ["-C", dir, ...args]); }
+    catch (e) { if (i >= 5 || !LOCKED.test((e as Error).message)) throw e; await sleep(200 * 2 ** i); }
+  }
+}
 
-export async function ensureClone(repo: string): Promise<string> {
+const HELPERS = ["", "!gh auth git-credential"];
+const syncing = new Map<string, Promise<string>>();
+
+/** Clone (once) and fetch. One at a time per repo: it writes the shared config and refs. */
+export function ensureClone(repo: string): Promise<string> {
+  const next = (syncing.get(repo) ?? Promise.resolve("")).catch(() => "").then(() => syncClone(repo));
+  syncing.set(repo, next);
+  return next;
+}
+
+async function syncClone(repo: string): Promise<string> {
   const dir = repoDir(repo);
   if (!existsSync(join(dir, ".git"))) {
     mkdirSync(join(HOME, "repos"), { recursive: true });
     await must("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
       "clone", "-q", `https://github.com/${repo}.git`, dir]);
   }
-  await git(dir, "config", "--replace-all", "credential.https://github.com.helper", "");
-  await git(dir, "config", "--add", "credential.https://github.com.helper", "!gh auth git-credential");
+  // Reading takes no lock: only write the helpers when they aren't already set.
+  const have = await run("git", ["-C", dir, "config", "--get-all", "credential.https://github.com.helper"]);
+  if (have.stdout.replace(/\n$/, "").split("\n").join("\0") !== HELPERS.join("\0")) {
+    await git(dir, "config", "--replace-all", "credential.https://github.com.helper", HELPERS[0]);
+    await git(dir, "config", "--add", "credential.https://github.com.helper", HELPERS[1]);
+  }
   await git(dir, "fetch", "-q", "--prune", "origin");
   await git(dir, "worktree", "prune");
   return dir;

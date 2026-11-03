@@ -41,6 +41,7 @@
   th { font-size: 12px; font-weight: 500; color: var(--ink-3); }
   tr:last-child td { border-bottom: 0; }
   tr.job { cursor: pointer; } tr.job:hover td { background: color-mix(in srgb, var(--chip) 60%, transparent); }
+  tr.job.target td { background: color-mix(in srgb, var(--info) 14%, transparent); }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); color: var(--ink-2); white-space: nowrap; }
   .s-running { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
   .s-queued { color: var(--ink-2); }
@@ -274,6 +275,7 @@ const api = (path, method = "GET", body) => fetch(path, { method, headers: { "co
 
 let S = null;
 const open = new Set();          // expanded job rows
+let target = null;               // a #job-N link (a notice) to scroll to once its row exists
 const openStacks = new Set();    // expanded stack rows ("repo|branch")
 const armed = new Map();         // confirm-twice buttons: key → timeout
 
@@ -353,6 +355,12 @@ name = "your-org/website"</pre>`);
     }).join("")}</tbody></table>` : `<div class="empty">Nothing yet. Label an issue <span class="badge">${esc(S.label)}</span> to build it, or a PR to have it reviewed.</div>`;
 
   for (const cell of document.querySelectorAll("[data-tx]")) attachTx(Number(cell.dataset.tx), cell);
+  // The rows are rendered after load, so the browser's own jump to #job-N finds nothing.
+  if (target) {
+    const el = document.getElementById(`job-${target}`);
+    if (el) { el.scrollIntoView({ block: "center" }); target = null; }
+  }
+  for (const r of document.querySelectorAll("tr.job")) r.classList.toggle("target", location.hash === `#${r.id}`);
 
   renderStacks();
 
@@ -786,7 +794,7 @@ function route() {
     if (tab === "options") loadDefaults(); else loadConfig();
   }
   if (view === "setup") setupPaste();
-  const m = /^job-(\d+)$/.exec(hash); if (m) open.add(Number(m[1]));
+  const m = /^job-(\d+)$/.exec(hash); if (m) { open.add(Number(m[1])); target = Number(m[1]); if (S) render(); }
 }
 window.addEventListener("hashchange", route);
 route(); notifyButton(); refresh(); setInterval(refresh, 3000);
