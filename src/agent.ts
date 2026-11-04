@@ -24,10 +24,19 @@ export function claudeAuth(): { source: "env" | "file" | "claude"; token: string
   const env = process.env[CLAUDE_TOKEN_ENV]?.trim();
   if (env) return { source: "env", token: env, loose: false };
   try {
-    const token = readFileSync(CLAUDE_TOKEN_FILE, "utf8").trim();
+    const token = parseClaudeToken(readFileSync(CLAUDE_TOKEN_FILE, "utf8"));
     if (token) return { source: "file", token, loose: (statSync(CLAUDE_TOKEN_FILE).mode & 0o077) !== 0 };
   } catch { /* no file: Claude's own login */ }
   return { source: "claude", token: "", loose: false };
+}
+
+/**
+ * The token in the file: bare, or the `CLAUDE_CODE_OAUTH_TOKEN=…` line that
+ * `setup-token` prints (maybe with `export` and quotes), and wrapped across
+ * lines when copied from a narrow terminal. A token has no whitespace.
+ */
+export function parseClaudeToken(text: string): string {
+  return text.replace(/^\s*(?:export\s+)?CLAUDE_CODE_OAUTH_TOKEN\s*=\s*/, "").replace(/["'\s]/g, "");
 }
 
 /** The environment for every `claude` pr-daemon starts. */
