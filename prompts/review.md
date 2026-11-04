@@ -21,6 +21,8 @@ the code. The working directory is a checkout of the PR branch.
    check: pr-daemon watches them itself and puts an agent on a failure. Review
    the change on its merits.
 
+{{REFERENCES}}
+
 Write the review to `{{OUT}}/review.md` as GitHub markdown:
 
 - First line exactly `VERDICT: ok` or `VERDICT: changes`. Use `changes` only for

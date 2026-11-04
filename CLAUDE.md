@@ -140,6 +140,20 @@ A human always merges.
   turn it into a second builder. A round that changes nothing is reported as
   such and the PR is still reviewed: a red check is a reason to read the code,
   not to skip reading it.
+- **Another repository is cloned, not configured.** An issue can say "do it
+  the way `org/other` does", and `pr-daemon ref <owner/repo>` (run by the
+  agent from its worktree) prints a read-only shallow clone of it. No config:
+  `gh` is the owner's own login, so every repo they can read is already
+  reachable, and a list of "reference repos" in config.toml was tried on
+  paper and dropped — nobody would remember what it meant. The guarantees are
+  in the clone, not in the prompt: it lives under `refs/`, **outside** the
+  worktree (so it is invisible to `git status`, `add -u`, the project's
+  `check` and any build context), `--depth 1 --single-branch --no-tags`,
+  `remote.origin.pushurl` and `core.hooksPath` both `/dev/null` (an agent
+  cannot push to somebody else's repo, and a cloned repo's hooks never run).
+  One directory per branch, so concurrent agents never share a git index and
+  `teardown` deletes it with the worktree. `git.refsFor()` is the whole
+  "configuration": a pure path mapping from a worktree to its refs directory.
 - **An adopted PR is somebody else's work.** Keep it that way: no force-push,
   no branch deletion, no closing the PR, and its description is left alone
   (the preview link is a comment). A fork is refused — pr-daemon makes a
@@ -190,7 +204,7 @@ A human always merges.
 
 | File | Responsibility |
 |---|---|
-| `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
+| `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `ref <owner/repo>`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
 | `pipeline.ts` | The jobs (`JOBS`): `build`, `adopt`, `review`, `revise`, `ci`, `merge`, `teardown`, `restart`. `bringUp()` is the one place that runs `up` and writes the stack row. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
@@ -199,7 +213,7 @@ A human always merges.
 | `budget.ts` | Rolling-window sum, per-issue sum, `gate()`, and when the window frees up |
 | `proxy.ts` | Caddy supervisor. `caddyConfig()` is pure (unit-tested): routes are rebuilt from the stacks table every 5s and loaded via the admin API when the hash changes |
 | `db.ts` | Schema plus `Store` (jobs, usage, stacks, events, kv) |
-| `gh.ts` / `git.ts` / `stack.ts` | Wrappers for `gh` (as the user), the cached clone plus worktrees plus the screenshot branch, and the project's up/down/check commands. `gh.summarizeChecks()` reduces check runs + commit statuses to one verdict; `stack.previewHealth()` turns the two health probes into up/degraded/down (both pure, unit-tested) |
+| `gh.ts` / `git.ts` / `stack.ts` | Wrappers for `gh` (as the user), the cached clone plus worktrees plus the screenshot branch plus reference clones (`refsFor`, `addReference`), and the project's up/down/check commands. `gh.summarizeChecks()` reduces check runs + commit statuses to one verdict; `stack.previewHealth()` turns the two health probes into up/degraded/down (both pure, unit-tested) |
 | `config.ts` | `DEFAULT_TOML` (the documented template), `parseConfig()` with readable errors, atomic save |
 | `web.ts` / `ui.html` / `docs.html` | The localhost API (Host check; writes need `X-PR-Daemon: 1`), the status page, and `GET /docs`: the state machines as mermaid diagrams |
 | `setup.ts` / `docs/setup.md` | `paths()` (the runtime directories) and `setupDoc()`: the project contract with this machine's real paths and commands filled in, served as plain text at `GET /setup` and printed by `pr-daemon setup` |
@@ -223,8 +237,9 @@ Claude session. On startup, `running` jobs are re-queued.
 
 **Runtime files:** everything lives in `~/.pr-daemon/`: `config.toml`,
 `pr-daemon.db`, `pr-daemon.log`, `repos/` (cached clones), `worktrees/`, `out/`
-(prompts, agent `*.jsonl` logs, PR text, screenshots), `assets/` (the
-screenshot branch clone), `caddy/`.
+(prompts, agent `*.jsonl` logs, PR text, screenshots), `refs/` (read-only
+clones of other repos an agent was asked to look at, one directory per
+branch), `assets/` (the screenshot branch clone), `caddy/`.
 
 ## Develop and test
 

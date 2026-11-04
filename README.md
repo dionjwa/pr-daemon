@@ -67,6 +67,7 @@ and **http://localhost:7377/docs** draws the whole thing as state machines.
 | Open the **Preview** link in the PR and try it. | Keeps the stack running and restarts it if it stops. |
 | Watch your own CI run on the PR, as usual. | If a check fails, an agent fixes it and pushes, up to twice per PR. If it's still red after that, it says so on the PR and stops. |
 | Keep merging other work into `main`. | If the PR stops merging cleanly, it merges `main` in and an agent resolves the conflicts. It pushes only once your check passes, and marks anything uncertain **needs your review**. Risky conflicts are left for you, with a comment saying why. |
+| Say in the issue "do it the way `your-org/other-repo` does". | Reads that repository — any one you can read — from a read-only clone kept outside the branch. Nothing to configure. |
 | Want changes? Comment on the PR: `/pr-daemon make the button blue` (or start it with 😈 / 👿 instead). | Makes the changes, pushes, and comments with a summary and new screenshots. |
 | Have a PR already (yours or a teammate's in this repo)? Add the **`agent`** label to the **PR**. | Starts that branch's stack, comments with the preview link, runs your `check` and has an agent fix it until it passes, then reviews the PR. Everything below applies from then on. |
 | Merge (or close) the PR. | Stops the stack, removes the worktree, and deletes the branch on GitHub. |
@@ -482,6 +483,7 @@ pr-daemon serve                      # the process (install-service runs this fo
 pr-daemon status                     # running, queued and paused jobs, and stacks
 pr-daemon doctor                     # check tools, logins, config
 pr-daemon run build your-org/repo 42 # one job now, in this terminal (build|review|revise|ci|merge|teardown|restart)
+pr-daemon ref your-org/other-repo    # read-only clone of another repo, for an agent to look at (run it in a worktree)
 pr-daemon stop                       # shut it down (stops the service too, if one is installed)
 pr-daemon install-service | uninstall-service
 ```
@@ -502,6 +504,7 @@ installed service after changing the code), `just db`, `just contract`.
   repos/<org>__<repo>/              a cached clone
   worktrees/<org>__<repo>/42-…/     the branch the agent works in (the stack runs from here)
   out/<org>__<repo>/42-…/           prompts, agent logs (*.jsonl), PR text, screenshots
+  refs/<org>__<repo>/42-…/          read-only clones of other repos the agent was asked to look at
   caddy/                            the generated Caddy config, its log, and certificates (binary mode)
 ```
 
@@ -559,6 +562,14 @@ it at one.
   the recommended setup. On a public one the checks keep strangers' issues and
   comments out of the prompts; review what you merge as you would any
   contributor's code.
+- **Another repository you name is read, never written.** An issue can say
+  "do it like `your-org/other-repo`", and the agent clones that repo
+  **read-only** (shallow, pushing disabled, its git hooks off) into
+  `~/.pr-daemon/refs/…`, outside the branch it's building. There's nothing to
+  configure, so the limit is your `gh` login's own access: anything it can read,
+  an issue can point the agent at. That's another reason to give the pr-daemon
+  user a login scoped to the repos you watch. What the agent reads there is
+  information, the same rule the prompts apply to issues and comments.
 - **Keep CI out of reach.** If your `gh` login doesn't have the `workflow`
   scope (`gh auth status` lists them), GitHub rejects any push that touches
   `.github/workflows/`, so the agent can't rewrite your CI. Keep it that way.

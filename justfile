@@ -83,6 +83,7 @@ where:
     echo -e "  repos/<org>__<repo>/             the cached clone of each repo"
     echo -e "  worktrees/<org>__<repo>/<branch>/  {{ cyan }}the checkout an agent works in; up/down/check run here{{ normal }}"
     echo -e "  out/<org>__<repo>/<branch>/      prompts, agent logs (*.jsonl), PR text, screenshots"
+    echo -e "  refs/<org>__<repo>/<branch>/     read-only clones of other repos an agent looked at"
     echo -e "  pr-daemon.log                    the service log"
     echo -e ""
     if compgen -G "$H/worktrees/*/*" > /dev/null; then

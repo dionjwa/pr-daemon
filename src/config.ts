@@ -133,6 +133,8 @@ export const DEFAULT_TOML = `# pr-daemon configuration.
 #   worktrees/<org>__<repo>/<branch>/  the checkout an agent works in, one per
 #                                      branch; up, down and check run from here
 #   out/<org>__<repo>/<branch>/        prompts, agent logs (*.jsonl), PR text, screenshots
+#   refs/<org>__<repo>/<branch>/       read-only clones of other repos an agent was
+#                                      asked to look at, kept out of the worktree
 #   pr-daemon.db                       jobs, token ledger, stacks, events (SQLite)
 #   pr-daemon.log                      the service log
 #   caddy/                             generated Caddy config and certificates

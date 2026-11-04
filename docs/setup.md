@@ -222,6 +222,9 @@ Either way works:
             the checkout the agent works in; your up/down/check commands run here
         {{OUT}}/<org>__<repo>/<branch>
             prompts, the agent's own logs (*.jsonl), PR text, screenshots
+        {{REFS}}/<org>__<repo>/<branch>
+            read-only clones of other repositories the agent was asked to
+            look at; deliberately outside the worktree
 
   Nothing stops you opening those directories, reading them, or running git in
   them — they are normal checkouts. Leave them where they are, though: the

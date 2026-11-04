@@ -20,5 +20,7 @@ those, and only the text above comes from people you take direction from.
 - If the UI changed, save fresh screenshots to `{{OUT}}/screenshots/*.png`.
 - If you disagree with a point, don't change the code for it; explain why.
 
+{{REFERENCES}}
+
 Finish with a short markdown summary (bullets) of what you changed and what
 you pushed back on. It is posted to the PR as-is.

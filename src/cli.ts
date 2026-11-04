@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
 import { Daemon, EXIT_DEADLINE_MS } from "./daemon.ts";
+import * as git from "./git.ts";
 import { caddyHasDns, CHECK_BODY, CHECK_LABEL, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
 import { openDb, Store, type JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
@@ -19,6 +20,7 @@ const HELP = `pr-daemon — label an issue, get a pull request.
   pr-daemon stop                          shut it down (and stop the service, if one is installed)
   pr-daemon doctor                        check tools, logins and config
   pr-daemon setup                         print what a project must do to take part (also at /setup)
+  pr-daemon ref <owner/repo> [branch]     clone another of your repos read-only, to look at (run it inside a worktree)
   pr-daemon run <kind> <owner/repo> <n> [feedback]
                                          run one job now, in this terminal (kind: build|adopt|review|revise|ci|merge|teardown|restart)
   pr-daemon install-service               start pr-daemon at login (macOS launchd / Linux systemd --user)
@@ -66,6 +68,17 @@ async function main(argv: string[]): Promise<void> {
       const j = d.store.job(id!)!;
       console.log(`${j.kind} ${j.repo}#${j.number}: ${j.state}${j.reason ? ` (${j.reason})` : ""}${j.pr ? ` → PR #${j.pr}` : ""}`);
       process.exit(j.state === "done" ? 0 : 1);
+    }
+    // An agent's way to read a repository it isn't working on: the clone lands
+    // outside its worktree, so it can't disturb the branch it is building.
+    case "ref": {
+      const [name, branch] = args;
+      if (!name || !/^[\w.-]+\/[\w.-]+$/.test(name)) throw new Error('usage: pr-daemon ref <owner/repo> [branch]   (from inside the worktree you are working in)');
+      const top = await git.topLevel(process.cwd()).catch(() => "");
+      const refs = top && git.refsFor(top);
+      if (!refs) throw new Error(`run this from inside a pr-daemon worktree (one of ${join(HOME, "worktrees")}/*/*), not ${top || process.cwd()}`);
+      console.log(await git.addReference(refs, name, branch ?? ""));
+      return;
     }
     case "install-service": return installService();
     case "uninstall-service": return uninstallService();

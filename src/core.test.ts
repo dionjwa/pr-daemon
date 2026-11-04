@@ -4,14 +4,15 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
-import { DEFAULT_TOML, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
-import { issueForPr, render, restart, type Ctx } from "./pipeline.ts";
+import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
+import { issueForPr, refsNote, render, restart, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
 import { isListed, isPullRequest, parseCommand, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
 import * as stack from "./stack.ts";
+import { refsFor } from "./git.ts";
 
 test("human amounts", () => {
   assert.equal(parseAmount("40M"), 40_000_000);
@@ -461,4 +462,21 @@ test("run() timeout kills a detached command's whole group", async () => {
   const r = await run("bash", ["-c", "sleep 5 & sleep 5"], { timeoutMs: 200, detached: true });
   assert.notEqual(r.code, 0);
   assert.match(r.stderr, /timed out/);
+});
+
+test("a reference repo's clone lands outside the worktree", () => {
+  const home = "/home/u/.pr-daemon";
+  // The mapping pr-daemon ref uses instead of configuration: worktrees/… → refs/….
+  assert.equal(refsFor(`${home}/worktrees/org__repo/42-thing`, home), `${home}/refs/org__repo/42-thing`);
+  // An adopted PR's branch was named by somebody else and can have slashes.
+  assert.equal(refsFor(`${home}/worktrees/org__repo/feat/nested`, home), `${home}/refs/org__repo/feat/nested`);
+  // Anything that isn't one of pr-daemon's worktrees gets nothing.
+  assert.equal(refsFor("/tmp/somewhere-else", home), "");
+  assert.equal(refsFor(`${home}/worktrees`, home), "");
+  assert.equal(refsFor(`${home}/worktrees-elsewhere/x`, home), "");
+  // The note an agent is given names the command and that path, never the worktree.
+  const note = refsNote(join(HOME, "worktrees", "org__repo", "42-thing"));
+  assert.match(note, /pr-daemon ref <owner\/repo>/);
+  assert.match(note, new RegExp(`refs/org__repo/42-thing`));
+  assert.doesNotMatch(note, /worktrees/);
 });

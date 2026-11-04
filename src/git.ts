@@ -1,7 +1,7 @@
 // One cached clone per repo; every issue branch is a worktree off it.
 // Auth goes through `gh auth git-credential`, so no token is written to disk.
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { HOME } from "./config.ts";
 import { must, run, slugify } from "./util.ts";
 
@@ -9,6 +9,7 @@ const key = (repo: string) => repo.replace("/", "__");
 export const repoDir = (repo: string) => join(HOME, "repos", key(repo));
 export const worktreeRoot = (repo: string) => join(HOME, "worktrees", key(repo));
 export const outDir = (repo: string, branch: string) => join(HOME, "out", key(repo), branch);
+export const refsDir = (repo: string, branch: string) => join(HOME, "refs", key(repo), branch);
 
 const git = (dir: string, ...args: string[]) => must("git", ["-C", dir, ...args]);
 
@@ -85,6 +86,60 @@ export async function ensureBranchWorktree(repo: string, branch: string): Promis
   mkdirSync(dirname(wt), { recursive: true });
   await git(repoDir(repo), "worktree", "add", "-q", "-B", branch, wt, `origin/${branch}`);
   return wt;
+}
+
+// ---------------------------------------------------------------- references
+// Another repository, read-only, for an agent that has to look at code it
+// isn't working on ("do it the way <other repo> does"). `gh` is the owner's
+// own login, so every repository they can read is already reachable; what was
+// missing is somewhere to put the clone that cannot disturb the target repo.
+
+/** The repository root of a directory the agent is working in. */
+export const topLevel = (dir: string) => git(dir, "rev-parse", "--show-toplevel");
+
+/**
+ * Where a worktree's references live: the path mapping `pr-daemon ref` uses,
+ * so it needs no configuration and no database. A worktree is
+ * `<HOME>/worktrees/<org>__<repo>/<branch>`; its references sit under
+ * `<HOME>/refs/` at the same place, i.e. refsDir() for that repo and branch.
+ * "" for a directory that isn't one of pr-daemon's worktrees. Pure.
+ */
+export function refsFor(worktree: string, home = HOME): string {
+  const root = resolve(home, "worktrees") + sep;
+  const abs = resolve(worktree) + sep;
+  if (!abs.startsWith(root)) return "";
+  const rest = abs.slice(root.length, -1);
+  return rest ? join(home, "refs", rest) : "";
+}
+
+/**
+ * A read-only shallow clone of `repo` under `refs`, and its path. Idempotent:
+ * an existing clone is fetched and moved to the new tip, so a resumed session
+ * doesn't pay for it twice.
+ *
+ * The clone lives outside the worktree, so nothing in it reaches the target
+ * repo's index, its check or its build context. Pushing is disabled rather
+ * than merely discouraged (an agent cannot write to somebody else's
+ * repository), and so are the clone's own hooks.
+ */
+export async function addReference(refs: string, repo: string, branch = ""): Promise<string> {
+  const dir = join(refs, key(repo));
+  const auth = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+  if (!existsSync(join(dir, ".git"))) {
+    mkdirSync(refs, { recursive: true });
+    await must("git", [...auth, "clone", "-q", "--depth", "1", "--single-branch", "--no-tags",
+      ...(branch ? ["--branch", branch] : []), `https://github.com/${repo}.git`, dir]);
+  } else {
+    // Update the branch the clone is already on (or switch to the one asked
+    // for), and check the fetched tip out under that same name: a clone must
+    // never end up labelled with one branch while holding another's code.
+    const target = branch || (await git(dir, "rev-parse", "--abbrev-ref", "HEAD"));
+    await must("git", ["-C", dir, ...auth, "fetch", "-q", "--depth", "1", "--no-tags", "origin", target]);
+    await git(dir, "checkout", "-q", "--force", ...(target === "HEAD" ? ["--detach"] : ["-B", target]), "FETCH_HEAD");
+  }
+  await git(dir, "config", "remote.origin.pushurl", "/dev/null");
+  await git(dir, "config", "core.hooksPath", "/dev/null");
+  return dir;
 }
 
 /** Commit tracked edits the agent left behind. Untracked files (tool caches, logs) are left alone. */
