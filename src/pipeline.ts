@@ -159,6 +159,21 @@ function upFailedNote(cmd: string, output: string, out: string): string {
   return `WARNING: \`${cmd}\` FAILED before you started. Fix that first, then continue. The full output is in ${file}; it ends:\n\`\`\`\n${tail(output, 80)}\n\`\`\``;
 }
 
+/**
+ * Push an agent's commits. Without the `workflow` scope GitHub refuses any push
+ * touching `.github/workflows/`, and that's a guard worth keeping: an agent
+ * that could edit CI could hand itself the repo's secrets. So an agent's
+ * workflow edit is taken out first and the rest of its work still lands. The
+ * edit comes back as a PR comment for a human to apply ("" when nothing was held).
+ */
+async function pushWork(ctx: Ctx, wt: string, branch: string): Promise<string> {
+  const held = (await gh.hasWorkflowScope()) ? null : await git.stripWorkflows(wt);
+  await git.push(wt, branch);
+  if (!held) return "";
+  ctx.store.event(`held back the agent's change to ${held.files.join(", ")}: the gh login can't push workflow files; it's on the PR for you`, ctx.job.id, "warn");
+  return git.heldWorkflowComment({ repo: ctx.repo.name, branch, ...held });
+}
+
 /** Where an agent job's stream-json log is written (null for jobs without an agent). */
 export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): string | null {
   if (!job.branch) return null;
@@ -323,8 +338,9 @@ export async function build(ctx: Ctx): Promise<void> {
     await gh.comment(repo.name, n, `😶 **pr-daemon** finished without making any commits.\n\n<details><summary>agent summary</summary>\n\n${summary}\n</details>`);
     throw new FailError("no commits");
   }
-  await git.push(wt, branch);
+  const held = await pushWork(ctx, wt, branch);
   if (!result.ok) {
+    if (held) await gh.comment(repo.name, n, held);
     await gh.setStatus(repo.name, n, cfg.label, "failed");
     await gh.comment(repo.name, n, `❌ **pr-daemon** pushed \`${branch}\` but \`${repo.check}\` still fails after ${cfg.agent.maxAttempts} round(s). No PR opened.\n\`\`\`\n${result.output}\n\`\`\``);
     throw new FailError("check still failing");
@@ -334,8 +350,10 @@ export async function build(ctx: Ctx): Promise<void> {
   store.update(job.id, { pr: prNumber });
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, pr: prNumber, builder_session: store.job(job.id)!.session_id });
   await gh.setStatus(repo.name, n, cfg.label, "in-review");
+  if (held) await gh.comment(repo.name, prNumber, held);
   await gh.comment(repo.name, n, `✅ **pr-daemon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
-  ctx.notice = { kind: "ready", level: "ok", title: `✅ PR ready: ${repo.name} #${prNumber}`, body: issue.title, url: `https://github.com/${repo.name}/pull/${prNumber}` };
+  ctx.notice = { kind: "ready", level: held ? "warn" : "ok", title: `✅ PR ready: ${repo.name} #${prNumber}`,
+    body: `${issue.title}${held ? " · a workflow change is held back for you" : ""}`, url: `https://github.com/${repo.name}/pull/${prNumber}` };
   store.enqueue({ repo: repo.name, kind: "review", number: prNumber, branch, trigger_key: `review:${repo.name}#${prNumber}:job${job.id}` });
 }
 
@@ -473,7 +491,8 @@ Ask for changes with a comment starting \`/pr-daemon\`. Remove the \`${cfg.label
     // The session that now holds this branch's context, for a later revise or CI fix.
     store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, builder_session: store.job(job.id)!.session_id });
     const commits = await git.unpushed(wt, branch);
-    if (commits) await git.push(wt, branch);
+    const held = commits ? await pushWork(ctx, wt, branch) : "";
+    if (held) await gh.comment(repo.name, n, held);
     const failing = `<details><summary>\`${repo.check}\`, still failing</summary>\n\n\`\`\`\n${result.output}\n\`\`\`\n</details>`;
     if (result.ok) {
       store.event(`\`${repo.check}\` passes after ${rounds} round(s); pushed ${commits} commit(s)`, job.id);
@@ -593,9 +612,10 @@ export async function revise(ctx: Ctx): Promise<void> {
 
   await git.commitLeftovers(wt);
   const result = await stack.check(repo.check, wt);
-  await git.push(wt, branch);
+  const held = await pushWork(ctx, wt, branch);
+  if (held) await gh.comment(repo.name, job.number, held);
   const shots = await uploadShots(ctx, branch, out);
-  const checked = result.skipped ? "" : result.ok ? " · check passes" : ` · \`${repo.check}\` fails`;
+  const checked = (result.skipped ? "" : result.ok ? " · check passes" : ` · \`${repo.check}\` fails`) + (held ? " · a workflow change is held back for you" : "");
   ctx.notice = payload(job).fromReview
     ? { kind: "ready", level: result.ok ? "ok" : "warn", title: `✅ PR ready: ${repo.name} #${job.number}`, body: `${p.title} · revised after review${checked}`, url: p.html_url }
     : { kind: "revised", level: result.ok ? "ok" : "warn", title: `🔁 Revised: ${repo.name} #${job.number}`, body: `${p.title}${checked}`, url: p.html_url };
@@ -662,7 +682,8 @@ export async function ci(ctx: Ctx): Promise<void> {
     return;
   }
   const local = await stack.check(repo.check, wt);
-  await git.push(wt, branch);
+  const held = await pushWork(ctx, wt, branch);
+  if (held) await gh.comment(repo.name, job.number, held);
   const shots = await uploadShots(ctx, branch, out);
   ctx.notice = { kind: "ci", level: local.ok || local.skipped ? "ok" : "warn", title: `🧪 CI fix pushed: ${repo.name} #${job.number}`,
     body: `${p.title} · was failing: ${c.summary}`, url: p.html_url };
@@ -720,7 +741,18 @@ export async function merge(ctx: Ctx): Promise<void> {
 
 ${reasons.map((r) => `- ${r}`).join("\n")}
 ${o.conflicts?.length ? `\nConflicted files:\n${conflictTable(o.conflicts)}\n` : ""}${kept ? `\nIts attempt is kept on the pr-daemon machine as the local branch \`${kept}\`; the PR is unchanged.\n` : ""}
-To do it yourself: \`git fetch origin && git checkout ${branch} && git merge origin/${base}\`, resolve, commit and push. Or comment \`/pr-daemon <how to resolve it>\` to have the agent try with your guidance.`);
+**To do it yourself**, from your own checkout of ${repo.name}:
+
+\`\`\`bash
+git fetch origin && git checkout ${branch} && git pull --ff-only
+git merge origin/${base}
+git status                 # the conflicted files are listed as "both modified"
+# edit each one, remove the <<<<<<< ======= >>>>>>> markers, then:
+git add -- ${o.conflicts?.length ? o.conflicts.map((c) => `'${c.path.replace(/'/g, "'\\''")}'`).join(" ") : "<the files you fixed>"}
+${repo.check ? `${repo.check}               # make sure it still passes\n` : ""}git commit --no-edit && git push
+\`\`\`
+
+Changed your mind mid-way? \`git merge --abort\` puts the branch back. Or comment \`/pr-daemon <how to resolve it>\` on this PR to have the agent try with your guidance.`);
     ctx.notice = { kind: "merge", level: "bad", title: `🔀 Merge needs you: ${repo.name} #${job.number}`, body: headline, url: p.html_url };
     throw new FailError(`${headline}: ${reasons.join("; ")}`.slice(0, 1500));
   };

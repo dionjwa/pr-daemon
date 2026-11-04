@@ -194,12 +194,81 @@ export async function unpushed(wt: string, branch: string): Promise<number> {
   return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
 }
 
+const WORKFLOWS = ".github/workflows";
+
+/**
+ * Take `.github/workflows/` edits out of the commits a push would send, and
+ * keep everything else. GitHub refuses a push in which *any* commit touches a
+ * workflow file (without the `workflow` scope), so a revert on top wouldn't
+ * do: the unpushed commits are squashed into one without the workflow change.
+ * Returns what was taken out, or null when there was nothing to take out, or
+ * when the unpushed commits include a merge (squashing that would flatten
+ * the base's history; the merge job has its own way round, `viaGitHub`).
+ */
+export async function stripWorkflows(wt: string): Promise<{ files: string[]; patch: string } | null> {
+  const commits = (await git(wt, "rev-list", "--parents", "HEAD", "--not", "--remotes=origin")).split("\n").filter(Boolean);
+  if (!commits.length || commits.some((l) => l.split(" ").length !== 2)) return null;
+  const from = commits.at(-1)!.split(" ")[1];   // newest first: the oldest unpushed commit's parent
+  const files = await changedFiles(wt, from, "HEAD", WORKFLOWS);
+  if (!files.length) return null;
+  const patch = await git(wt, "diff", from, "HEAD", "--", WORKFLOWS);
+  const messages = (await git(wt, "log", "--reverse", "--format=%B%x00", `${from}..HEAD`)).split("\0").map((m) => m.trim()).filter(Boolean);
+  await git(wt, "reset", "-q", "--soft", from);
+  // Files the commits added go too: restore deletes what `from` doesn't have.
+  const existed = await git(wt, "ls-tree", "--name-only", from, `${WORKFLOWS}/`);
+  if (existed) await git(wt, "restore", `--source=${from}`, "--staged", "--worktree", "--", WORKFLOWS);
+  else await git(wt, "rm", "-q", "-r", "-f", "--", WORKFLOWS);
+  const staged = await run("git", ["-C", wt, "diff", "--cached", "--quiet"]);
+  if (staged.code !== 0) {
+    await git(wt, "commit", "-q", "-m", `${messages.join("\n\n")}\n\npr-daemon took out the change to ${files.join(", ")}: it can't push workflow files. It's on the PR for a human to apply.`);
+  }
+  return { files, patch };
+}
+
+/**
+ * The PR comment for a workflow change `stripWorkflows()` held back: every
+ * step the human needs, ready to paste. The diff rides in a heredoc, so the
+ * shell block applies it in one go; secrets the change refers to get their
+ * `gh secret set` lines, since without them the change does nothing.
+ */
+export function heldWorkflowComment(o: { repo: string; branch: string; files: string[]; patch: string }): string {
+  const files = o.files.map((f) => `\`${f}\``).join(", ");
+  const added = o.patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).join("\n");
+  const secrets = [...new Set([...added.matchAll(/\$\{\{\s*secrets\.(\w+)/g)].map((m) => m[1]))].filter((s) => s !== "GITHUB_TOKEN");
+  const fence = "`".repeat(Math.max(3, ...(o.patch.match(/`+/g) ?? []).map((t) => t.length + 1)));
+  return `> [!WARNING]
+> **pr-daemon** held back its agent's change to ${files}: its gh login can't push workflow files, which keeps agents out of CI and its secrets. The rest of the work is pushed. **Apply this yourself if you want it**; until then CI runs without it.
+
+**To apply it**, from your own checkout of ${o.repo} (your usual git login can push workflow files; pr-daemon's can't):
+
+${fence}bash
+git fetch origin && git checkout ${o.branch} && git pull --ff-only
+git apply <<'PR_DAEMON_DIFF'
+${o.patch}
+PR_DAEMON_DIFF
+git add -- .github/workflows && git commit -m "ci: apply the workflow change pr-daemon held back" && git push
+${fence}
+${secrets.length ? `
+**It uses ${secrets.length === 1 ? "a secret" : "secrets"} the repo may not have yet.** Set ${secrets.length === 1 ? "it" : "them"} first (each command asks for the value):
+
+\`\`\`bash
+${secrets.map((s) => `gh secret set ${s} -R ${o.repo}`).join("\n")}
+\`\`\`
+
+or in the browser: https://github.com/${o.repo}/settings/secrets/actions
+` : ""}
+Or in the browser: open each file on \`${o.branch}\` (https://github.com/${o.repo}/tree/${o.branch}/.github/workflows), press the pencil and make the \`+\` lines above, committing to \`${o.branch}\`.
+
+Not wanted? Do nothing: the PR works without it.`;
+}
+
 export async function push(wt: string, branch: string): Promise<void> {
   const r = await run("git", ["-C", wt, "push", "-q", "-u", "origin", branch]);
   if (r.code === 0) return;
   if (/without `?workflow`? scope/.test(r.stderr)) {
     // gh's default login can't push changes under .github/workflows. That's a
     // useful guard (the agent can't rewrite CI), so say so instead of a raw git error.
+    // Agent work goes through pipeline's pushWork(), which strips such changes first.
     throw new Error(`GitHub refused the push because the branch changes .github/workflows/ and your gh login lacks the "workflow" scope. ` +
       `Either undo the workflow change on ${branch}, or allow it with: gh auth refresh -s workflow`);
   }

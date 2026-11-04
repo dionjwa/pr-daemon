@@ -195,6 +195,10 @@ A human always merges.
   the machine and sends a test. When an issue or PR closes, its notices go
   too (`Store.clearNotices()`, and `unnotify()` for the desktop): `teardown`
   clears the ones with a stack, and the poll clears the rest.
+- **When the owner has to act, hand them every step.** Each PR comment,
+  notice or error that asks a human to do something carries the exact
+  commands, filled in, in one block (plus the browser way, and how to back
+  out). The rules are in `.claude/skills/hand-over/SKILL.md`.
 - **The repo will be public.** No secrets, hostnames, IPs or personal paths in
   code or docs.
 - Commands in docs are `just` recipes where a project is involved. Keep the
@@ -287,7 +291,11 @@ just contract                 # print examples/justfile, the two recipes a proje
   changes only (`add -u`) and log untracked files.
 - **Pushes touching `.github/workflows/` are rejected** because the owner's gh
   login lacks the `workflow` scope. That's a good guard (the agent can't
-  rewrite CI). `git.push()` explains it. It also bit us when a branch was
+  rewrite CI, or hand itself the repo's secrets). So agent work is pushed
+  through `pushWork()`, which first takes a workflow edit out of the unpushed
+  commits (`git.stripWorkflows()`, squashing them into one; never across a
+  merge), pushes the rest, and posts the held-back diff on the PR for a human.
+  `git.push()` explains a refusal that still happens. It also bit us when a branch was
   based on a commit that had a workflow file which was later deleted
   upstream: rebasing onto the current base fixed it.
 - **`gh run view --log-failed` can print nothing and still exit 0.** Two

@@ -21,8 +21,8 @@ Fix the cause, not the check:
 2. Fix the code. Never weaken, skip or delete a test to make a check pass. If
    a test is genuinely wrong, fix the test and say so plainly in your summary.
 3. **Do not edit anything under `.github/workflows/`.** pr-daemon cannot push
-   changes there (its GitHub login has no `workflow` scope), so a change to a
-   workflow file makes the push fail and nothing reaches the PR.
+   changes there (its GitHub login has no `workflow` scope), so it holds a
+   workflow change back for a human. If CI needs one, say what in your summary.
 4. Commit your work. Do NOT push, comment or open PRs: pr-daemon does that,
    and the push makes the checks run again.
 5. If the failure has nothing to do with this branch — a flaky test, a

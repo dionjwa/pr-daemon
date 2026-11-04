@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assessConflicts, catchUpBlocker, globToRegExp, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
@@ -174,4 +174,70 @@ test("lastJobOn: the newest job that ran on the branch", () => {
   store.enqueue({ repo: "o/r", kind: "ci", number: 9, branch: "9-y", trigger_key: "c" });
   assert.equal(store.lastJobOn("o/r", "7-x")?.id, a);
   assert.equal(store.lastJobOn("o/r", "7-x")?.state, "failed");
+});
+
+test("stripWorkflows takes workflow edits out of unpushed commits and keeps the rest", async () => {
+  const { wt } = repoWith("one\ntwo\nthree (branch)\n", "zero\none\ntwo\nthree\n");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/test.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci"); sh(wt, "push", "-q", "origin", "7-feature");
+  const pushed = sh(wt, "rev-parse", "HEAD");
+  assert.equal(await git.stripWorkflows(wt), null, "nothing unpushed");
+
+  // the agent: two commits, one editing a workflow and adding another
+  writeFileSync(join(wt, ".github/workflows/test.yml"), "on: push\nenv: { SECRET: x }\n");
+  writeFileSync(join(wt, ".github/workflows/new.yml"), "on: pull_request\n");
+  writeFileSync(join(wt, "b.txt"), "b changed\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "feat: one");
+  writeFileSync(join(wt, "a.txt"), "one\ntwo\nthree\nfour\n"); sh(wt, "commit", "-qam", "feat: two");
+
+  const held = await git.stripWorkflows(wt);
+  assert.deepEqual(held?.files, [".github/workflows/new.yml", ".github/workflows/test.yml"]);
+  assert.match(held!.patch, /\+env: \{ SECRET: x \}/);
+  assert.equal(sh(wt, "rev-parse", "HEAD~1"), pushed, "squashed into one commit on top of what was pushed");
+  assert.deepEqual(sh(wt, "diff", "--name-only", pushed, "HEAD").split("\n"), ["a.txt", "b.txt"]);
+  assert.match(sh(wt, "log", "-1", "--format=%B"), /feat: one[\s\S]*feat: two[\s\S]*took out the change/);
+  assert.equal(sh(wt, "status", "--porcelain"), "", "the worktree matches the commit");
+  assert.equal(readFileSync(join(wt, ".github/workflows/test.yml"), "utf8"), "on: push\n");
+});
+
+test("stripWorkflows: a new workflow dir goes, and a workflow-only change leaves what was pushed", async () => {
+  const { wt } = repoWith("one\ntwo\nthree (branch)\n", "zero\none\ntwo\nthree\n");
+  sh(wt, "push", "-q", "origin", "7-feature");
+  const pushed = sh(wt, "rev-parse", "HEAD");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/x.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci only");
+  assert.deepEqual((await git.stripWorkflows(wt))?.files, [".github/workflows/x.yml"]);
+  assert.equal(sh(wt, "rev-parse", "HEAD"), pushed);
+  assert.equal(sh(wt, "status", "--porcelain"), "");
+});
+
+test("stripWorkflows won't squash an unpushed merge", async () => {
+  const { wt } = repoWith("one\ntwo\nthree\nfour\n", "zero\none\ntwo\nthree\n");
+  sh(wt, "push", "-q", "origin", "7-feature");
+  await git.startMerge(wt, "main", "7-feature");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/x.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci");
+  assert.equal(await git.stripWorkflows(wt), null);
+});
+
+test("heldWorkflowComment: its shell block applies the change, and it names the secrets", async () => {
+  const { wt } = repoWith("one\ntwo\nthree (branch)\n", "zero\none\ntwo\nthree\n");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/test.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci"); sh(wt, "push", "-q", "origin", "7-feature");
+  const wanted = "on: push\nenv:\n  KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n  T: ${{ secrets.GITHUB_TOKEN }}\n";
+  writeFileSync(join(wt, ".github/workflows/test.yml"), wanted);
+  sh(wt, "commit", "-qam", "ci: key");
+  const held = (await git.stripWorkflows(wt))!;
+  const text = git.heldWorkflowComment({ repo: "o/r", branch: "7-feature", ...held });
+  assert.match(text, /gh secret set ANTHROPIC_API_KEY -R o\/r/);
+  assert.doesNotMatch(text, /secret set GITHUB_TOKEN/);
+  // run the heredoc part of the block, as a person pasting it would
+  const block = text.match(/```bash\n([\s\S]*?)\n```/)![1];
+  const apply = block.slice(block.indexOf("git apply"), block.indexOf("PR_DAEMON_DIFF\n", block.indexOf("<<'PR_DAEMON_DIFF'") + 20) + 15);
+  execFileSync("bash", ["-c", apply], { cwd: wt });
+  assert.equal(readFileSync(join(wt, ".github/workflows/test.yml"), "utf8"), wanted);
 });
