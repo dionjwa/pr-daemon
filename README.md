@@ -144,6 +144,20 @@ gh auth login                     # pr-daemon acts as you, through gh
 claude                            # log in once, then exit
 ```
 
+**On a Mac you reach over SSH**, or if agents fail with *"OAuth session
+expired and could not be refreshed"*, give pr-daemon its own Claude login
+instead. Claude keeps its login in the macOS Keychain, and an SSH session
+can't reach it, so logging in over SSH never fixes the service. A token
+from `claude setup-token` lasts a year and works for both:
+
+```bash
+claude setup-token                                 # prints a token; over SSH it gives you a URL to open
+(umask 077; read -rs T; echo "$T" > ~/.pr-daemon/claude-token)   # paste it, then Enter
+```
+
+pr-daemon reads that file before every agent run, so there's nothing to
+restart, and `pr-daemon doctor` says which login it used.
+
 ### 2. Get pr-daemon
 
 ```bash
@@ -499,6 +513,7 @@ installed service after changing the code), `just db`, `just contract`.
 ```
 ~/.pr-daemon/
   config.toml                       settings (also editable on the status page)
+  claude-token                      optional: the Claude login agents use (claude setup-token)
   pr-daemon.db                       jobs, token ledger, stacks, events (SQLite)
   pr-daemon.log                      the service's log
   repos/<org>__<repo>/              a cached clone

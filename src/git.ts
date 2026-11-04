@@ -2,6 +2,7 @@
 // Auth goes through `gh auth git-credential`, so no token is written to disk.
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { claudeEnv } from "./agent.ts";
 import { HOME } from "./config.ts";
 import { must, run, sleep, slugify } from "./util.ts";
 
@@ -68,7 +69,7 @@ export function findWorktree(repo: string, n: number): string | null {
 export async function makeBranchName(n: number, title: string): Promise<string> {
   const r = await run("claude", ["-p", "--model", "haiku", "--max-turns", "1",
     `Reply with ONLY a 2-4 word lowercase kebab-case summary of this GitHub issue title, nothing else: ${title}`],
-    { timeoutMs: 60_000 });
+    { timeoutMs: 60_000, env: claudeEnv() });
   const slug = slugify(r.code === 0 ? r.stdout.split("\n")[0] : "") || slugify(title) || "issue";
   return `${n}-${slug}`;
 }

@@ -2,9 +2,39 @@
 // detection, and a kill switch the scheduler pulls when a budget runs out.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { HOME } from "./config.ts";
 import { cleanEnv } from "./util.ts";
+
+// ---------- Claude's login ----------
+// On macOS Claude keeps its login in the Keychain, but the service and an SSH
+// session don't see the same one: a /login over SSH only reaches the
+// ~/.claude/.credentials.json fallback, while the service went on reading a
+// dead Keychain entry ("OAuth session expired and could not be refreshed").
+// A long-lived token from `claude setup-token`, kept in a file pr-daemon
+// owns, sidesteps both. It's read on every run, so a new one applies without
+// a restart, and only `claude` processes get it, not the project's stacks.
+export const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
+export const CLAUDE_TOKEN_FILE = join(HOME, "claude-token");
+
+/** Where Claude's login comes from: the service's environment, the token file, or Claude's own (Keychain / credentials file). */
+export function claudeAuth(): { source: "env" | "file" | "claude"; token: string; loose: boolean } {
+  const env = process.env[CLAUDE_TOKEN_ENV]?.trim();
+  if (env) return { source: "env", token: env, loose: false };
+  try {
+    const token = readFileSync(CLAUDE_TOKEN_FILE, "utf8").trim();
+    if (token) return { source: "file", token, loose: (statSync(CLAUDE_TOKEN_FILE).mode & 0o077) !== 0 };
+  } catch { /* no file: Claude's own login */ }
+  return { source: "claude", token: "", loose: false };
+}
+
+/** The environment for every `claude` pr-daemon starts. */
+export function claudeEnv(): NodeJS.ProcessEnv {
+  const { token } = claudeAuth();
+  return cleanEnv(token ? { [CLAUDE_TOKEN_ENV]: token } : {});
+}
 
 export interface Usage { input: number; output: number; cache_create: number; cache_read: number }
 export const zeroUsage = (): Usage => ({ input: 0, output: 0, cache_create: 0, cache_read: 0 });
@@ -71,7 +101,7 @@ export function startAgent(o: AgentOptions): AgentRun {
   args.push(...(o.resume ? ["--resume", o.resume] : ["--session-id", sessionId]));
   if (o.model) args.push("--model", o.model);
 
-  const child = spawn("claude", args, { cwd: o.cwd, env: cleanEnv(), stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("claude", args, { cwd: o.cwd, env: claudeEnv(), stdio: ["ignore", "pipe", "pipe"] });
   const log = createWriteStream(o.logFile, { flags: "a" });
   // Claude doesn't log the prompt it was given: record it, and where each run starts.
   log.write(JSON.stringify({ type: "pr-daemon", subtype: "start", at: Date.now(), prompt: o.prompt, resume: !!o.resume }) + "\n");

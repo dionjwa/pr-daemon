@@ -236,10 +236,11 @@ paused or crashed job keeps its `session_id`, and resuming continues that
 Claude session. On startup, `running` jobs are re-queued.
 
 **Runtime files:** everything lives in `~/.pr-daemon/`: `config.toml`,
-`pr-daemon.db`, `pr-daemon.log`, `repos/` (cached clones), `worktrees/`, `out/`
-(prompts, agent `*.jsonl` logs, PR text, screenshots), `refs/` (read-only
-clones of other repos an agent was asked to look at, one directory per
-branch), `assets/` (the screenshot branch clone), `caddy/`.
+`pr-daemon.db`, `pr-daemon.log`, `claude-token` (optional), `repos/` (cached
+clones), `worktrees/`, `out/` (prompts, agent `*.jsonl` logs, PR text,
+screenshots), `refs/` (read-only clones of other repos an agent was asked to
+look at, one directory per branch), `assets/` (the screenshot branch clone),
+`caddy/`.
 
 ## Develop and test
 
@@ -424,6 +425,18 @@ just contract                 # print examples/justfile, the two recipes a proje
   them. `git.conflicts()` marks them (`diff --numstat :2:f :3:f` prints
   `-\t-`), and they always go to a human. `=======` alone isn't counted as a
   marker: it's a markdown heading underline.
+- **The service and an SSH shell see different Claude logins (macOS).** Claude
+  keeps its login in the Keychain and falls back to `~/.claude/.credentials.json`
+  when it can't read it. An SSH session can't ("User interaction is not
+  allowed"), so a `/login` there only refreshes the file, while the launchd
+  service, in the desktop session, reads the Keychain. Seen here: the Keychain
+  entry had `expiresAt: 0`, and every agent failed in ~80ms with "OAuth session
+  expired and could not be refreshed" while every test from SSH passed.
+  The fix is `~/.pr-daemon/claude-token` (a `claude setup-token` token, mode 600):
+  `claudeEnv()` in `agent.ts` gives it to every `claude` pr-daemon starts as
+  `CLAUDE_CODE_OAUTH_TOKEN`, read on each run, and not to stacks. `doctor`
+  tests with the same env and names the source. When debugging auth, test
+  from the service's context, not an SSH shell.
 - **A session to resume can vanish.** Revise and CI jobs resume the builder's Claude session (context plus a warm cache), but the transcript under `~/.claude/projects/<cwd>/` can be deleted out from under us, and `--resume` then fails with "No conversation found with session ID". `agentStep()` takes a `fresh` prompt and starts a new session from it in that case; every resume site passes the full prompt, which carries all the context the job needs (issue, PR, trusted discussion). Revise/CI then record the session they used as the stack's `builder_session`.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
+import { CLAUDE_TOKEN_ENV, CLAUDE_TOKEN_FILE, claudeAuth, claudeEnv } from "./agent.ts";
 import { Daemon, EXIT_DEADLINE_MS } from "./daemon.ts";
 import * as git from "./git.ts";
 import { caddyHasDns, CHECK_BODY, CHECK_LABEL, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
@@ -174,8 +175,14 @@ async function doctor(): Promise<void> {
   const auth = await run("gh", ["auth", "status"]);
   const login = auth.code === 0 ? (await run("gh", ["api", "user", "--jq", ".login"])).stdout.trim() : "";
   ok(auth.code === 0, `gh is logged in${login ? ` as @${login}: pr-daemon pushes, opens PRs and comments as this user` : ""}`, "gh auth login");
-  const c = await run("claude", ["-p", "Reply with exactly: ok", "--max-turns", "1"], { timeoutMs: 90_000 });
-  ok(c.code === 0 && /ok/i.test(c.stdout), "claude works headless", c.stdout.trim() || c.stderr.trim() || "claude (log in), or set CLAUDE_CODE_OAUTH_TOKEN");
+  // The same login the agents get. Claude's own (the Keychain on macOS) can differ
+  // between this shell and the service: an SSH session can't read the Keychain.
+  const ca = claudeAuth();
+  const from = { env: `$${CLAUDE_TOKEN_ENV}`, file: CLAUDE_TOKEN_FILE, claude: "Claude's own login (the Keychain on macOS)" }[ca.source];
+  const c = await run("claude", ["-p", "Reply with exactly: ok", "--max-turns", "1"], { timeoutMs: 90_000, env: claudeEnv() });
+  ok(c.code === 0 && /ok/i.test(c.stdout), `claude works headless, logged in through ${from}`, `${c.stdout.trim() || c.stderr.trim()}
+    → for a login the service can always use: claude setup-token, then put the token in ${CLAUDE_TOKEN_FILE} (chmod 600)`);
+  if (ca.loose) ok(false, `${CLAUDE_TOKEN_FILE} is private`, `chmod 600 ${CLAUDE_TOKEN_FILE}`);
   // Desktop notices: osascript works without it, but shows as "Script Editor", can't open the PR, and is often dropped under launchd.
   if (process.platform === "darwin") ok((await run("which", ["terminal-notifier"])).code === 0, "terminal-notifier installed (desktop notices you can click)", "brew install terminal-notifier, then allow it in System Settings → Notifications");
   else if (process.platform === "linux") ok((await run("which", ["notify-send"])).code === 0, "notify-send installed (desktop notices)", "install libnotify (notify-send)");
