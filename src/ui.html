@@ -31,6 +31,8 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.danger { color: var(--bad); }
   button.confirm { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button.copy { font-size: 11px; padding: 0 7px; margin-left: 6px; vertical-align: 1px; color: var(--ink-2); }
+  .reason, .tx .end, .tx pre { user-select: text; cursor: text; }
   main { max-width: 1180px; margin: 0 auto; padding: 18px 20px 60px; display: grid; gap: 18px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--ink-2); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
@@ -263,6 +265,8 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// A Copy button for text that's awkward to select (errors inside clickable rows).
+const copyBtn = (text) => `<button class="copy" data-copy="${esc(text)}" title="Copy to the clipboard">Copy</button>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ago = (t) => { if (!t) return "—"; const s = Math.round((Date.now() - t) / 1000);
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 172800 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
@@ -341,7 +345,7 @@ name = "your-org/website"</pre>`);
         <td><span class="badge s-${j.state}">${j.state}</span></td>
         <td>${esc(kindLabel)}${AGENT_KINDS.includes(j.kind) ? "" : `<div class="muted" style="font-size:11px">no agent, no tokens</div>`}</td>
         <td>${link(j.repo, j.number, isPr)}${j.pr && j.kind === "build" ? ` → ${link(j.repo, j.pr, true)}` : ""}
-          ${j.reason ? `<div class="reason">${esc(j.reason)}${j.resume_after ? ` · resumes in ${until(j.resume_after)}` : ""}</div>` : ""}</td>
+          ${j.reason ? `<div class="reason">${esc(j.reason)}${j.resume_after ? ` · resumes in ${until(j.resume_after)}` : ""}${copyBtn(`${j.repo} #${j.number} ${j.kind} (job ${j.id}): ${j.reason}`)}</div>` : ""}</td>
         <td class="hide-sm small">${esc(j.branch)}</td>
         <td class="small">${j.tokens ? esc(j.tokensText) : "—"}${j.cost ? `<div class="muted">≈$${j.cost.toFixed(2)} list</div>` : ""}</td>
         <td class="hide-sm small muted">${when}</td>
@@ -516,12 +520,12 @@ function addEntry(el, e) {
     if (call) {
       call.querySelector("[data-mark]").textContent = e.error ? "✗" : "✓";
       if (e.error) call.classList.add("err");
-      call.insertAdjacentHTML("beforeend", `<pre class="${e.error ? "err" : ""}">${esc(e.text) || "(no output)"}</pre>`);
+      call.insertAdjacentHTML("beforeend", `<pre class="${e.error ? "err" : ""}">${esc(e.text) || "(no output)"}</pre>${e.error ? copyBtn(e.text) : ""}`);
       return;
     }
-    html = `<pre class="${e.error ? "err" : ""}${sub}">${esc(e.text)}</pre>`;
+    html = `<pre class="${e.error ? "err" : ""}${sub}">${esc(e.text)}</pre>${e.error ? copyBtn(e.text) : ""}`;
   }
-  else if (e.k === "end") html = `<div class="end${e.error ? " err" : ""}"><b>${e.error ? "Ended with an error" : "Done"}</b> · ${e.turns} turns${e.cost ? ` · ≈$${e.cost.toFixed(2)} list` : ""}\n${esc(e.text)}</div>`;
+  else if (e.k === "end") html = `<div class="end${e.error ? " err" : ""}"><b>${e.error ? "Ended with an error" : "Done"}</b> · ${e.turns} turns${e.cost ? ` · ≈$${e.cost.toFixed(2)} list` : ""}${e.error ? copyBtn(e.text) : ""}\n${esc(e.text)}</div>`;
   if (html) el.insertAdjacentHTML("beforeend", html);
 }
 
@@ -536,6 +540,14 @@ async function refresh() {
 }
 
 document.addEventListener("click", async (ev) => {
+  const c = ev.target.closest("button[data-copy]");
+  if (c) {
+    ev.stopPropagation();
+    try { await navigator.clipboard.writeText(c.dataset.copy); c.textContent = "Copied"; }
+    catch { c.textContent = "Not copied"; }    // clipboard needs a secure origin: localhost is one, a LAN address isn't
+    setTimeout(() => (c.textContent = "Copy"), 1500);
+    return;
+  }
   const b = ev.target.closest("button[data-act]");
   if (b) {
     ev.stopPropagation();
@@ -549,6 +561,8 @@ document.addEventListener("click", async (ev) => {
     else { const [act, id] = key.split("-"); await api(`/api/jobs/${id}/${act}`, "POST"); }
     return refresh();
   }
+  // Selecting text (dragging over an error) ends in a click: don't let it fold the row away.
+  if (getSelection()?.toString()) return;
   const row = ev.target.closest("tr[data-job]");
   if (row && !ev.target.closest("a")) { const id = Number(row.dataset.job); if (open.has(id)) { open.delete(id); tx.delete(id); } else open.add(id); render(); }
   const st = ev.target.closest("tr[data-stack]");
