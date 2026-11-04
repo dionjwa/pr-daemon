@@ -239,7 +239,10 @@ Claude session. On startup, `running` jobs are re-queued.
 `pr-daemon.db`, `pr-daemon.log`, `claude-token` (optional), `repos/` (cached
 clones), `worktrees/`, `out/` (prompts, agent `*.jsonl` logs, PR text,
 screenshots), `refs/` (read-only clones of other repos an agent was asked to
-look at, one directory per branch), `assets/` (the screenshot branch clone),
+look at, one directory per branch), `assets/` (the screenshot branch clone), `secrets/<org>__<repo>.env` (a
+repo's dev API keys, written by the owner: `up`/`down`/`check` and agents get
+its **path** as `PR_DAEMON_SECRETS` when it exists, from `secretsEnv()`; the
+project's `up` reads the keys it wants, pr-daemon never reads the values),
 `caddy/`.
 
 ## Develop and test

@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createWriteStream, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { HOME } from "./config.ts";
+import { HOME, secretsEnv } from "./config.ts";
 import { cleanEnv } from "./util.ts";
 
 // ---------- Claude's login ----------
@@ -39,10 +39,10 @@ export function parseClaudeToken(text: string): string {
   return text.replace(/^\s*(?:export\s+)?CLAUDE_CODE_OAUTH_TOKEN\s*=\s*/, "").replace(/["'\s]/g, "");
 }
 
-/** The environment for every `claude` pr-daemon starts. */
-export function claudeEnv(): NodeJS.ProcessEnv {
+/** The environment for every `claude` pr-daemon starts; in a worktree, also where its repo's dev secrets are. */
+export function claudeEnv(cwd = ""): NodeJS.ProcessEnv {
   const { token } = claudeAuth();
-  return cleanEnv(token ? { [CLAUDE_TOKEN_ENV]: token } : {});
+  return cleanEnv({ ...(cwd ? secretsEnv(cwd) : {}), ...(token ? { [CLAUDE_TOKEN_ENV]: token } : {}) });
 }
 
 export interface Usage { input: number; output: number; cache_create: number; cache_read: number }
@@ -110,7 +110,7 @@ export function startAgent(o: AgentOptions): AgentRun {
   args.push(...(o.resume ? ["--resume", o.resume] : ["--session-id", sessionId]));
   if (o.model) args.push("--model", o.model);
 
-  const child = spawn("claude", args, { cwd: o.cwd, env: claudeEnv(), stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("claude", args, { cwd: o.cwd, env: claudeEnv(o.cwd), stdio: ["ignore", "pipe", "pipe"] });
   const log = createWriteStream(o.logFile, { flags: "a" });
   // Claude doesn't log the prompt it was given: record it, and where each run starts.
   log.write(JSON.stringify({ type: "pr-daemon", subtype: "start", at: Date.now(), prompt: o.prompt, resume: !!o.resume }) + "\n");

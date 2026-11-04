@@ -3,12 +3,37 @@
 // and validated first, and a bad file is never written.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "smol-toml";
 import { parseAmount, parseDuration } from "./util.ts";
 
 export const HOME = process.env.PR_DAEMON_HOME ?? join(homedir(), ".pr-daemon");
 export const CONFIG_PATH = process.env.PR_DAEMON_CONFIG ?? join(HOME, "config.toml");
+
+/**
+ * A repo's dev secrets (API keys its preview stack needs): one env file per
+ * repo, `<HOME>/secrets/<org>__<repo>.env`, found from a worktree path the way
+ * refsFor() finds its references. "" for a directory that isn't one of
+ * pr-daemon's worktrees. Pure.
+ */
+export function secretsFor(worktree: string, home = HOME): string {
+  const root = resolve(home, "worktrees") + sep;
+  const abs = resolve(worktree) + sep;
+  if (!abs.startsWith(root)) return "";
+  const repo = abs.slice(root.length).split(sep)[0];
+  return repo ? join(home, "secrets", `${repo}.env`) : "";
+}
+
+/**
+ * `PR_DAEMON_SECRETS=<that file>` when it exists, for the stack commands and
+ * the agents in that worktree. The path only, never the values: the project's
+ * `up` reads the keys it wants from it, so nothing else in the file reaches
+ * the stack, and an agent re-running `up` finds the same file.
+ */
+export function secretsEnv(worktree: string): Record<string, string> {
+  const f = secretsFor(worktree);
+  return f && existsSync(f) ? { PR_DAEMON_SECRETS: f } : {};
+}
 
 export interface RepoConfig {
   name: string;          // owner/repo

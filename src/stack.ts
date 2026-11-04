@@ -1,6 +1,7 @@
 // A project's preview stack, driven by its own commands. Each is an arbitrary
 // shell command line (see sh()); the `just pr-daemon-*` defaults are only a
 // convention, and the one just-aware bit is missingRecipe() below.
+import { secretsEnv } from "./config.ts";
 import { SERVICE_NAME } from "./proxy.ts";
 import { run, sh, tail } from "./util.ts";
 
@@ -84,7 +85,7 @@ export function parseUp(stdout: string): { url: string; routes: Record<string, s
 export async function up(cmd: string, wt: string, env: Record<string, string>): Promise<UpResult> {
   if (await missingRecipe(cmd, wt)) return { ok: false, error: `\`${cmd}\`: no such recipe in this project`, networks: [] };
   const before = await networkIds();
-  const r = await sh(cmd, wt, { timeoutMs: UP_TIMEOUT, detached: true, env });
+  const r = await sh(cmd, wt, { timeoutMs: UP_TIMEOUT, detached: true, env: { ...secretsEnv(wt), ...env } });
   // What this `up` added, so teardown can take exactly those away again.
   const networks = before ? ((await networkIds()) ?? []).filter((id) => !before.includes(id)) : [];
   const out = `${r.stdout}\n${r.stderr}`;
@@ -99,14 +100,14 @@ export async function up(cmd: string, wt: string, env: Record<string, string>): 
 /** `env` is only for a restart, which sets PR_DAEMON_KEEP_DATA; with none, `down` deletes the stack's data. */
 export async function down(cmd: string, wt: string, env?: Record<string, string>): Promise<{ ok: boolean; output: string }> {
   if (await missingRecipe(cmd, wt)) return { ok: true, output: "no down recipe" };
-  const r = await sh(cmd, wt, { timeoutMs: 10 * 60e3, env });
+  const r = await sh(cmd, wt, { timeoutMs: 10 * 60e3, env: { ...secretsEnv(wt), ...env } });
   return { ok: r.code === 0, output: tail(`${r.stdout}\n${r.stderr}`, 30) };
 }
 
 /** The harness's definition of done. No check configured → passes. */
 export async function check(cmd: string, wt: string): Promise<{ ok: boolean; output: string; skipped: boolean }> {
   if (!cmd.trim() || (await missingRecipe(cmd, wt))) return { ok: true, output: "", skipped: true };
-  const r = await sh(cmd, wt, { timeoutMs: CHECK_TIMEOUT });
+  const r = await sh(cmd, wt, { timeoutMs: CHECK_TIMEOUT, env: secretsEnv(wt) });
   return { ok: r.code === 0, output: tail(`${r.stdout}\n${r.stderr}`, 80), skipped: false };
 }
 

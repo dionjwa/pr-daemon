@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
-import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, setTopLevel } from "./config.ts";
+import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel } from "./config.ts";
 import { issueForPr, refsNote, render, restart, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
@@ -462,6 +462,14 @@ test("run() timeout kills a detached command's whole group", async () => {
   const r = await run("bash", ["-c", "sleep 5 & sleep 5"], { timeoutMs: 200, detached: true });
   assert.notEqual(r.code, 0);
   assert.match(r.stderr, /timed out/);
+});
+
+test("a repo's dev secrets are one file per repo, shared by its branches", () => {
+  const home = "/home/u/.pr-daemon";
+  assert.equal(secretsFor(`${home}/worktrees/org__repo/42-thing`, home), `${home}/secrets/org__repo.env`);
+  assert.equal(secretsFor(`${home}/worktrees/org__repo/feat/nested/sub`, home), `${home}/secrets/org__repo.env`);
+  assert.equal(secretsFor("/tmp/somewhere-else", home), "");
+  assert.equal(secretsFor(`${home}/worktrees`, home), "");
 });
 
 test("a reference repo's clone lands outside the worktree", () => {

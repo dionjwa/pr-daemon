@@ -225,10 +225,27 @@ Either way works:
         {{REFS}}/<org>__<repo>/<branch>
             read-only clones of other repositories the agent was asked to
             look at; deliberately outside the worktree
+        {{SECRETS}}/<org>__<repo>.env
+            the repository's dev secrets (see below); one file for every branch
 
   Nothing stops you opening those directories, reading them, or running git in
   them — they are normal checkouts. Leave them where they are, though: the
   `down` command runs from the worktree before it's removed.
+- **API keys:** a worktree has no `.env` (it's gitignored), so a stack that
+  needs keys gets them from `{{SECRETS}}/<org>__<repo>.env`, written by the
+  owner, outside every checkout. When that file exists, `up`, `down`, `check`
+  and the agents get its **path** as `PR_DAEMON_SECRETS`, never its values.
+  Read only the keys the stack needs, and let a value already in the
+  environment win:
+
+        f="${PR_DAEMON_SECRETS:-}"
+        for key in OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            [ -n "${!key:-}" ] || [ ! -f "$f" ] && continue
+            v="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}${key}=//p" "$f" | tail -1)"
+            v="${v%\"}"; v="${v#\"}"; [ -n "$v" ] && export "${key}=${v}"
+        done
+
+  Never echo a value, and never write one into the worktree.
 - A normal developer environment: your login shell's PATH, Docker, etc. `CI` is
   **not** set, deliberately.
 - No TTY, no interactive prompts, no browser.

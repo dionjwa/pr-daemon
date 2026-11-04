@@ -18,6 +18,7 @@ export function paths(): Record<string, string> {
     worktrees: join(HOME, "worktrees"),
     out: join(HOME, "out"),
     refs: join(HOME, "refs"),
+    secrets: join(HOME, "secrets"),
     log: join(HOME, "pr-daemon.log"),
   };
 }
@@ -28,7 +29,7 @@ export function setupDoc(cfg: Config, command: string): string {
   return render(readFileSync(DOC, "utf8"), {
     STATUS_URL: `http://localhost:${cfg.port}/`, CONFIG_PATH: p.config, LABEL: cfg.label, COMMAND: command,
     UP: r?.up ?? "just pr-daemon-up", DOWN: r?.down ?? "just pr-daemon-down", CHECK: r?.check || "just pr-daemon-check",
-    HOME: p.home, REPOS: p.repos, WORKTREES: p.worktrees, OUT: p.out, REFS: p.refs,
+    HOME: p.home, REPOS: p.repos, WORKTREES: p.worktrees, OUT: p.out, REFS: p.refs, SECRETS: p.secrets,
     MAX_ATTEMPTS: cfg.agent.maxAttempts,
     CI_ROUNDS: cfg.checks.watch && cfg.checks.fix ? cfg.checks.maxRounds : 0,
     PREVIEW: pv.domain && pv.proxy !== "off" ? `*.${pv.domain}` : "none, so those variables are empty",

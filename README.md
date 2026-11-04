@@ -230,6 +230,19 @@ add recipes with those names to your project, there's nothing to configure.
 [`examples/justfile`](examples/justfile) is one to copy (`just contract`
 prints it).
 
+**API keys the stack needs** (an OpenAI key, say) go in one file per repo,
+outside every checkout:
+
+```bash
+mkdir -p ~/.pr-daemon/secrets && chmod 700 ~/.pr-daemon/secrets
+$EDITOR ~/.pr-daemon/secrets/your-org__your-repo.env   # OPENAI_API_KEY=sk-...
+chmod 600 ~/.pr-daemon/secrets/your-org__your-repo.env
+```
+
+`up` gets that file's path as `PR_DAEMON_SECRETS` and reads the keys it needs
+from it ([the setup page](docs/setup.md) has the snippet). pr-daemon never
+reads the values itself.
+
 Two branches' stacks must be able to run at the same time, so derive ports and
 container names from the branch name. Try your commands yourself on a branch
 before letting an agent loose on them.
@@ -520,6 +533,7 @@ installed service after changing the code), `just db`, `just contract`.
   worktrees/<org>__<repo>/42-…/     the branch the agent works in (the stack runs from here)
   out/<org>__<repo>/42-…/           prompts, agent logs (*.jsonl), PR text, screenshots
   refs/<org>__<repo>/42-…/          read-only clones of other repos the agent was asked to look at
+  secrets/<org>__<repo>.env         optional: the repo's dev API keys; up gets the path as PR_DAEMON_SECRETS
   caddy/                            the generated Caddy config, its log, and certificates (binary mode)
 ```
 

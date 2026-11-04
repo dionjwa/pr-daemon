@@ -375,6 +375,7 @@ name = "your-org/website"</pre>`);
     [`${P.worktrees}/<org>__<repo>/<branch>`, "the checkout the agent works in; your up/down/check commands run here"],
     [`${P.out}/<org>__<repo>/<branch>`, "prompts, agent logs (*.jsonl), PR text, screenshots"],
     [`${P.refs}/<org>__<repo>/<branch>`, "read-only clones of other repos an agent was asked to look at"],
+    [`${P.secrets}/<org>__<repo>.env`, "a repo's dev API keys; its path is PR_DAEMON_SECRETS for up, down, check and agents"],
     [P.log, "the service log"],
   ].map(([path, what]) => `${esc(path)}\n    <span class="muted">${esc(what)}</span>`).join("\n")}</pre>`;
 
