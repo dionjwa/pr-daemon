@@ -62,6 +62,7 @@ and **http://localhost:7377/docs** draws the whole thing as state machines.
 | You do | pr-daemon does |
 |---|---|
 | Open an issue and describe the feature. | — |
+| Want to talk it through first? Comment on the **issue**: `/pr-daemon how would this fit with the editor?` | An agent reads the issue, the conversation and the code, and replies on the issue. It changes nothing. Each new `/pr-daemon` comment continues the same conversation. When you're happy, add the **`agent`** label: the build gets the conversation too, so what you agreed is what it builds. Once the issue has a PR, the same comment revises that PR instead. |
 | Add the **`agent`** label. | Within a minute: labels it `agent:working` and comments with the branch. |
 | Wait. Watch at http://localhost:7377 if you like. | Builds, tests, opens a PR, reviews it, and labels the issue `agent:in-review`. |
 | Open the **Preview** link in the PR and try it. | Keeps the stack running and restarts it if it stops. |
@@ -509,7 +510,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 pr-daemon serve                      # the process (install-service runs this for you)
 pr-daemon status                     # running, queued and paused jobs, and stacks
 pr-daemon doctor                     # check tools, logins, config
-pr-daemon run build your-org/repo 42 # one job now, in this terminal (build|review|revise|ci|merge|teardown|restart)
+pr-daemon run build your-org/repo 42 # one job now, in this terminal (build|adopt|review|revise|discuss|ci|merge|teardown|restart)
 pr-daemon ref your-org/other-repo    # read-only clone of another repo, for an agent to look at (run it in a worktree)
 pr-daemon stop                       # shut it down (stops the service too, if one is installed)
 pr-daemon install-service | uninstall-service
@@ -565,6 +566,7 @@ it at one.
   | A labelled PR's title and body | the same, when the label is added and again when it is taken on | refused, with a comment on the PR saying who and why |
   | A `/pr-daemon` comment | who wrote it | ignored |
   | The PR conversation given to a revision | each comment's and review's author | left out of the prompt (the event log says how many) |
+| The issue conversation given to a discussion or a build | each comment's author (the issue's own text is checked as for a build) | left out of the prompt; refused, with a comment, if the issue text is someone else's |
 
   Your own `gh` user's words always count as trusted, because pr-daemon's
   PR descriptions and reviews are posted as you.

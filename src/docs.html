@@ -202,7 +202,8 @@ stateDiagram-v2
   <h2>3 · One job</h2>
   <div class="pad">
     <p>Every arrow in the two diagrams above is a row in the job queue: <code>build</code>, <code>adopt</code>,
-      <code>review</code>, <code>revise</code>, <code>ci</code>, <code>merge</code>, <code>teardown</code>,
+      <code>review</code>, <code>revise</code>, <code>discuss</code> (a <code>/pr-daemon</code> comment on an issue with no PR:
+      the agent replies on the issue and changes nothing), <code>ci</code>, <code>merge</code>, <code>teardown</code>,
       <code>restart</code>. Each has a unique trigger key (the label event id, the comment id, the failing head
       sha…), so one thing happening on GitHub starts exactly one job, ever.</p>
     <figure>

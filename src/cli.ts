@@ -61,7 +61,7 @@ async function main(argv: string[]): Promise<void> {
     case "setup": console.log(setupDoc(loadConfig(), "/pr-daemon")); return;
     case "run": {
       const [kind, repo, n, ...rest] = args;
-      if (!["build", "adopt", "review", "revise", "ci", "merge", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
+      if (!["build", "adopt", "review", "revise", "discuss", "ci", "merge", "teardown", "restart"].includes(kind) || !repo || !Number(n)) throw new Error("usage: pr-daemon run <kind> <owner/repo> <number> [feedback]");
       const d = new Daemon();
       const id = d.store.enqueue({ repo, kind: kind as JobKind, number: Number(n), trigger_key: `manual:${repo}#${n}:${kind}:${Date.now()}`,
         payload: rest.length ? { feedback: rest.join(" ") } : {} });

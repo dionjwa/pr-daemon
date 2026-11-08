@@ -96,11 +96,11 @@ export async function provenance(repo: string, n: number): Promise<Provenance> {
   return { author: who(i.author), editors: i.userContentEdits.nodes.map((e) => who(e.editor)), renamers: i.timelineItems.nodes.map((e) => who(e.actor)) };
 }
 
-/** A PR's conversation (comments and review bodies), oldest first, from trusted authors only. */
-export async function trustedDiscussion(repo: string, pr: number, trusted: string[], skipCommentId?: number): Promise<{ text: string; dropped: number }> {
+/** A PR's or an issue's conversation (comments, and a PR's review bodies), oldest first, from trusted authors only. */
+export async function trustedDiscussion(repo: string, pr: number, trusted: string[], skipCommentId?: number, isIssue = false): Promise<{ text: string; dropped: number }> {
   const [comments, reviews] = await Promise.all([
     apiAll<{ id: number; body: string; user: { login: string } | null; created_at: string }>(`repos/${repo}/issues/${pr}/comments?per_page=100`),
-    apiAll<{ body: string; user: { login: string } | null; submitted_at: string }>(`repos/${repo}/pulls/${pr}/reviews?per_page=100`),
+    isIssue ? [] : apiAll<{ body: string; user: { login: string } | null; submitted_at: string }>(`repos/${repo}/pulls/${pr}/reviews?per_page=100`),
   ]);
   const all = [
     ...comments.filter((c) => c.id !== skipCommentId).map((c) => ({ who: c.user?.login ?? "ghost", at: c.created_at, body: c.body })),

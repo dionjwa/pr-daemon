@@ -473,7 +473,7 @@ function mergeCell(s) {
 // we keep and re-attach: expanded calls stay expanded, and new entries are
 // appended (fetched from where we left off) rather than redrawn. It follows
 // the bottom while you're at the bottom, and stays put once you scroll up.
-const AGENT_KINDS = ["build", "adopt", "review", "revise", "ci", "merge"];
+const AGENT_KINDS = ["build", "adopt", "review", "revise", "discuss", "ci", "merge"];
 const tx = new Map();            // job id → { el, count, top, stick, busy, loaded }
 function attachTx(id, cell) {
   let t = tx.get(id);

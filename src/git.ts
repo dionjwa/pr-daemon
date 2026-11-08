@@ -113,6 +113,27 @@ export async function ensureBranchWorktree(repo: string, branch: string): Promis
   return wt;
 }
 
+/**
+ * A detached checkout of the base for an agent that only talks about an
+ * issue: no branch, so nothing it does can be pushed, and `removeDetached()`
+ * deletes it after every run. The path is fixed (`<worktrees>/<dir>`) because
+ * Claude keys its sessions on the working directory, and the next comment
+ * resumes the same conversation from the same place.
+ */
+export async function detachedWorktree(repo: string, dir: string, base: string): Promise<string> {
+  const wt = join(worktreeRoot(repo), dir);
+  if (existsSync(wt)) await removeDetached(repo, wt);
+  mkdirSync(worktreeRoot(repo), { recursive: true });
+  await git(repoDir(repo), "worktree", "add", "-q", "--detach", wt, `origin/${base}`);
+  return wt;
+}
+
+export async function removeDetached(repo: string, wt: string): Promise<void> {
+  const r = await run("git", ["-C", repoDir(repo), "worktree", "remove", "--force", wt]);
+  if (r.code !== 0) await run("rm", ["-rf", wt]);
+  await run("git", ["-C", repoDir(repo), "worktree", "prune"]);
+}
+
 // ---------------------------------------------------------------- references
 // Another repository, read-only, for an agent that has to look at code it
 // isn't working on ("do it the way <other repo> does"). `gh` is the owner's

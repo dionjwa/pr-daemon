@@ -9,7 +9,7 @@ import { AGENT_KINDS, openDb, Store, type Job, type JobKind, type Notice, type S
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { catchUpBlocker } from "./merge.ts";
-import { agentLog, CancelError, FailError, issueForPr, PauseError, JOBS, type Ctx } from "./pipeline.ts";
+import { agentLog, CancelError, discussBranch, FailError, issueForPr, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
 import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
@@ -81,7 +81,7 @@ export class Daemon {
     const next = o.kind === undefined
       ? setTopLevel(text, "notify", String(o.on))
       : setTopLevel(text, "notify_on", `[${NOTICE_KINDS.map((k) => k.kind)
-        .filter((k) => (k === o.kind ? o.on : parseConfig(text).notifyOn.includes(k))).map((k) => `"${k}"`).join(", ")}]`, "notify", "which notices to send: ready, revised, ci, merge, failed, paused");
+        .filter((k) => (k === o.kind ? o.on : parseConfig(text).notifyOn.includes(k))).map((k) => `"${k}"`).join(", ")}]`, "notify", "which notices to send: ready, revised, replied, ci, merge, failed, paused");
     this.saveConfig(next);
     return next;
   }
@@ -340,23 +340,35 @@ export class Daemon {
       if (id) store.event(`queued ${kind} for ${repo}#${n} "${item.title}" (label by @${ev.actor})`, id);
     }
 
-    // 2. "/pr-daemon …" (or 😈/👿/:imp:/:smiling_imp:/:demon: …) comments on PRs → revise.
+    // 2. "/pr-daemon …" (or 😈/👿/:imp:/:smiling_imp:/:demon: …) comments:
+    //    on a PR → revise it; on an issue → discuss it (an agent replies on
+    //    the issue), or revise the PR pr-daemon already opened for it.
     const sinceKey = `comments-since:${repo}`;
     const since = store.get(sinceKey) ?? new Date(Date.now() - 10 * 60e3).toISOString(); // first run: don't replay history
     const startedAt = Date.now();
     for (const c of await gh.commentsSince(repo, since)) {
       const feedback = gh.parseCommand(c.body);
-      if (feedback === null || !c.html_url.includes("/pull/")) continue;
+      if (feedback === null) continue;
       const key = `comment:${repo}:${c.id}`;
       if (store.hasTrigger(key)) continue;
-      const pr = Number(c.issue_url.split("/").pop());
+      const n = Number(c.issue_url.split("/").pop());
+      const onPr = c.html_url.includes("/pull/");
+      // The issue's own PR, while it's open: the comment is feedback on that work.
+      const built = onPr ? undefined : store.stackForIssue(repo, n);
+      const pr = onPr ? n : built?.pr ?? null;
+      const kind: JobKind = pr ? "revise" : "discuss";
       if (!gh.isListed(allowed, c.user.login)) {
-        store.enqueue({ repo, kind: "revise", number: pr, trigger_key: key, state: "ignored", reason: `${COMMAND} from @${c.user.login}, who isn't allowed` });
+        store.enqueue({ repo, kind, number: pr ?? n, trigger_key: key, state: "ignored", reason: `${COMMAND} from @${c.user.login}, who isn't allowed` });
         continue;
       }
-      const branch = (await gh.pr(repo, pr)).head.ref;
-      const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback, commentId: c.id } });
-      if (id) store.event(`queued revise for ${repo} PR #${pr} (${COMMAND} by @${c.user.login})`, id);
+      if (pr) {
+        const branch = (await gh.pr(repo, pr)).head.ref;
+        const id = store.enqueue({ repo, kind: "revise", number: pr, branch, trigger_key: key, payload: { feedback, commentId: c.id } });
+        if (id) store.event(`queued revise for ${repo} PR #${pr} (${COMMAND} by @${c.user.login}${onPr ? "" : ` on issue #${n}`})`, id);
+      } else {
+        const id = store.enqueue({ repo, kind: "discuss", number: n, branch: discussBranch(n), trigger_key: key, payload: { feedback, commentId: c.id } });
+        if (id) store.event(`queued discuss for ${repo}#${n} (${COMMAND} by @${c.user.login})`, id);
+      }
     }
     store.set(sinceKey, new Date(startedAt - 60e3).toISOString()); // overlap; ids dedupe
 
@@ -709,7 +721,8 @@ export class Daemon {
           this.store.update(job.id, { state: "paused", reason: e.message, resume_after: e.retryAt });
           const when = e.retryAt ? `It resumes on its own in about ${formatDuration(e.retryAt - Date.now())}.` : `Press Resume on the status page when you're ready: ${this.statusUrl(job.id)}`;
           this.store.event(`paused: ${e.message}`, job.id, "warn");
-          await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "paused").catch(() => {});
+          // A discussion has no status label of its own: the issue may not be labelled at all.
+          if (job.kind !== "discuss") await gh.setStatus(job.repo, this.issueOf(job), this.cfg.label, "paused").catch(() => {});
           // A pause that lifts itself (the budget window) isn't the person's to act on.
           if (!e.retryAt) this.attention({ repo: job.repo, number: job.number, job_id: job.id, kind: "paused", level: "warn",
             title: `⏸ Paused: ${job.repo} #${job.number} ${job.kind}`, body: `${e.message}. Press Resume on the status page.`, url: this.statusUrl(job.id) });
@@ -729,7 +742,7 @@ export class Daemon {
             this.attention({ repo: job.repo, number: job.number, job_id: job.id, kind: "failed", level: "bad",
               title: `❌ Failed: ${job.repo} #${job.number} ${job.kind}`, body: e.message.slice(0, 200), url: this.statusUrl(job.id) });
             if (TRIGGERED.includes(job.kind)) await gh.setStatus(job.repo, job.number, this.cfg.label, "failed").catch(() => {});
-            await gh.comment(job.repo, job.number, `❌ **pr-daemon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-daemon machine). Retry from there, or remove and re-add the \`${this.cfg.label}\` label.`);
+            await gh.comment(job.repo, job.number, `❌ **pr-daemon** hit an error: \`${e.message.slice(0, 300)}\`\n\nDetails: ${this.statusUrl(job.id)} (on the pr-daemon machine). Retry from there, or ${job.kind === "discuss" ? `comment \`${COMMAND} …\` again` : `remove and re-add the \`${this.cfg.label}\` label`}.`);
           }
         }
       })

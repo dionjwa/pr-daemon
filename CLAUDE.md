@@ -29,7 +29,16 @@ get its stack and a review. One long-running process on the owner's machine
    that's idle and conflict-free but behind its base gets the same
    merge (`merge.catch_up`), so it stays ready to merge
 9. `/pr-daemon <feedback>` comments on the PR trigger further revisions (a
-   leading 😈, 👿, `:smiling_imp:`, `:imp:` or `:demon:` works too: `gh.parseCommand()`)
+   leading 😈, 👿, `:smiling_imp:`, `:imp:` or `:demon:` works too: `gh.parseCommand()`).
+   On an **issue** with no PR yet, the same comment runs `discuss`: an agent
+   reads the issue, the trusted conversation and the code (a detached
+   checkout of the base, deleted after each run) and replies on the issue.
+   It writes nothing. One Claude session per issue (kv
+   `discuss-session:<repo>#<n>`), so each comment continues the conversation.
+   Once the issue has an open PR, an issue comment revises that PR instead.
+   Labelling the issue afterwards builds it **with** that conversation: the
+   build prompt gets the issue's trusted comments (`buildDiscussion()`), since
+   the builder can't resume the discuss session (different cwd).
 10. when the PR closes (or the issue, before there's a PR), or the `agent` label
    is removed: `just pr-daemon-down`, remove the worktree, clear labels, and
    delete the branch on GitHub. Removing the label also cancels running jobs
@@ -210,7 +219,7 @@ A human always merges.
 |---|---|
 | `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `ref <owner/repo>`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
-| `pipeline.ts` | The jobs (`JOBS`): `build`, `adopt`, `review`, `revise`, `ci`, `merge`, `teardown`, `restart`. `bringUp()` is the one place that runs `up` and writes the stack row. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
+| `pipeline.ts` | The jobs (`JOBS`): `build`, `adopt`, `review`, `revise`, `discuss`, `ci`, `merge`, `teardown`, `restart`. `bringUp()` is the one place that runs `up` and writes the stack row. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
 | `transcript.ts` | Parses an agent's `*.jsonl` log into what it said, each tool call and its result, for `GET /api/jobs/<id>/transcript?from=N` (the page polls for new entries). `agentLog(job)` in `pipeline.ts` is the one place that knows each job's log path |
 | `merge.ts` | The pure merge decisions: `assessConflicts()` (agent or human), `hasConflictMarkers()`, `parseMergeReport()` (the agent's `CONFIDENCE` / `NEEDS_HUMAN` trailer), `reviewReasons()` (what makes a pushed merge "needs your review"). The git side (`startMerge`, `conflicts`, `abortMerge`, `commitMerge`) is in `git.ts` |

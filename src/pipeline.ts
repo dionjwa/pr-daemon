@@ -1,4 +1,4 @@
-// The work itself: build, adopt, review, revise, ci, merge, teardown, restart.
+// The work itself: build, adopt, review, revise, discuss, ci, merge, teardown, restart.
 // Each function runs one job end to end and is safe to re-run after a pause
 // or crash: worktrees, stacks and PRs are found and reused, and the agent's
 // Claude session is resumed rather than restarted.
@@ -182,6 +182,7 @@ export function agentLog(job: Pick<Job, "id" | "kind" | "repo" | "branch">): str
   if (job.kind === "adopt") return join(out, "agent-adopt.jsonl");
   if (job.kind === "review") return join(out, `review-${job.id}`, "agent.jsonl");
   if (job.kind === "revise") return join(out, `agent-revise-${job.id}.jsonl`);
+  if (job.kind === "discuss") return join(out, `agent-discuss-${job.id}.jsonl`);
   if (job.kind === "ci") return join(out, `agent-ci-${job.id}.jsonl`);
   if (job.kind === "merge") return join(out, `agent-merge-${job.id}.jsonl`);
   return null;
@@ -250,6 +251,25 @@ export async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resu
 }
 
 // ---------------------------------------------------------------- build
+/**
+ * The issue's conversation as a section of the build prompt, or "" when there
+ * is none. The body states the task; the conversation refines it, and where
+ * they disagree the later word wins. Pure.
+ */
+export function buildDiscussion(text: string): string {
+  if (!text.trim()) return "";
+  return `
+# The conversation on the issue
+
+Only people allowed to direct you; other comments were left out on purpose.
+It refines the task above: where it changes or settles something (a plan, a
+decision, a narrower scope), follow the latest word. pr-daemon's own replies
+(💬) are suggestions that were made, not decisions, unless someone agreed.
+
+${text}
+`;
+}
+
 export async function build(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const cfg = ctx.cfg();
@@ -290,9 +310,13 @@ export async function build(ctx: Ctx): Promise<void> {
     ? `The stack for this branch is already running at ${stackWhere(cfg, branch, s)} Restart it with \`${repo.up}\` (idempotent) if you change something it depends on.`
     : upFailedNote(repo.up, s.error, out);
 
+  // A `/pr-daemon` discussion on the issue is part of the task: what was agreed
+  // there refines the body. Only trusted people's words, as for a revise.
+  const talk = await gh.trustedDiscussion(repo.name, n, await gh.trustedAuthors(cfg.allowedUsers), undefined, true);
+  if (talk.dropped) store.event(`left ${talk.dropped} issue comment(s) from people not in allowed_users out of the prompt`, job.id);
   const vars = {
     REPO: repo.name, BRANCH: branch, BASE: base, ISSUE_NUMBER: n, ISSUE_TITLE: issue.title, ISSUE_URL: issue.html_url,
-    ISSUE_BODY: issue.body ?? "", OUT: out, PREVIEW_URL: stackWhere(cfg, branch, s), UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)", STACK_NOTE: stackNote,
+    ISSUE_BODY: issue.body ?? "", DISCUSSION: buildDiscussion(talk.text), OUT: out, PREVIEW_URL: stackWhere(cfg, branch, s), UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)", STACK_NOTE: stackNote,
     REFERENCES: refsNote(wt),
   };
   writeFileSync(join(out, "prompt-build.md"), prompt("build", vars));
@@ -623,6 +647,69 @@ export async function revise(ctx: Ctx): Promise<void> {
 
 ${summary}
 ${shots ? `\n### Updated screenshots\n\n${shots}` : ""}`));
+}
+
+// ---------------------------------------------------------------- discuss
+/** The pseudo-branch a discussion's jobs carry: its lock, its out/ dir and its checkout's name. */
+export const discussBranch = (n: number) => `discuss-${n}`;
+
+/**
+ * A `/pr-daemon` comment on an issue with no PR yet: an agent reads the issue,
+ * the trusted conversation and the code, and replies on the issue. It writes
+ * nothing — a detached checkout of the base, deleted afterwards. Each issue
+ * keeps one Claude session, so the next comment continues the conversation.
+ */
+export async function discuss(ctx: Ctx): Promise<void> {
+  const { store, job, repo } = ctx;
+  const cfg = ctx.cfg();
+  const n = job.number;
+  const branch = discussBranch(n);
+  if (job.branch !== branch) store.update(job.id, { branch });
+  const issue = await gh.issue(repo.name, n);
+  if (issue.state !== "open") throw new FailError(`issue #${n} is closed`);
+  // The issue's text is the agent's input, exactly as it is for a build.
+  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
+  if (strangers.length) {
+    const why = gh.untrustedText(strangers);
+    await gh.comment(repo.name, n, `🚫 **pr-daemon** won't discuss this: ${why}. ${gh.UNTRUSTED_HELP}`);
+    throw new FailError(why);
+  }
+  const { commentId, feedback = "" } = payload(job);
+  if (commentId) await gh.markComment(repo.name, commentId, "😈")
+    .catch((e) => store.event(`couldn't mark comment ${commentId}: ${(e as Error).message}`, job.id, "warn"));
+
+  const base = repo.base || (await gh.defaultBranch(repo.name));
+  await git.ensureClone(repo.name);
+  const wt = await git.detachedWorktree(repo.name, branch, base);
+  ctx.current_wt = wt;
+  const out = git.outDir(repo.name, branch);
+  mkdirSync(out, { recursive: true });
+  try {
+    const talk = await gh.trustedDiscussion(repo.name, n, await gh.trustedAuthors(cfg.allowedUsers), commentId, true);
+    if (talk.dropped) store.event(`left ${talk.dropped} issue comment(s) from people not in allowed_users out of the prompt`, job.id);
+    const discussion = talk.text || "(none)";
+    const full = prompt("discuss", {
+      REPO: repo.name, ISSUE_NUMBER: n, ISSUE_TITLE: issue.title, ISSUE_URL: issue.html_url, ISSUE_BODY: issue.body ?? "",
+      DISCUSSION: discussion, FEEDBACK: feedback || "(no question: give your view of the issue)", BASE: base, LABEL: cfg.label, REFERENCES: refsNote(wt),
+    });
+    writeFileSync(join(out, `prompt-discuss-${job.id}.md`), full);
+    // The conversation so far lives in the issue's session; a follow-up only needs what's new.
+    const sessionKey = `discuss-session:${repo.name}#${n}`;
+    const previous = store.get(sessionKey);
+    const followUp = `There's a new comment in the discussion on issue #${n}. The conversation now (trusted people only):\n\n${discussion}\n\n` +
+      `What you were just asked:\n\n${feedback || "(no question: give your view)"}\n\nThe checkout has been refreshed to the latest \`${base}\`. ` +
+      `Same rules as before: change nothing, and finish with your reply in markdown, posted on the issue as-is.`;
+    const reply = await agentStep(ctx, job.session_id
+      ? { prompt: "pr-daemon paused you. Continue from where you left off, and finish with your reply.", log: agentLog({ ...job, branch })!, resume: job.session_id, fresh: full, issue: n }
+      : { prompt: previous ? followUp : full, log: agentLog({ ...job, branch })!, resume: previous, fresh: full, issue: n });
+    store.set(sessionKey, store.job(job.id)!.session_id);
+    await gh.comment(repo.name, n, `💬 **pr-daemon**\n\n${reply.trim()}`);
+    ctx.notice = { kind: "replied", level: "ok", title: `💬 Replied: ${repo.name} #${n}`, body: issue.title, url: issue.html_url };
+  } finally {
+    await git.removeDetached(repo.name, wt);
+    const refs = git.refsFor(wt);
+    if (refs) rmSync(refs, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------- ci
@@ -1021,4 +1108,4 @@ export async function restart(ctx: Ctx): Promise<void> {
   if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 
-export const JOBS = { build, adopt, review, revise, ci, merge, teardown, restart } as const;
+export const JOBS = { build, adopt, review, revise, discuss, ci, merge, teardown, restart } as const;

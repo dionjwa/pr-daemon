@@ -108,6 +108,7 @@ export interface Config {
 export const NOTICE_KINDS = [
   { kind: "ready", label: "PR ready", detail: "a build is done: reviewed, and revised once if the review asked" },
   { kind: "revised", label: "Revised", detail: "a revise you asked for with /pr-daemon was pushed" },
+  { kind: "replied", label: "Replied", detail: "an agent answered a /pr-daemon comment on an issue" },
   { kind: "ci", label: "CI fix", detail: "a fix for failing checks was pushed, or the agent made no change" },
   { kind: "merge", label: "Merge", detail: "a merge with the base needs you, or needs a look before merging" },
   { kind: "failed", label: "Failed", detail: "a job failed or gave up" },
@@ -174,8 +175,8 @@ allowed_users = []       # who may direct the agent: add the label, write/edit l
 concurrency = 1          # agent runs at the same time
 prevent_sleep = true     # macOS: keep the machine awake while pr-daemon runs
 notify = true            # desktop notification when the agent needs you: a PR ready, a fix pushed, a failure (terminal-notifier on macOS; notify-send on Linux)
-notify_on = ["ready", "revised", "ci", "merge", "failed", "paused"]  # which notices to send (desktop, browser and Needs you);
-                         # ready, revised, ci, merge, failed, paused. The Config page has a checkbox for each
+notify_on = ["ready", "revised", "replied", "ci", "merge", "failed", "paused"]  # which notices to send (desktop, browser and Needs you);
+                         # ready, revised, replied, ci, merge, failed, paused. The Config page has a checkbox for each
 
 [budget]
 window = "5h"            # rolling window, e.g. one Claude subscription window

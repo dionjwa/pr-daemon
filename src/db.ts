@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME, type NoticeKind } from "./config.ts";
 
-export type JobKind = "build" | "adopt" | "review" | "revise" | "ci" | "merge" | "teardown" | "restart";
+export type JobKind = "build" | "adopt" | "review" | "revise" | "discuss" | "ci" | "merge" | "teardown" | "restart";
 export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled" | "ignored";
 
 export interface Job {
@@ -65,8 +65,8 @@ export interface Stack {
 // Conflicts come before red CI: CI doesn't run on a PR that can't merge.
 // `adopt` is a PR a person is already waiting on, so it goes ahead of a build,
 // which could hold the only agent slot for an hour.
-export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, merge: 2, ci: 3, revise: 4, review: 5, adopt: 6, build: 7 };
-export const AGENT_KINDS: JobKind[] = ["build", "adopt", "review", "revise", "ci", "merge"];
+export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, merge: 2, ci: 3, revise: 4, discuss: 4, review: 5, adopt: 6, build: 7 };
+export const AGENT_KINDS: JobKind[] = ["build", "adopt", "review", "revise", "discuss", "ci", "merge"];
 
 export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
   mkdirSync(HOME, { recursive: true });

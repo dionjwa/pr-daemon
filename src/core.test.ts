@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
 import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel } from "./config.ts";
-import { issueForPr, refsNote, render, restart, type Ctx } from "./pipeline.ts";
+import { buildDiscussion, issueForPr, refsNote, render, restart, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
 import { isListed, isPullRequest, parseCommand, untrustedWriters } from "./gh.ts";
@@ -487,4 +487,15 @@ test("a reference repo's clone lands outside the worktree", () => {
   assert.match(note, /pr-daemon ref <owner\/repo>/);
   assert.match(note, new RegExp(`refs/org__repo/42-thing`));
   assert.doesNotMatch(note, /worktrees/);
+});
+
+test("buildDiscussion: nothing without a conversation; with one, a section the build prompt carries", () => {
+  assert.equal(buildDiscussion(""), "");
+  assert.equal(buildDiscussion("  \n"), "");
+  const s = buildDiscussion("--- @owner, 2026-11-07\nlet's do the manifest");
+  assert.match(s, /^\n# The conversation on the issue\n/);
+  assert.match(s, /let's do the manifest\n$/);
+  const page = render(readFileSync(new URL("../prompts/build.md", import.meta.url), "utf8"), { ISSUE_BODY: "the body", DISCUSSION: s });
+  assert.match(page, /the body\n\n# The conversation on the issue[\s\S]*manifest\n\n# Your environment/);
+  assert.match(render(readFileSync(new URL("../prompts/build.md", import.meta.url), "utf8"), { ISSUE_BODY: "the body", DISCUSSION: "" }), /the body\n\n# Your environment/);
 });
