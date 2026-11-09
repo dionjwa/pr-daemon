@@ -246,6 +246,37 @@ export async function stripWorkflows(wt: string): Promise<{ files: string[]; pat
   return { files, patch };
 }
 
+/** Does the remote have this branch? Unknown (a network error) counts as yes, so nothing is done on a guess. */
+export async function onRemote(wt: string, branch: string): Promise<boolean> {
+  return (await run("git", ["-C", wt, "ls-remote", "--exit-code", "--heads", "origin", branch])).code !== 2;
+}
+
+/**
+ * Merge the base in when a branch GitHub hasn't seen yet would carry older
+ * `.github/workflows/` than the base has. A new branch has no old tip, so
+ * GitHub compares it with the default branch, and a workflow change that
+ * landed there while the agent worked looks like this branch undoing it: the
+ * push is refused for the `workflow` scope although no commit of ours touches
+ * a workflow file (superslides.io #204 and #205). Merging the base in makes
+ * them match, which GitHub accepts. Run it after `stripWorkflows()`: that one
+ * won't squash across a merge. Returns the workflow files that differed ([]
+ * when nothing was done); throws, with the merge undone, when it conflicts.
+ */
+export async function catchUpWorkflows(wt: string, base: string, branch: string): Promise<string[]> {
+  if (await onRemote(wt, branch)) return [];
+  await git(wt, "fetch", "-q", "origin", base);
+  const files = await changedFiles(wt, "HEAD", `origin/${base}`, WORKFLOWS);
+  if (!files.length) return [];
+  const before = await git(wt, "rev-parse", "HEAD");
+  const m = await startMerge(wt, base, branch);
+  if (m.clean) return files;
+  await abortMerge(wt, before);
+  throw new Error(`GitHub would refuse the push: ${base} changed ${files.join(", ")} since ${branch} started, ` +
+    `and pr-daemon's gh login lacks the "workflow" scope, so ${branch} has to include that change. Merging ${base} in conflicts ` +
+    `(${m.conflicts.map((c) => c.path).join(", ")}). Merge it yourself, then press Resume on the job (status page):\n` +
+    `cd ${wt} && git fetch origin && git merge origin/${base}   # resolve, then: git commit --no-edit`);
+}
+
 /**
  * The PR comment for a workflow change `stripWorkflows()` held back: every
  * step the human needs, ready to paste. The diff rides in a heredoc, so the

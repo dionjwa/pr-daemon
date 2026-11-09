@@ -241,3 +241,42 @@ test("heldWorkflowComment: its shell block applies the change, and it names the 
   execFileSync("bash", ["-c", apply], { cwd: wt });
   assert.equal(readFileSync(join(wt, ".github/workflows/test.yml"), "utf8"), wanted);
 });
+
+test("catchUpWorkflows: a new branch behind the base's workflow files merges the base in", async () => {
+  const { wt, before } = repoWith("one\ntwo\nthree\nfour\n", "zero\none\ntwo\nthree\n");
+  // main changes a workflow after the branch started (superslides.io #204/#205)
+  sh(wt, "checkout", "-q", "main"); sh(wt, "pull", "-q", "origin", "main");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/test.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci on main"); sh(wt, "push", "-q", "origin", "main");
+  sh(wt, "checkout", "-q", "7-feature");
+  assert.deepEqual(await git.catchUpWorkflows(wt, "main", "7-feature"), [".github/workflows/test.yml"]);
+  assert.deepEqual(await git.parents(wt), [before, sh(wt, "rev-parse", "origin/main")]);
+  assert.equal(sh(wt, "diff", "HEAD", "origin/main", "--", ".github/workflows"), "");
+  assert.deepEqual(await git.catchUpWorkflows(wt, "main", "7-feature"), [], "already matches");
+});
+
+test("catchUpWorkflows leaves a branch GitHub already has, and one whose workflows match", async () => {
+  const { wt, before } = repoWith("one\ntwo\nthree\nfour\n", "zero\none\ntwo\nthree\n");
+  assert.deepEqual(await git.catchUpWorkflows(wt, "main", "7-feature"), [], "main moved, but not its workflows");
+  sh(wt, "push", "-q", "origin", "7-feature");
+  sh(wt, "checkout", "-q", "main"); sh(wt, "pull", "-q", "origin", "main");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/test.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci on main"); sh(wt, "push", "-q", "origin", "main");
+  sh(wt, "checkout", "-q", "7-feature");
+  assert.deepEqual(await git.catchUpWorkflows(wt, "main", "7-feature"), [], "on the remote: GitHub compares with its old tip");
+  assert.equal(sh(wt, "rev-parse", "HEAD"), before);
+});
+
+test("catchUpWorkflows undoes a conflicted merge and says how to finish it", async () => {
+  const { wt, before } = repoWith("one\ntwo\nthree (branch)\n", "one\ntwo\nthree (main)\n");
+  sh(wt, "checkout", "-q", "main"); sh(wt, "pull", "-q", "origin", "main");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/test.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci on main"); sh(wt, "push", "-q", "origin", "main");
+  sh(wt, "checkout", "-q", "7-feature");
+  await assert.rejects(git.catchUpWorkflows(wt, "main", "7-feature"), /conflicts \(a\.txt\)[\s\S]*git merge origin\/main/);
+  assert.equal(sh(wt, "rev-parse", "HEAD"), before);
+  assert.equal(await git.mergeInProgress(wt), false);
+});

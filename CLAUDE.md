@@ -304,9 +304,13 @@ just contract                 # print examples/justfile, the two recipes a proje
   through `pushWork()`, which first takes a workflow edit out of the unpushed
   commits (`git.stripWorkflows()`, squashing them into one; never across a
   merge), pushes the rest, and posts the held-back diff on the PR for a human.
-  `git.push()` explains a refusal that still happens. It also bit us when a branch was
-  based on a commit that had a workflow file which was later deleted
-  upstream: rebasing onto the current base fixed it.
+  `git.push()` explains a refusal that still happens. **A new branch is
+  compared with the default branch**, not with its own commits: when a
+  workflow change lands on the base while the agent works, the branch's
+  first push looks like it undoes it and is refused although no commit of
+  ours touches a workflow (superslides.io #204/#205). `pushWork()` then
+  merges the base in first (`git.catchUpWorkflows()`, build only: later
+  pushes are compared with the branch's old tip).
 - **`gh run view --log-failed` can print nothing and still exit 0.** Two
   reasons, both real here: gh **< 2.73** (this laptop had 2.60) returns an
   empty log for runs it can't parse, and GitHub simply has no logs for some

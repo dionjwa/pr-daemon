@@ -165,9 +165,14 @@ function upFailedNote(cmd: string, output: string, out: string): string {
  * that could edit CI could hand itself the repo's secrets. So an agent's
  * workflow edit is taken out first and the rest of its work still lands. The
  * edit comes back as a PR comment for a human to apply ("" when nothing was held).
+ * A branch's first push also takes in the base's newer workflow files, which
+ * GitHub would otherwise read as this branch undoing them (`catchUpWorkflows`).
  */
-async function pushWork(ctx: Ctx, wt: string, branch: string): Promise<string> {
-  const held = (await gh.hasWorkflowScope()) ? null : await git.stripWorkflows(wt);
+async function pushWork(ctx: Ctx, wt: string, branch: string, base?: string): Promise<string> {
+  const scoped = await gh.hasWorkflowScope();
+  const held = scoped ? null : await git.stripWorkflows(wt);
+  const merged = scoped || !base ? [] : await git.catchUpWorkflows(wt, base, branch);
+  if (merged.length) ctx.store.event(`merged ${base} in before the first push: it changed ${merged.join(", ")} since the branch started, and GitHub refuses a new branch with older workflow files without the workflow scope`, ctx.job.id);
   await git.push(wt, branch);
   if (!held) return "";
   ctx.store.event(`held back the agent's change to ${held.files.join(", ")}: the gh login can't push workflow files; it's on the PR for you`, ctx.job.id, "warn");
@@ -362,7 +367,7 @@ export async function build(ctx: Ctx): Promise<void> {
     await gh.comment(repo.name, n, `😶 **pr-daemon** finished without making any commits.\n\n<details><summary>agent summary</summary>\n\n${summary}\n</details>`);
     throw new FailError("no commits");
   }
-  const held = await pushWork(ctx, wt, branch);
+  const held = await pushWork(ctx, wt, branch, base);
   if (!result.ok) {
     if (held) await gh.comment(repo.name, n, held);
     await gh.setStatus(repo.name, n, cfg.label, "failed");
