@@ -31,7 +31,7 @@ pr-daemon, and a human is waiting to merge it. Your one job is to make
    the failure needs is a failure of its own.
 5. Re-run `{{CHECK_CMD}}` until it passes, and **commit** (small, clear
    commits). Do NOT push, open or edit PRs, comment, or change labels:
-   pr-daemon does all of that after you finish. Don't edit anything under `.github/workflows/`: pr-daemon can't push workflow files, so it holds such a change back for a human. If CI needs a change there, say what in your summary instead.
+   pr-daemon does all of that after you finish. {{WORKFLOWS}}
 6. If the cause is something you should not decide alone — the PR is half
    written, the check needs a secret or service you don't have, the fix means
    changing what the PR deliberately does — stop, commit nothing for it, and

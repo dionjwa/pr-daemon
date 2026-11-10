@@ -122,6 +122,15 @@ export const CHECK_LABEL = "pr-daemon";
 /** The body served there; `doctor` looks for it. */
 export const CHECK_BODY = "pr-daemon: the preview proxy is working.\n";
 
+/** Where that body is served even when pr-daemon.<domain> is the status page: no login, so `doctor` can fetch it. */
+export const CHECK_PATH = "/proxy-check";
+
+/** Caddy's own log: rolled by size, so it can't grow without bound. */
+export const CADDY_LOG = join(CADDY_DIR, "caddy.log");
+
+/** What Caddy prints before its config (and so its log file) takes effect: start-up errors and panics. */
+export const CADDY_START_LOG = join(CADDY_DIR, "caddy-start.log");
+
 /** Caddy JSON config for these stacks. Pure: unit-tested. */
 export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): object {
   const p = cfg.preview;
@@ -138,7 +147,19 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
     }
   }
   // The proxy's own page, so routing can be checked before any preview exists.
-  routes.push({ match: [{ host: [`${CHECK_LABEL}.${p.domain}`] }], handle: [{ handler: "static_response", status_code: 200, body: CHECK_BODY }], terminal: true });
+  const check = { handler: "static_response", status_code: 200, body: CHECK_BODY };
+  const self = `${CHECK_LABEL}.${p.domain}`;
+  if (p.pageUser && p.pagePasswordHash) {
+    // The status page, behind a login: it can edit config.toml, whose commands
+    // run on this machine, so it is never served without one. The check stays
+    // open at its own path. web.ts only answers a local Host, so it gets one.
+    routes.push({ match: [{ host: [self], path: [CHECK_PATH] }], handle: [check], terminal: true });
+    const auth = { handler: "authentication", providers: { http_basic: {
+      accounts: [{ username: p.pageUser, password: p.pagePasswordHash }], hash: { algorithm: "bcrypt" }, realm: "pr-daemon" } } };
+    routes.push({ match: [{ host: [self] }], handle: [auth, proxyTo(`http://127.0.0.1:${cfg.port}`, mode, true)], terminal: true });
+  } else {
+    routes.push({ match: [{ host: [self] }], handle: [check], terminal: true });
+  }
   // Anything else on the domain: a plain 404 instead of a connection error.
   routes.push({ handle: [{ handler: "static_response", status_code: 404, body: "pr-daemon: no preview is running for this address.\n" }] });
 
@@ -160,6 +181,11 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
     // Inside Docker the admin API must listen on all interfaces (it's published
     // to 127.0.0.1 only). pr-daemon always sends Origin = the admin address.
     admin: { listen: mode === "docker" ? `0.0.0.0:${adminPort(cfg)}` : p.admin, origins: [p.admin] },
+    // Leave out the admin API's own lines: pr-daemon asks it whether Caddy is
+    // alive every 5s, and that was nearly every line of a 170 MB log. The
+    // binary writes its own rolled file; Docker's log is capped by `docker run`.
+    logging: { logs: { default: { exclude: ["admin.api"],
+      ...(mode === "binary" ? { writer: { output: "file", filename: CADDY_LOG, roll_size_mb: 10, roll_keep: 5 } } : {}) } } },
     ...(mode === "binary" ? { storage: { module: "file_system", root: join(CADDY_DIR, "data") } } : {}),
     apps: {
       http: {
@@ -317,7 +343,7 @@ export class Proxy {
         this.lastHash = "";
         // The first Docker start may pull the image: give it up to 90s.
         for (let i = 0; i < 180 && !(await this.alive()); i++) await new Promise((r) => setTimeout(r, 500));
-        if (!(await this.alive())) throw new Error(`Caddy (${mode}) didn't start; see ${join(CADDY_DIR, "caddy.log")}`);
+        if (!(await this.alive())) throw new Error(`Caddy (${mode}) didn't start; see ${mode === "binary" ? CADDY_START_LOG : `docker logs ${CONTAINER}`}`);
         this.store.event(`preview proxy started (${mode}) for *.${cfg.preview.domain}`);
       }
       if (hash !== this.lastHash) {
@@ -356,12 +382,12 @@ export class Proxy {
       }
     }
     if (mode === "binary") {
-      const log = join(CADDY_DIR, "caddy.log");
       // Its own process group, so a Ctrl-C or a signal to pr-daemon doesn't
       // kill it mid-request: shutdown() asks it to stop through the admin API
       // instead. If pr-daemon dies without that (SIGKILL, a crash), Caddy
       // keeps serving and the next pr-daemon adopts it on the admin port.
-      this.child = spawn("bash", ["-c", `exec caddy run --config "${join(CADDY_DIR, "caddy.json")}" >> "${log}" 2>&1`],
+      // Its output is only what comes before the config's log file takes over.
+      this.child = spawn("bash", ["-c", `exec caddy run --config "${join(CADDY_DIR, "caddy.json")}" > "${CADDY_START_LOG}" 2>&1`],
         { detached: true, stdio: "ignore", env: { ...env, XDG_DATA_HOME: join(CADDY_DIR, "data") } });
       this.child.unref();
       return;
@@ -370,6 +396,7 @@ export class Proxy {
     const port = adminPort(this.cfg());
     const ports = cfg.tls === "off" ? [cfg.httpPort] : [cfg.httpPort, cfg.httpsPort];
     const r = await run("docker", ["run", "-d", "--name", CONTAINER, "--restart", "unless-stopped",
+      "--log-opt", "max-size=10m", "--log-opt", "max-file=5",
       "--add-host", "host.docker.internal:host-gateway",
       ...ports.flatMap((p) => ["-p", `${p}:${p}`]), "-p", `127.0.0.1:${port}:${port}`,
       "-v", `${CADDY_DIR}:/etc/pr-daemon:ro`, "-v", "pr-daemon-caddy-data:/data",

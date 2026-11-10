@@ -289,7 +289,9 @@ rebases or force-pushes, so your review comments stay where they were.
    They go to **you** instead when:
    - more than `merge.max_files` files conflict
    - a binary file conflicts (only one side can be kept)
-   - a file under `.github/workflows/` conflicts
+   - a file under `.github/workflows/` conflicts, unless the repo sets
+     `workflows = true` (then the agent may resolve it, and the merge is
+     flagged **needs your review**)
    - a conflict is in one of your `merge.human_paths`
    - this PR has already used its `merge.max_rounds`
 3. Otherwise an agent (the one that built the PR, when its session is still
@@ -376,7 +378,7 @@ email = "you@example.com"        # optional, for Let's Encrypt notices
 - Forward ports **80** and **443** to it, e.g. on your router.
 
 **Check the routing before any preview exists:** open
-`https://pr-daemon.preview.example.com`. Caddy answers it itself with
+`https://pr-daemon.preview.example.com/proxy-check`. Caddy answers it itself with
 "pr-daemon: the preview proxy is working." If that loads, DNS, the port
 forwards and certificates all work, and any remaining problem is in the
 preview's own stack. `just doctor` checks the same address.
@@ -407,6 +409,27 @@ printing `PR_DAEMON_ROUTE <service> <local-url>` lines, and receives:
 Use them for auth redirect URLs, CORS origins, cookie domains, and every
 backend URL the browser uses. All are empty when no domain is set. The
 [project setup doc](docs/setup.md#public-preview-urls) has the full checklist.
+
+### The status page from anywhere (optional)
+
+`https://pr-daemon.preview.example.com` can serve the status page, behind a
+login. Anyone with that login can edit the config, and its commands run on
+this machine, so use a long password you use nowhere else.
+
+```bash
+caddy hash-password          # type the password twice; it prints a hash starting $2a$
+```
+
+Then add both lines under `[preview]` (in the Config tab, or
+`~/.pr-daemon/config.toml`):
+
+```toml
+page_user = "you"
+page_password_hash = "$2a$14$...the hash it printed..."
+```
+
+It applies within seconds, no restart. `just doctor` checks that the page asks
+for the login. To take it offline again, delete the two lines.
 
 ### One wildcard certificate (recommended)
 
@@ -503,6 +526,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | `preview.tls` | `auto` | `auto` (Let's Encrypt) / `internal` (testing) / `off` (plain http) |
 | `[[repos]] up / down / check` | `just pr-daemon-up` / `-down` / `-check` | Override for projects without `just` |
 | `[[repos]] proxy_host` | `public` | Host header the app sees through the preview proxy: `public` or `upstream` |
+| `[[repos]] workflows` | `false` | Agents may edit `.github/workflows/` in this repo, each change flagged for your review. See [Letting agents edit workflows](#letting-agents-edit-workflows) |
 
 ## Commands
 
@@ -528,6 +552,8 @@ installed service after changing the code), `just db`, `just contract`.
 ~/.pr-daemon/
   config.toml                       settings (also editable on the status page)
   claude-token                      optional: the Claude login agents use (claude setup-token)
+  gh-tokens/<owner>                 optional: the GitHub login pr-daemon and its agents use for that owner's repos
+  gh-token                          optional: the same, for owners without their own file
   pr-daemon.db                       jobs, token ledger, stacks, events (SQLite)
   pr-daemon.log                      the service's log
   repos/<org>__<repo>/              a cached clone
@@ -566,7 +592,8 @@ it at one.
   | A labelled PR's title and body | the same, when the label is added and again when it is taken on | refused, with a comment on the PR saying who and why |
   | A `/pr-daemon` comment | who wrote it | ignored |
   | The PR conversation given to a revision | each comment's and review's author | left out of the prompt (the event log says how many) |
-| The issue conversation given to a discussion or a build | each comment's author (the issue's own text is checked as for a build) | left out of the prompt; refused, with a comment, if the issue text is someone else's |
+  | The issue conversation given to a discussion or a build | each comment's author (the issue's own text is checked as for a build) | left out of the prompt; refused, with a comment, if the issue text is someone else's |
+  | A PR's commits (labelled, or pr-daemon's own) | every commit's author and committer, each time a job starts on the PR: someone can push to a branch at any time | refused, with a comment on the PR saying which commits and who |
 
   Your own `gh` user's words always count as trusted, because pr-daemon's
   PR descriptions and reviews are posted as you.
@@ -579,8 +606,10 @@ it at one.
   and use your `gh` and git logins, so it could push to or comment on any repo
   you can. The prompts tell it not to; nothing technically stops it. Run
   pr-daemon as a dedicated user, or in a VM, if the machine holds anything you
-  care about, and give that user a `gh` login with access to only the repos
-  you watch.
+  care about. At the least, give it a GitHub login limited to the repos you
+  watch: a fine-grained token per owner in `~/.pr-daemon/gh-tokens/` (see
+  [below](#letting-agents-edit-workflows)) replaces your `gh` login for
+  pr-daemon, its agents and your project's commands.
 - **What it reads is an instruction,** so the checks above decide what reaches
   the agent. pr-daemon hands the agent the issue and the filtered PR
   conversation itself, and the prompts tell it not to fetch comments on its
@@ -601,17 +630,85 @@ it at one.
   an issue can point the agent at. That's another reason to give the pr-daemon
   user a login scoped to the repos you watch. What the agent reads there is
   information, the same rule the prompts apply to issues and comments.
-- **Keep CI out of reach.** If your `gh` login doesn't have the `workflow`
-  scope (`gh auth status` lists them), GitHub rejects any push that touches
-  `.github/workflows/`, so the agent can't rewrite your CI. Keep it that way.
+- **Workflow files are held back unless a repo allows them.** A workflow runs
+  with the repo's secrets, so an agent that can edit one can hand itself those
+  secrets. By default an agent's change to `.github/workflows/` is taken out
+  before the push and posted on the PR for you to apply. A repo with
+  `workflows = true` gets it pushed instead, flagged **needs your review**; see
+  the next section.
 - **Nothing from the internet connects to pr-daemon itself:** it only polls
   GitHub. The status page listens on 127.0.0.1 only and refuses requests from
   other websites. With a preview domain set, Caddy serves **only the preview
   stacks**, so anyone with a branch's URL can reach that preview, which runs
   unreviewed code on your machine. Treat previews as public, or put access
   control in the app.
-- **Secrets:** pr-daemon stores no GitHub or Claude tokens. The optional
+- **Secrets:** the optional `claude-token` goes only to the agents. The
+  optional `gh-tokens/<owner>` go to everything pr-daemon starts for that owner's repos (`gh`, git, agents
+  and your project's commands), since that is what limits them. The optional
   Cloudflare token is passed to Caddy only, never to agents or project
   commands.
+
+### Letting agents edit workflows
+
+For a repo whose CI agents should be able to fix, or features that need a
+workflow change. Do all three steps: the first two let it happen, the third
+limits what a bad workflow change could reach.
+
+1. **A GitHub login for pr-daemon alone, with workflow access to just your
+   repos.** A fine-grained token belongs to **one** account or organization,
+   so make one per owner in your config (e.g. one for `your-org`, one for your
+   personal account). On GitHub: Settings → Developer settings →
+   Fine-grained tokens → Generate new token. Resource owner: that org or you;
+   Repository access: *Only select repositories*, that owner's repos in your
+   config; Repository permissions: **Contents**, **Pull requests**,
+   **Issues** and **Workflows** read and write; **Commit statuses**,
+   **Actions** and (if listed) **Checks** read. An org may have to allow
+   fine-grained tokens and approve yours (org Settings → Personal access
+   tokens). Then, on the pr-daemon machine, save each one under its owner's
+   name:
+
+   ```bash
+   mkdir -p ~/.pr-daemon/gh-tokens
+   (umask 077; read -rs T; echo "$T" > ~/.pr-daemon/gh-tokens/your-org)    # paste the org's token, then Enter
+   (umask 077; read -rs T; echo "$T" > ~/.pr-daemon/gh-tokens/your-login)  # paste your personal one, then Enter
+   just restart
+   just doctor        # "you can push to your-org/…, through ~/.pr-daemon/gh-tokens/your-org"
+   ```
+
+   From then on pr-daemon, its agents and your project's commands act through
+   the token of the repo's owner, so an agent can't reach any other repo. That
+   includes `pr-daemon ref`: an issue can still point the agent at any public
+   repo, but a private one has to be on that token's list. A repo whose owner
+   has no file uses `~/.pr-daemon/gh-token` if you made one, and otherwise
+   your own `gh` login. Keep your own `gh` login without the `workflow` scope
+   (`gh auth status` lists the scopes; `gh auth refresh -h github.com
+   --remove-scopes workflow` takes it off), so the tokens are the only logins
+   on the machine that can change a workflow. (Using your own login with
+   `gh auth refresh -h github.com -s workflow` works too, but then it covers
+   every repo you can reach.) To stop using a token, delete its file and
+   `just restart`.
+
+2. **Opt the repo in,** under its block in `config.toml` (or the Config tab):
+
+   ```toml
+   [[repos]]
+   name = "your-org/your-repo"
+   workflows = true
+   ```
+
+   Agents are then told they may edit workflows (narrowly: no new secrets,
+   permissions, `pull_request_target` or self-hosted runners unless the task
+   asks for it). Every pushed workflow change gets a `> [!WARNING]` comment
+   on the PR with the diff and the commands to undo it, a warning on the
+   status page, and a desktop notice. A refused push falls back to holding
+   the change back. Set `workflows = false` again to stop.
+
+3. **Keep the secrets that matter away from branches.** A workflow edited on
+   a branch runs on that branch, with every repository secret. Put deploy
+   and production secrets in an **Environment** instead (repo Settings →
+   Environments → New environment, add the secrets there, and under
+   *Deployment branches* allow only `main`, or add yourself as a required
+   reviewer), and reference it with `environment:` in the job that deploys.
+   A branch's workflow then can't read them, whoever wrote it.
 
 See [PLAN.md](PLAN.md) for the design and roadmap.

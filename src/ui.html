@@ -314,7 +314,11 @@ function render() {
   const g = S.github ?? {}, at = (u) => `<b>@${esc(u)}</b>`;
   const who = `<div class="who">Acts on GitHub as ${g.actingAs ? at(g.actingAs) : "<i>(checking gh…)</i>"}: it pushes, opens PRs and comments as that user.
        Only ${g.allowedUsers?.length ? g.allowedUsers.map(at).join(", ") : "<i>(checking gh…)</i>"} can start work${g.allowedFromConfig ? " (allowed_users)" : ""};
-       a label or <code>/pr-daemon</code> comment from anyone else is ignored.</div>`;
+       a label or <code>/pr-daemon</code> comment from anyone else is ignored.
+       ${(() => { const by = {}; for (const [r, l] of Object.entries(g.logins ?? {})) (by[l] ??= []).push(r);
+         const parts = Object.entries(by).map(([l, rs]) => `<code>${esc(l)}</code>${Object.keys(by).length > 1 ? ` for ${rs.map(esc).join(", ")}` : ""}`);
+         return parts.length ? `GitHub login: ${parts.join("; ")}.` : ""; })()}
+       ${g.workflows?.length ? `Agents may edit <code>.github/workflows/</code> in ${g.workflows.map((r) => esc(r)).join(", ")} (each change is flagged for your review); elsewhere such edits are held back for you.` : "Agents' edits to <code>.github/workflows/</code> are held back for you (no repo sets <code>workflows = true</code>)."}</div>`;
   $("howto").innerHTML = who + (S.repos.length
     ? `Add the <span class="badge">${esc(S.label)}</span> label to an issue in ${S.repos.map((r) => `<a href="https://github.com/${esc(r)}/issues" target="_blank">${esc(r)}</a>`).join(", ")}
        to get a PR, or to a PR that already exists to get the same preview stack and a review.

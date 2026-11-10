@@ -34,7 +34,7 @@ answer questions: make reasonable decisions and note them in the PR description.
    not open a PR if it fails.
 4. Exercise the feature in the running stack the way a user would.
 5. Commit your work on `{{BRANCH}}` with clear messages (several commits is fine).
-   Don't edit anything under `.github/workflows/`: pr-daemon can't push workflow files, so it holds such a change back for a human. If CI needs a change there, say what in your summary instead.
+   {{WORKFLOWS}}
 
 # Deliverables (pr-daemon reads these files)
 

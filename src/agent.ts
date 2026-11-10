@@ -103,6 +103,16 @@ export function agentPids(ps: string, sessions: string[]): { pid: number; sessio
   return out;
 }
 
+/**
+ * Claude's stderr minus its harmless warnings. The workspace-trust one ("Ignoring N
+ * permissions.allow entries ... has not been trusted") is printed on every run in a
+ * repo that commits .claude/settings.local.json, and agents run in bypassPermissions,
+ * so it never matters: left in, it was reported as the reason an agent failed.
+ */
+export function stderrError(stderr: string): string {
+  return stderr.split("\n").filter((l) => !/^Ignoring \d+ permissions\.\w+ entries .*not been trusted/.test(l)).join("\n").trim().slice(-2000);
+}
+
 export function startAgent(o: AgentOptions): AgentRun {
   const sessionId = o.resume ?? randomUUID();
   const args = ["-p", o.prompt, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose",
@@ -159,7 +169,7 @@ export function startAgent(o: AgentOptions): AgentRun {
   });
 
   const done = new Promise<{ end: AgentEnd; usage: Usage; cost: number; turns: number }>((resolve) => {
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearInterval(stallTimer);
       log.end();
       const r = resultMsg as Record<string, any> | null;
@@ -172,7 +182,7 @@ export function startAgent(o: AgentOptions): AgentRun {
         const rl2 = rateLimit(`${r?.is_error ? text : ""}\n${code !== 0 ? stderr : ""}`);
         if (rl2.hit) end = { kind: "rate_limited", resetAt: rl2.resetAt, result: text || stderr.slice(-500) };
         else if (code === 0 && r && !r.is_error) end = { kind: "ok", result: text };
-        else end = { kind: "error", result: text || stderr.slice(-2000) || `claude exited ${code}` };
+        else end = { kind: "error", result: text || stderrError(stderr) || `claude ${signal ? `was killed by ${signal}` : `exited ${code}`} without a result` };
       }
       resolve({ end, usage: total, cost, turns });
     });

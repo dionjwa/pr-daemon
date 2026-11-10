@@ -32,12 +32,13 @@ export interface Assessment {
  * - more conflicted files than `maxFiles` (too big a change to hand over),
  * - a binary file (there is nothing to merge, only a side to pick),
  * - a path in `humanPaths`, the owner's list of things to decide themselves,
- * - `.github/workflows/`: pr-daemon can't push those, so a resolution can't land,
+ * - `.github/workflows/`, unless the repo lets agents edit workflows and the
+ *   login may push them (`agentWorkflows`); then it's a caution instead,
  * - the base changed workflow files and the gh login can't push them (`workflowsBlocked`).
  * Cautions: conflicts that aren't about lines (one side deleted or added the
  * file), where "keep both" has no obvious meaning.
  */
-export function assessConflicts(conflicts: Conflict[], o: { maxFiles: number; humanPaths: string[]; workflowsBlocked: boolean }): Assessment {
+export function assessConflicts(conflicts: Conflict[], o: { maxFiles: number; humanPaths: string[]; workflowsBlocked: boolean; agentWorkflows?: boolean }): Assessment {
   const blockers: string[] = [], cautions: string[] = [];
   const list = (cs: Conflict[]) => cs.map((c) => `\`${c.path}\``).join(", ");
   if (conflicts.length > o.maxFiles) blockers.push(`${conflicts.length} files conflict, more than \`merge.max_files = ${o.maxFiles}\``);
@@ -47,7 +48,8 @@ export function assessConflicts(conflicts: Conflict[], o: { maxFiles: number; hu
   const human = conflicts.filter((c) => pats.some(([, re]) => re.test(c.path)));
   if (human.length) blockers.push(`conflicts in paths \`merge.human_paths\` reserves for you: ${list(human)}`);
   const wf = conflicts.filter((c) => c.path.startsWith(".github/workflows/"));
-  if (wf.length) blockers.push(`workflow file(s) conflict, and pr-daemon never edits .github/workflows/: ${list(wf)}`);
+  if (wf.length && o.agentWorkflows) cautions.push(`workflow file(s) conflict, and workflows run with the repo's secrets, so read the resolution: ${list(wf)}`);
+  else if (wf.length) blockers.push(`workflow file(s) conflict, and this repo doesn't let agents edit .github/workflows/ (\`workflows = false\`): ${list(wf)}`);
   else if (o.workflowsBlocked) blockers.push("the base changed .github/workflows/ and your gh login lacks the `workflow` scope, so GitHub would refuse the merge commit");
   const structural = conflicts.filter((c) => !["UU", "AA"].includes(c.code) && !c.binary);
   if (structural.length) cautions.push(`not a line conflict, so check the choice made: ${structural.map((c) => `\`${c.path}\` (${c.kind})`).join(", ")}`);

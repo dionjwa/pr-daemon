@@ -33,8 +33,8 @@ Resolve the merge so that **both** sides' intent survives:
 4. Run `{{CHECK_CMD}}` and make it pass. The project's CLAUDE.md says how it
    builds and tests.
 5. **Do not** commit, `git merge --abort`, reset, rebase, stash, or push:
-   pr-daemon verifies and commits the merge itself. **Do not** edit
-   anything under `.github/workflows/`.
+   pr-daemon verifies and commits the merge itself.
+6. {{WORKFLOWS}}
 
 Then write `{{OUT}}/merge-report.md`, which is posted to the PR for the
 human who merges it:

@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseAmount, parseDuration, formatAmount, run } from "./util.ts";
+import { asOwner, ghTokenFile, parseAmount, parseDuration, formatAmount, run, sleep } from "./util.ts";
 import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel } from "./config.ts";
-import { buildDiscussion, issueForPr, refsNote, render, restart, type Ctx } from "./pipeline.ts";
+import { buildDiscussion, issueForPr, refsNote, render, restart, workflowsNote, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
-import { isListed, isPullRequest, parseCommand, untrustedWriters } from "./gh.ts";
+import { isListed, isPullRequest, parseCommand, untrustedCommits, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
 import * as stack from "./stack.ts";
@@ -109,7 +109,7 @@ test("budget window, per-issue cap, and when it frees up", () => {
   assert.equal(!g2.ok && g2.needsHuman, false);
 });
 
-import { caddyConfig, CHECK_BODY, hostLabel, publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
+import { caddyConfig, CADDY_LOG, CHECK_BODY, CHECK_PATH, hostLabel, publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import { parseUp, poolHint } from "./stack.ts";
 import { stackWhere, withNetworks } from "./pipeline.ts";
 import type { Stack } from "./db.ts";
@@ -185,6 +185,34 @@ test("preview.dns: one wildcard certificate through DNS-01", () => {
   assert.equal(plain.apps.tls, undefined);
   assert.throws(() => parseConfig(`[preview]\ndomain = "p.example.com"\ndns = "cloudflare"\ntls = "internal"`), /preview.dns only applies/);
   assert.throws(() => parseConfig(`[preview]\ndns = "route53"`), /preview.dns must be one of: "", cloudflare/);
+});
+
+test("caddy config: the status page behind a login, and a log that can't grow forever", () => {
+  const hash = "$2a$14$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const cfg = parseConfig(`[preview]\ndomain = "p.example.com"\npage_user = "me"\npage_password_hash = "${hash}"`);
+  const c = caddyConfig(cfg, [], "binary") as any;
+  const [check, page, fallback] = c.apps.http.servers.previews.routes;
+  // The check stays open at its own path, so doctor needs no password.
+  assert.deepEqual(check.match, [{ host: ["pr-daemon.p.example.com"], path: [CHECK_PATH] }]);
+  assert.equal(check.handle[0].body, CHECK_BODY);
+  // Everything else on that host asks for the login before it reaches the page, with a Host web.ts accepts.
+  assert.deepEqual(page.match, [{ host: ["pr-daemon.p.example.com"] }]);
+  assert.equal(page.handle[0].handler, "authentication");
+  assert.deepEqual(page.handle[0].providers.http_basic.accounts, [{ username: "me", password: hash }]);
+  assert.equal(page.handle[1].upstreams[0].dial, `127.0.0.1:${cfg.port}`);
+  assert.deepEqual(page.handle[1].headers.request.set.Host, [`127.0.0.1:${cfg.port}`]);
+  assert.equal(fallback.handle[0].status_code, 404);
+  // Without a login the page is never put online.
+  const open = caddyConfig(parseConfig(`[preview]\ndomain = "p.example.com"`), [], "binary") as any;
+  assert.equal(open.apps.http.servers.previews.routes[0].handle[0].body, CHECK_BODY);
+  assert.throws(() => parseConfig(`[preview]\npage_user = "me"`), /go together/);
+  assert.throws(() => parseConfig(`[preview]\npage_user = "me"\npage_password_hash = "hunter2"`), /bcrypt hash, not the password/);
+  assert.throws(() => parseConfig(`[preview]\ntls = "off"\npage_user = "me"\npage_password_hash = "${hash}"`), /needs TLS/);
+  // The admin API's own lines are left out; the binary rolls its own file, Docker's log is capped by docker run.
+  assert.deepEqual(c.logging.logs.default.exclude, ["admin.api"]);
+  assert.equal(c.logging.logs.default.writer.filename, CADDY_LOG);
+  assert.ok(c.logging.logs.default.writer.roll_size_mb > 0);
+  assert.equal((caddyConfig(cfg, [], "docker") as any).logging.logs.default.writer, undefined);
 });
 
 test("caddy config routes each branch host to its local stack", () => {
@@ -498,4 +526,39 @@ test("buildDiscussion: nothing without a conversation; with one, a section the b
   const page = render(readFileSync(new URL("../prompts/build.md", import.meta.url), "utf8"), { ISSUE_BODY: "the body", DISCUSSION: s });
   assert.match(page, /the body\n\n# The conversation on the issue[\s\S]*manifest\n\n# Your environment/);
   assert.match(render(readFileSync(new URL("../prompts/build.md", import.meta.url), "utf8"), { ISSUE_BODY: "the body", DISCUSSION: "" }), /the body\n\n# Your environment/);
+});
+
+test("workflows: off unless a repo opts in, and the prompts say which", () => {
+  const [off, on] = parseConfig(`[[repos]]\nname = "o/a"\n[[repos]]\nname = "o/b"\nworkflows = true\n`).repos;
+  assert.equal(off.workflows, false);
+  assert.equal(on.workflows, true);
+  assert.throws(() => parseConfig(`[[repos]]\nname = "o/a"\nworkflows = "yes"\n`), /workflows/);
+  assert.match(workflowsNote(off), /Don't edit anything under `\.github\/workflows\/`/);
+  assert.match(workflowsNote(on), /You may edit `\.github\/workflows\/`[\s\S]*secrets/);
+  for (const f of ["build", "revise", "fix", "ci", "merge", "green"]) {
+    const text = readFileSync(join(import.meta.dirname, "..", "prompts", `${f}.md`), "utf8");
+    assert.match(text, /\{\{WORKFLOWS\}\}/, `${f}.md says what the repo allows`);
+    assert.doesNotMatch(text, /can't push workflow files/, `${f}.md doesn't hard-code the old rule`);
+  }
+});
+
+test("untrustedCommits: every commit's author and committer must be trusted", () => {
+  const trusted = ["me", "Friend"];
+  const c = (sha: string, author: string | null, committer: string | null, name = "Some One") => ({ sha, author, committer, name });
+  assert.deepEqual(untrustedCommits([c("a1", "me", "me"), c("a2", "friend", "web-flow")], trusted), []);
+  assert.deepEqual(untrustedCommits([c("b1", "me", "stranger")], trusted), [{ sha: "b1", who: "@stranger" }]);
+  assert.deepEqual(untrustedCommits([c("b2", "stranger", "web-flow")], trusted), [{ sha: "b2", who: "@stranger" }]);
+  assert.deepEqual(untrustedCommits([c("b3", null, "me", "Ghost Writer")], trusted), [{ sha: "b3", who: '"Ghost Writer" (no GitHub account)' }]);
+});
+
+test("GitHub tokens: one file per owner, any case, else gh-token; asOwner carries the owner through awaits", async () => {
+  const home = mkdtempSync(join(tmpdir(), "prd-gh-"));
+  mkdirSync(join(home, "gh-tokens"));
+  writeFileSync(join(home, "gh-tokens", "MetaPages"), "github_pat_org\n");
+  assert.equal(ghTokenFile("metapages", home), join(home, "gh-tokens", "MetaPages"));
+  assert.equal(ghTokenFile("someone", home), join(home, "gh-token"), "no file for that owner: the default");
+  assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"), "no owner: the default");
+  const seen = await asOwner("metapages/framejs.app", async () => { await sleep(5); return ghTokenFile(undefined, home); });
+  assert.equal(seen, join(home, "gh-tokens", "MetaPages"));
+  assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"), "and only inside it");
 });

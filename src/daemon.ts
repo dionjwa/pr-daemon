@@ -15,7 +15,7 @@ import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { agentPids } from "./agent.ts";
 import { parseTranscript, type Entry } from "./transcript.ts";
-import { formatAmount, formatDuration, notifier, notify, unnotify } from "./util.ts";
+import { asOwner, formatAmount, formatDuration, ghAuth, loginName, notifier, notify, unnotify } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 /** The kinds the `agent` label itself starts, and that removing it cancels: one per issue (build) or PR (adopt). */
@@ -275,7 +275,7 @@ export class Daemon {
     const errors: string[] = [];
     try {
       for (const repo of this.cfg.repos) {
-        try { await this.pollRepo(repo.name); }
+        try { await asOwner(repo.name, () => this.pollRepo(repo.name)); }
         catch (e) { errors.push(`${repo.name}: ${(e as Error).message}`); }
       }
     } finally {
@@ -701,7 +701,8 @@ export class Daemon {
     this.running.set(job.id, ctx);
     this.store.event(`started ${job.kind} ${job.repo}#${job.number}`, job.id);
 
-    const done = JOBS[job.kind](ctx)
+    // The repo owner's GitHub token for everything the job (and its error handling) starts.
+    const done = asOwner(job.repo, () => JOBS[job.kind](ctx)
       .then(async () => {
         this.store.update(job.id, { state: "done", finished_at: Date.now() });
         // A review/revise that was paused set the issue to agent:paused; put it back.
@@ -746,7 +747,7 @@ export class Daemon {
           }
         }
       })
-      .finally(() => { this.running.delete(job.id); this.inflight.delete(job.id); this.tick(); });
+      .finally(() => { this.running.delete(job.id); this.inflight.delete(job.id); this.tick(); }));
     this.inflight.set(job.id, done);
     return done;
   }
@@ -827,7 +828,8 @@ export class Daemon {
       paths: paths(),
       repos: this.cfg.repos.map((r) => r.name),
       label: this.cfg.label,
-      github: { actingAs: this.ghUser, allowedUsers: this.allowedNow(), allowedFromConfig: this.cfg.allowedUsers.length > 0 },
+      github: { actingAs: this.ghUser, allowedUsers: this.allowedNow(), allowedFromConfig: this.cfg.allowedUsers.length > 0,
+        logins: Object.fromEntries(this.cfg.repos.map((r) => [r.name, loginName(ghAuth(r.name.split("/")[0]))])), workflows: this.cfg.repos.filter((r) => r.workflows).map((r) => r.name) },
       poll: { lastAt: this.lastPollAt, nextAt: this.nextPollAt, error: this.lastPollError, every: formatDuration(this.cfg.pollMs) },
       budget: {
         used: w.used, limit: w.limit, usedText: formatAmount(w.used), limitText: w.limit === null ? "unlimited" : formatAmount(w.limit),

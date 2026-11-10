@@ -1,5 +1,12 @@
 // Small shared helpers: human-readable amounts/durations, child processes, logging.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync, spawn } from "node:child_process";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/** Where pr-daemon keeps everything (config.ts re-exports it). */
+export const HOME = process.env.PR_DAEMON_HOME ?? join(homedir(), ".pr-daemon");
 
 // ---------- human amounts: "40M", "1.5m", "500k", "2B", "40,000,000" ----------
 const AMOUNT_SUFFIX: Record<string, number> = { "": 1, k: 1e3, m: 1e6, b: 1e9 };
@@ -56,8 +63,62 @@ const DROP_ENV = new Set(["CI", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_
 export function cleanEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!DROP_ENV.has(k)) env[k] = v;
+  const gh = ghAuth();
+  if (gh.source === "file") env.GH_TOKEN = gh.token;
   for (const [k, v] of Object.entries(extra)) if (v !== undefined) env[k] = v;
   return env;
+}
+
+// ---------- GitHub login ----------
+// `gh`, and git through `gh auth git-credential`, use $GH_TOKEN when it's set.
+// pr-daemon gives every child it starts a token from a file it owns, so
+// pr-daemon, its agents and the project's commands all act through it rather
+// than the owner's own gh login. A fine-grained token belongs to ONE account
+// or organization, so there is one file per owner, `gh-tokens/<owner>`, and
+// `gh-token` for any owner without one. Which owner is in play comes from
+// asOwner(): each repo's poll and each job runs inside it, and everything they
+// start (gh, git, agents, stacks) inherits it. Read on every use, like claude-token.
+export const GH_TOKEN_FILE = join(HOME, "gh-token");
+export const GH_TOKENS_DIR = join(HOME, "gh-tokens");
+const owner = new AsyncLocalStorage<string>();
+
+/** Run `fn` with `repo`'s owner's GitHub token for every child process it starts. */
+export function asOwner<T>(repo: string, fn: () => T): T {
+  return owner.run(repo.split("/")[0], fn);
+}
+
+/** The token file for an owner: `gh-tokens/<owner>` (any case, as GitHub names are), else `gh-token`. */
+export function ghTokenFile(who = owner.getStore(), home = HOME): string {
+  if (who) {
+    try {
+      const hit = readdirSync(join(home, "gh-tokens")).find((f) => f.toLowerCase() === who.toLowerCase());
+      if (hit) return join(home, "gh-tokens", hit);
+    } catch { /* no directory */ }
+  }
+  return join(home, "gh-token");
+}
+
+/**
+ * Where pr-daemon's GitHub login comes from, for an owner (default: the one
+ * asOwner() set): the service's environment, a token file, or gh's own login.
+ * `fine` = a fine-grained token, whose permissions GitHub doesn't report back.
+ */
+export function ghAuth(who = owner.getStore()): { source: "env" | "file" | "gh"; file: string; token: string; fine: boolean; loose: boolean } {
+  const env = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)?.trim();
+  if (env) return { source: "env", file: "", token: env, fine: env.startsWith("github_pat_"), loose: false };
+  const file = ghTokenFile(who);
+  try {
+    const token = readFileSync(file, "utf8").replace(/^\s*(?:export\s+)?GH_TOKEN\s*=\s*/, "").replace(/["'\s]/g, "");
+    if (token) return { source: "file", file, token, fine: token.startsWith("github_pat_"), loose: (statSync(file).mode & 0o077) !== 0 };
+  } catch { /* no file: gh's own login */ }
+  return { source: "gh", file: "", token: "", fine: false, loose: false };
+}
+
+/** One line for the status page and doctor: which login ghAuth() found. */
+export function loginName(a: ReturnType<typeof ghAuth>): string {
+  if (a.source === "env") return "$GH_TOKEN";
+  if (a.source === "gh") return "gh's own login";
+  return a.file.replace(homedir(), "~") + (a.fine ? "" : " (not a fine-grained token)");
 }
 
 export interface RunResult { code: number; stdout: string; stderr: string }

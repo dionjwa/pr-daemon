@@ -82,7 +82,12 @@ A human always merges.
 - **Config is one TOML file** (`~/.pr-daemon/config.toml`). The status page
   edits the **raw text**, so comments survive. It's validated before it's
   written, and changes apply live.
-- **Status page** on `127.0.0.1:7377` only: vanilla HTML in `src/ui.html`, no
+- **Status page** on `127.0.0.1:7377` only, or also at
+  `https://pr-daemon.<domain>` behind Caddy basic auth when `[preview]
+  page_user` and `page_password_hash` (bcrypt, from `caddy hash-password`)
+  are both set. Never online without the login: the page edits config.toml,
+  whose commands run here. Caddy sends web.ts a local Host, so its Host check
+  stays as it is. Vanilla HTML in `src/ui.html`, no
   framework, no build, **no `alert`/`confirm` dialogs** (click twice to
   confirm). Three tabs, routed off `location.hash`: Status, Setup (the line to
   paste into an agent's chat, built from `location.origin` so it always names
@@ -99,8 +104,13 @@ A human always merges.
   every build start. Revise prompts only get PR comments from trusted authors
   (`gh.trustedDiscussion()`: allowed users plus the gh user). Agents are
   told not to fetch comments themselves; don't reintroduce `--comments`.
-  The status page, `status` and `doctor` all name the gh user it acts as and
-  who is allowed (`status().github`); keep that visible. The README's Safety
+  A PR's **code** is agent input too: every commit's author and committer
+  must be trusted (`gh.untrustedCommits()`, `web-flow` defers to the author),
+  checked by `trustCode()` at the start of every job on a PR (`adopt` and
+  `prWorktree()`), because anyone with write access can push at any time.
+  The status page, `status` and `doctor` all name the gh user it acts as,
+  which login that is (`ghAuth()`) and who is allowed (`status().github`);
+  keep that visible. The README's Safety
   section is the contract: recommended for private repos, because the issue
   body and PR comments are agent input regardless of who added the label.
 - **The repo's own CI is the outer check** (`[checks]`). pr-daemon pushes as
@@ -132,6 +142,26 @@ A human always merges.
   been tried for the head + base tip. The
   trigger is head sha + base tip. A failed/cancelled last job or a "needs
   your review" holds it until the PR head moves.
+- **Workflow files are per-repo opt-in** (`[[repos]] workflows = true`,
+  default false). A workflow runs with the repo's secrets, so: off, an
+  agent's `.github/workflows/` edit is stripped before the push and posted for
+  a human (`git.stripWorkflows()`), whatever the login can do; on, the
+  prompts' `{{WORKFLOWS}}` (`workflowsNote()`) allow narrow edits, the push
+  goes through and is flagged **needs your review** (`git.pushedWorkflowComment()`
+  with the diff and an undo block, a warn notice, and the review notice names
+  the files), workflow merge conflicts become a caution instead of a blocker,
+  and a push GitHub refuses (`git.WorkflowRefused`) falls back to holding back.
+  The intended login is fine-grained tokens limited to the configured repos.
+  A fine-grained token has ONE resource owner (an account or an org), and the
+  owner's repos span both, so it's one file per owner, `~/.pr-daemon/gh-tokens/<owner>`
+  (any case), with `gh-token` for owners without one (`ghAuth()` in util.ts).
+  `asOwner()` (an AsyncLocalStorage) wraps each repo's poll and each job in
+  `launch()`, and `cleanEnv()` gives every child started inside it that
+  owner's token as `GH_TOKEN`, so gh, git's `gh auth git-credential`, agents
+  and stacks all use it. A gh call outside `asOwner()` gets the default.
+  The owner's own gh login is left without the `workflow` scope. A fine-grained token reports no scopes, so
+  `hasWorkflowScope()` assumes yes for one. The owner was tired of holding
+  every workflow change by hand; don't turn the default back on without asking.
 - **Trigger label is `agent`,** on an issue (build it) or on a PR (adopt it).
   Status labels are `agent:working`, `agent:in-review`, `agent:paused` and
   `agent:failed`, on whichever was labelled.
@@ -230,7 +260,7 @@ A human always merges.
 | `config.ts` | `DEFAULT_TOML` (the documented template), `parseConfig()` with readable errors, atomic save |
 | `web.ts` / `ui.html` / `docs.html` | The localhost API (Host check; writes need `X-PR-Daemon: 1`), the status page, and `GET /docs`: the state machines as mermaid diagrams |
 | `setup.ts` / `docs/setup.md` | `paths()` (the runtime directories) and `setupDoc()`: the project contract with this machine's real paths and commands filled in, served as plain text at `GET /setup` and printed by `pr-daemon setup` |
-| `util.ts` | Amounts/durations, `run`/`sh`/`must`, `cleanEnv` |
+| `util.ts` | `HOME`, amounts/durations, `run`/`sh`/`must`, `cleanEnv`, `ghAuth` / `asOwner` (the per-owner GitHub tokens) |
 
 The repo's own `justfile` wraps the CLI plus the dev commands; `examples/justfile` is the contract a target project implements.
 
@@ -249,7 +279,8 @@ paused or crashed job keeps its `session_id`, and resuming continues that
 Claude session. On startup, `running` jobs are re-queued.
 
 **Runtime files:** everything lives in `~/.pr-daemon/`: `config.toml`,
-`pr-daemon.db`, `pr-daemon.log`, `claude-token` (optional), `repos/` (cached
+`pr-daemon.db`, `pr-daemon.log`, `claude-token` (optional), `gh-tokens/<owner>` and `gh-token`
+(optional: pr-daemon's GitHub logins, see the workflow decision above), `repos/` (cached
 clones), `worktrees/`, `out/` (prompts, agent `*.jsonl` logs, PR text,
 screenshots), `refs/` (read-only clones of other repos an agent was asked to
 look at, one directory per branch), `assets/` (the screenshot branch clone), `secrets/<org>__<repo>.env` (a
@@ -298,10 +329,10 @@ just contract                 # print examples/justfile, the two recipes a proje
 - **Don't `git add -A` the agent's leftovers.** Tool caches (e.g.
   `.impeccable/hook.cache.json`) were committed into a PR once. Commit tracked
   changes only (`add -u`) and log untracked files.
-- **Pushes touching `.github/workflows/` are rejected** because the owner's gh
-  login lacks the `workflow` scope. That's a good guard (the agent can't
-  rewrite CI, or hand itself the repo's secrets). So agent work is pushed
-  through `pushWork()`, which first takes a workflow edit out of the unpushed
+- **Pushes touching `.github/workflows/` are rejected** when the login lacks
+  the `workflow` scope (or a fine-grained token lacks Workflows write). Agent
+  work is pushed through `pushWork()`: for a repo without `workflows = true`
+  (or after such a refusal) it first takes a workflow edit out of the unpushed
   commits (`git.stripWorkflows()`, squashing them into one; never across a
   merge), pushes the rest, and posts the held-back diff on the PR for a human.
   `git.push()` explains a refusal that still happens. **A new branch is
@@ -419,11 +450,17 @@ just contract                 # print examples/justfile, the two recipes a proje
   since 2.10 a managed wildcard covers its subdomains by default. The module
   refuses tokens that don't look real, so validate configs with a
   40-character fake.
-- **Check the proxy on its own:** Caddy answers `https://pr-daemon.<domain>`
-  itself, and `doctor` fetches it. When debugging, also look for
+- **Check the proxy on its own:** Caddy answers `https://pr-daemon.<domain>/proxy-check`
+  itself, with no login even when the status page is on that host, and
+  `doctor` fetches it. When debugging, also look for
   `rateLimited` in `~/.pr-daemon/caddy/caddy.log`: 5 failed certificate
   attempts on a host (e.g. while DNS was wrong) lock that host out for an hour,
   and `just dev` restarting Caddy on every edit burns through attempts fast.
+- **Caddy writes and rolls its own log** (`logging` in `caddyConfig()`: 10 MB
+  × 5, gzipped). The admin API's lines are excluded: pr-daemon's 5-second
+  alive check made a 170 MB log of almost nothing else. What Caddy prints
+  before its config loads (start-up errors, panics) is in `caddy-start.log`,
+  truncated on each launch; Docker mode caps `docker logs` instead.
 - **The config editor colours TOML with no library.** A highlighted `<pre>`
   sits under a transparent `<textarea>` (same font, same padding, scroll synced
   on `input`/`scroll`): the page stays one file, works offline, and keeps the

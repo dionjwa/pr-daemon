@@ -1,6 +1,8 @@
-// GitHub through the `gh` CLI, as the logged-in user. No tokens are stored by
-// pr-daemon; `gh` (and git, via `gh auth git-credential`) use your own login.
-import { must, run, tail } from "./util.ts";
+// GitHub through the `gh` CLI, as the logged-in user. `gh` (and git, via
+// `gh auth git-credential`) use your own login, or the repo owner's token from
+// ~/.pr-daemon/gh-tokens/ when there is one (util.ts ghAuth() and asOwner():
+// cleanEnv() hands it to every child as GH_TOKEN).
+import { ghAuth, must, run, tail } from "./util.ts";
 
 async function api<T>(path: string, args: string[] = []): Promise<T> {
   return JSON.parse((await must("gh", ["api", ...args, path])) || "null") as T;
@@ -74,6 +76,43 @@ export const untrustedText = (who: string[]) =>
   `its title or text was written or edited by ${who.map((u) => `@${u}`).join(", ")}, who ${who.length === 1 ? "isn't" : "aren't"} in allowed_users`;
 export const UNTRUSTED_HELP = "The issue is the agent's instructions, so only allowed users may write it. Open a new issue in your own words (or add them to allowed_users), then label that.";
 export const UNTRUSTED_PR_HELP = "A labelled PR's title and text are agent input too, so only allowed users may write them. Add them to allowed_users if you trust them, then label it again.";
+
+/** One commit of a PR: its author's and committer's GitHub logins (null when the email isn't linked to an account). */
+export interface PrCommit { sha: string; author: string | null; committer: string | null; name: string }
+
+/**
+ * The commits on a PR whose author or committer isn't trusted. An adopted
+ * PR's code is what `up` and `check` run here and what an agent edits, so it
+ * must come from trusted people as much as its text does. `web-flow` is
+ * GitHub committing for someone (the web editor, "Update branch"): it says
+ * nothing about who wrote it, so only the author counts then. An email with no
+ * GitHub account behind it can't be trusted.
+ */
+export function untrustedCommits(commits: PrCommit[], trusted: string[]): { sha: string; who: string }[] {
+  const out: { sha: string; who: string }[] = [];
+  for (const c of commits) {
+    const people = [c.author, c.committer === "web-flow" ? c.author : c.committer];
+    const bad = people.find((l) => !l || !isListed(trusted, l));
+    if (bad !== undefined) out.push({ sha: c.sha, who: bad ? `@${bad}` : `"${c.name}" (no GitHub account)` });
+  }
+  return out;
+}
+
+/** A PR's commits (GitHub lists up to 250). */
+export async function prCommits(repo: string, n: number): Promise<PrCommit[]> {
+  const raw = await apiAll<{ sha: string; author: { login: string } | null; committer: { login: string } | null; commit: { author: { name: string } } }>(
+    `repos/${repo}/pulls/${n}/commits?per_page=100`);
+  return raw.map((c) => ({ sha: c.sha, author: c.author?.login ?? null, committer: c.committer?.login ?? null, name: c.commit.author.name }));
+}
+
+/** Why a PR's commits aren't safe to run and work on, and what to do about it. */
+export const untrustedCode = (bad: { sha: string; who: string }[]) => {
+  const who = [...new Set(bad.map((b) => b.who))];
+  return `${bad.length} of its commits (${bad.slice(0, 5).map((b) => b.sha.slice(0, 7)).join(", ")}${bad.length > 5 ? ", …" : ""}) ` +
+    `${bad.length === 1 ? "was" : "were"} written or committed by ${who.join(", ")}, who ${who.length === 1 ? "isn't" : "aren't"} in allowed_users`;
+};
+export const UNTRUSTED_CODE_HELP = "pr-daemon runs a PR's code on its own machine and lets an agent change it, so only allowed users may write it. " +
+  "Add them to allowed_users if you trust them, then label the PR again (or comment `/pr-daemon` again).";
 
 /**
  * Who wrote an issue or a PR. One query for both: issues and PRs share a
@@ -192,9 +231,12 @@ export async function updateBranch(repo: string, n: number, expected: string): P
 /**
  * Can the gh login push changes to .github/workflows/? A merge that brings in
  * the base's workflow edits is such a push, and GitHub refuses it without the
- * `workflow` scope. Unknown counts as no.
+ * `workflow` scope. Unknown counts as no. A fine-grained token reports no
+ * scopes, so it counts as yes: the README says to give it Workflows
+ * read/write, and a push it refuses after all is still caught and explained.
  */
 export async function hasWorkflowScope(): Promise<boolean> {
+  if (ghAuth().fine) return true;
   const r = await run("gh", ["auth", "status", "-h", "github.com"]);
   return /Token scopes:.*\bworkflow\b/.test(r.stdout + r.stderr);
 }

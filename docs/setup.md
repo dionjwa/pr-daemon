@@ -104,9 +104,11 @@ only reports), then it says so on the PR and stops. Nothing extra is needed in
 your project for that; two things make it work better:
 
 - keep the CI failure readable (a clear failing step beats one long log)
-- remember pr-daemon **cannot push changes under `.github/workflows/`** (its
-  GitHub login has no `workflow` scope, on purpose), so a failure that can only
-  be fixed in a workflow file is reported, not fixed
+- remember that by default pr-daemon **holds back changes under
+  `.github/workflows/`** (a workflow runs with the repo's secrets), so a
+  failure that can only be fixed in a workflow file is reported, not fixed.
+  The owner can allow it per repo with `workflows = true` in pr-daemon's
+  config; each such change is then pushed and flagged for their review
 
 ## Public preview URLs
 

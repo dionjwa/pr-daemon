@@ -31,7 +31,7 @@ test("conflicts: what goes to an agent, and what goes to a person", () => {
   assert.match(assessConflicts(Array.from({ length: 16 }, (_, i) => c(`f${i}`)), opts).blockers[0], /16 files conflict/);
   assert.match(assessConflicts([c("logo.png", "UU", true)], opts).blockers[0], /binary.*logo\.png/);
   assert.match(assessConflicts([c("db/migrations/3.sql")], { ...opts, humanPaths: ["db/migrations/**"] }).blockers[0], /human_paths.*3\.sql/);
-  assert.match(assessConflicts([c(".github/workflows/ci.yml")], opts).blockers[0], /never edits \.github\/workflows/);
+  assert.match(assessConflicts([c(".github/workflows/ci.yml")], opts).blockers[0], /doesn.t let agents edit \.github\/workflows/);
   assert.match(assessConflicts([c("src/a.ts")], { ...opts, workflowsBlocked: true }).blockers[0], /workflow` scope/);
   // Deleted on one side: the agent may try, but a person should look.
   const a = assessConflicts([c("src/old.ts", "UD")], opts);
@@ -279,4 +279,46 @@ test("catchUpWorkflows undoes a conflicted merge and says how to finish it", asy
   await assert.rejects(git.catchUpWorkflows(wt, "main", "7-feature"), /conflicts \(a\.txt\)[\s\S]*git merge origin\/main/);
   assert.equal(sh(wt, "rev-parse", "HEAD"), before);
   assert.equal(await git.mergeInProgress(wt), false);
+});
+
+test("conflicts in workflow files go to an agent only where the repo allows it, and are flagged for review", () => {
+  assert.deepEqual(assessConflicts([c(".github/workflows/ci.yml")], { ...opts, agentWorkflows: true }).blockers, []);
+  assert.match(assessConflicts([c(".github/workflows/ci.yml")], { ...opts, agentWorkflows: true }).cautions[0], /secrets.*ci\.yml/);
+  assert.equal(assessConflicts([c(".github/workflows/ci.yml")], { ...opts, agentWorkflows: false }).blockers.length, 1);
+});
+
+test("unpushedWorkflows finds the agent's workflow edits, and the comment's undo block reverts them", async () => {
+  const { wt } = repoWith("one\ntwo\nthree (branch)\n", "zero\none\ntwo\nthree\n");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/ci.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci"); sh(wt, "push", "-q", "origin", "7-feature");
+  assert.equal(await git.unpushedWorkflows(wt, "7-feature", "main"), null, "nothing unpushed");
+
+  writeFileSync(join(wt, ".github/workflows/ci.yml"), "on: push\nenv: { K: ${{ secrets.DEPLOY_KEY }} }\n");
+  writeFileSync(join(wt, ".github/workflows/new.yml"), "on: pull_request\n");
+  writeFileSync(join(wt, "b.txt"), "b changed\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "feat");
+  const wf = (await git.unpushedWorkflows(wt, "7-feature", "main"))!;
+  assert.deepEqual(wf.files, [".github/workflows/ci.yml", ".github/workflows/new.yml"]);
+  assert.equal(wf.before, sh(wt, "rev-parse", "origin/7-feature"));
+  assert.equal(sh(wt, "status", "--porcelain"), "", "left in place");
+
+  const text = git.pushedWorkflowComment({ repo: "o/r", branch: "7-feature", ...wf });
+  assert.match(text, /needs your review/);
+  assert.match(text, /`DEPLOY_KEY`/);
+  const block = text.match(/```bash\n([\s\S]*?)\n```/)![1];
+  execFileSync("bash", ["-c", block.split("\n").find((l) => l.startsWith("for f in"))!], { cwd: wt });
+  assert.equal(readFileSync(join(wt, ".github/workflows/ci.yml"), "utf8"), "on: push\n");
+  assert.deepEqual(sh(wt, "diff", "--cached", "--name-status").split("\n"), ["M\t.github/workflows/ci.yml", "D\t.github/workflows/new.yml"]);
+  assert.equal(readFileSync(join(wt, "b.txt"), "utf8"), "b changed\n", "the rest of the work stays");
+});
+
+test("a new branch's workflow edits are measured from where it left its base", async () => {
+  const { wt } = repoWith("one\ntwo\nthree (branch)\n", "zero\none\ntwo\nthree\n");
+  mkdirSync(join(wt, ".github/workflows"), { recursive: true });
+  writeFileSync(join(wt, ".github/workflows/x.yml"), "on: push\n");
+  sh(wt, "add", "."); sh(wt, "commit", "-qm", "ci");
+  sh(wt, "fetch", "-q", "origin");
+  const wf = (await git.unpushedWorkflows(wt, "7-feature", "main"))!;
+  assert.equal(wf.before, sh(wt, "merge-base", "HEAD", "origin/main"));
 });

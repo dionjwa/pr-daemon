@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
 import { CLAUDE_TOKEN_ENV, CLAUDE_TOKEN_FILE, claudeAuth, claudeEnv } from "./agent.ts";
 import { Daemon, EXIT_DEADLINE_MS } from "./daemon.ts";
+import * as gh from "./gh.ts";
 import * as git from "./git.ts";
-import { caddyHasDns, CHECK_BODY, CHECK_LABEL, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
+import { caddyHasDns, CADDY_LOG, CHECK_BODY, CHECK_LABEL, CHECK_PATH, DNS_MODULE, DNS_TOKEN_ENV, DNS_TOKEN_FILE, dnsToken, publicUrl } from "./proxy.ts";
 import { openDb, Store, type JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
 import { stackState } from "./stack.ts";
-import { run } from "./util.ts";
+import { asOwner, GH_TOKENS_DIR, ghAuth, loginName, run } from "./util.ts";
 import { serve } from "./web.ts";
 
 const HELP = `pr-daemon — label an issue, get a pull request.
@@ -194,10 +195,24 @@ async function doctor(): Promise<void> {
     ok(true, `config is valid (${CONFIG_PATH})`);
     ok(cfg.repos.length > 0, cfg.repos.length ? `${cfg.repos.length} repo(s) configured: ${cfg.repos.map((r) => r.name).join(", ")}` : "no repositories configured yet",
       `add one block per repo to ${CONFIG_PATH} (the double brackets make it a list):\n\n      [[repos]]\n      name = "your-org/your-repo"\n`);
-    for (const r of cfg.repos) {
+    if (!cfg.allowedUsers.length) console.log(`· allowed_users is empty, so only the gh user may direct agents. To keep it that way if the login ever changes:
+    → in ${CONFIG_PATH}: allowed_users = ["${login || "your-github-login"}"]`);
+    // Each repo through its owner's login, as the daemon does it: a fine-grained
+    // token belongs to one account or org, so there's one per owner in gh-tokens/.
+    const loose = new Set<string>();
+    for (const r of cfg.repos) await asOwner(r.name, async () => {
+      const ga = ghAuth();
+      if (ga.loose) loose.add(ga.file);
       const v = await run("gh", ["api", `repos/${r.name}`, "--jq", ".permissions.push"]);
-      ok(v.stdout.trim() === "true", `you can push to ${r.name}`);
-    }
+      const owner = r.name.split("/")[0];
+      ok(v.stdout.trim() === "true", `you can push to ${r.name}, through ${loginName(ga)}`,
+        ga.source === "file" ? `${v.stderr.trim() || v.stdout.trim()}: give that token access to ${r.name} (Contents read/write), or check that it's for ${owner}` : "");
+      if (!r.workflows) return;
+      ok(await gh.hasWorkflowScope(), `${r.name}: agents may edit workflows (workflows = true), and that login may push them${ga.fine ? " (a fine-grained token's permissions can't be read: give it Workflows read/write)" : ""}`,
+        `a fine-grained token for ${owner} in ${join(GH_TOKENS_DIR, owner)} with Workflows read/write (README: Letting agents edit workflows), or gh auth refresh -h github.com -s workflow`);
+      if (ga.source === "gh") console.log(`    → that permission is your own gh login's, for every repo you can reach. A fine-grained token for ${owner}'s repos in ${join(GH_TOKENS_DIR, owner)} keeps agents to those (README: Safety)`);
+    });
+    for (const f of loose) ok(false, `${f} is private`, `chmod 600 ${f}`);
     const p = cfg.preview;
     if (p.domain && p.proxy !== "off") {
       const hasCaddy = (await run("which", ["caddy"])).code === 0;
@@ -213,10 +228,16 @@ async function doctor(): Promise<void> {
       ok(!!ip || /\.localhost$/.test(p.domain), `DNS: ${example} resolves${ip ? ` (${ip})` : answers.length ? ` (no: ${answers.join(" → ")} has no address)` : ""}`,
         `point *.${p.domain} at this machine (a wildcard A record, or a CNAME to its full name), and forward ports ${p.httpPort} and ${p.httpsPort} to it`);
       // The proxy's own page: DNS, port forward, Caddy and TLS together, no preview stack involved.
-      const url = `${publicUrl(cfg, CHECK_LABEL)}/`;
+      const url = `${publicUrl(cfg, CHECK_LABEL)}${CHECK_PATH}`;
       const hello = await run("curl", ["-sS", "-m", "15", ...(p.tls === "internal" ? ["-k"] : []), url]);
       ok(hello.stdout === CHECK_BODY, `preview proxy answers at ${url}`,
-        hello.stderr.trim() || hello.stdout.trim() || "no answer: is pr-daemon serving? check DNS, the port forwards and ~/.pr-daemon/caddy/caddy.log (certificates)");
+        hello.stderr.trim() || hello.stdout.trim() || `no answer: is pr-daemon serving? check DNS, the port forwards and ${CADDY_LOG} (certificates)`);
+      if (p.pageUser) {
+        // The status page must ask for the login; a 200 here would mean it's open to anyone.
+        const page = await run("curl", ["-sS", "-m", "15", "-o", "/dev/null", "-w", "%{http_code}", ...(p.tls === "internal" ? ["-k"] : []), `${publicUrl(cfg, CHECK_LABEL)}/`]);
+        ok(page.stdout === "401", `status page at ${publicUrl(cfg, CHECK_LABEL)}/ asks for a login (user ${p.pageUser})`,
+          `it answered ${page.stdout || page.stderr.trim()}; expected 401`);
+      }
     } else {
       console.log(`· no preview domain: previews use local URLs (set [preview] domain to get https://<branch>.<domain>)`);
     }

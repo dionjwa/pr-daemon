@@ -2,12 +2,11 @@
 // The web page edits the raw text, so comments survive; every save is parsed
 // and validated first, and a bad file is never written.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "smol-toml";
-import { parseAmount, parseDuration } from "./util.ts";
+import { HOME, parseAmount, parseDuration } from "./util.ts";
 
-export const HOME = process.env.PR_DAEMON_HOME ?? join(homedir(), ".pr-daemon");
+export { HOME };
 export const CONFIG_PATH = process.env.PR_DAEMON_CONFIG ?? join(HOME, "config.toml");
 
 /**
@@ -43,6 +42,8 @@ export interface RepoConfig {
   check: string;         // "" = no harness check (trust the agent)
   /** Host header the app receives through the preview proxy: the public one, or its local one. */
   proxyHost: "public" | "upstream";
+  /** Agents may edit .github/workflows/ and pr-daemon pushes it (flagged for your review), instead of holding it back. */
+  workflows: boolean;
 }
 
 export interface PreviewConfig {
@@ -55,6 +56,8 @@ export interface PreviewConfig {
   httpsPort: number;
   publicPort: number | null;              // port in public URLs when you forward e.g. 443 → 8443
   admin: string;                          // Caddy admin API, host:port (local only)
+  pageUser: string;                       // with pagePasswordHash: the status page at https://pr-daemon.<domain>, behind a login
+  pagePasswordHash: string;               // bcrypt, from `caddy hash-password`; never the password itself
 }
 
 export interface Config {
@@ -243,6 +246,11 @@ http_port = 80
 https_port = 443
 # public_port = 443                # the port people use, if you forward e.g. 443 → 8443
 admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
+# The status page at https://pr-daemon.<domain>, behind a login. Both lines, or neither (then the
+# page stays on localhost only). Anyone with the login can edit this file, and its commands run on
+# this machine: use a long, unique password. The hash comes from caddy hash-password.
+# page_user = "you"
+# page_password_hash = "$2a$14$..."
 
 # ============================================================================
 # REPOSITORIES to watch. This is the only part you have to fill in.
@@ -296,6 +304,10 @@ admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
 #   proxy_host = "public"           # Host header the app gets via the preview URL: "public" (the
 #                                   # branch's public host) or "upstream" (its local host, for
 #                                   # dev servers that reject unknown hosts)
+#   workflows = false               # true: agents may edit .github/workflows/, and pr-daemon pushes
+#                                   # it and flags it "needs your review". Needs a GitHub login
+#                                   # that may push workflows (~/.pr-daemon/gh-tokens/<owner>, see the README's
+#                                   # Safety section). false: such an edit is held back for you
 `;
 
 type Raw = Record<string, unknown>;
@@ -406,6 +418,8 @@ export function parseConfig(text: string): Config {
       httpsPort: num(pv.https_port, 443, "preview.https_port"),
       publicPort: pv.public_port === undefined ? null : num(pv.public_port, 443, "preview.public_port"),
       admin: str(pv.admin, "127.0.0.1:2019"),
+      pageUser: str(pv.page_user, "").trim(),
+      pagePasswordHash: str(pv.page_password_hash, "").trim(),
     },
     repos: repos.map((r, i) => {
       const at = `[[repos]] block #${i + 1}`;
@@ -421,6 +435,7 @@ export function parseConfig(text: string): Config {
         down: str(r.down, "just pr-daemon-down"),
         check: str(r.check, "just pr-daemon-check"),
         proxyHost: oneOf(r.proxy_host, ["public", "upstream"], "public", `${at}: proxy_host`),
+        workflows: bool(r.workflows, false, `${at}: workflows`),
       };
     }),
   };
@@ -428,6 +443,11 @@ export function parseConfig(text: string): Config {
     throw new Error(`preview.domain "${cfg.preview.domain}" isn't a domain name (e.g. "preview.example.com")`);
   }
   if (cfg.preview.dns && cfg.preview.tls !== "auto") throw new Error(`preview.dns only applies to tls = "auto" (Let's Encrypt); remove it or set tls = "auto"`);
+  if (!!cfg.preview.pageUser !== !!cfg.preview.pagePasswordHash) throw new Error("preview.page_user and preview.page_password_hash go together: set both to put the status page online, or neither");
+  if (cfg.preview.pagePasswordHash && !/^\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}$/.test(cfg.preview.pagePasswordHash)) {
+    throw new Error("preview.page_password_hash must be a bcrypt hash, not the password: run `caddy hash-password` and paste what it prints");
+  }
+  if (cfg.preview.pageUser && cfg.preview.tls === "off") throw new Error('preview.page_user needs TLS: with tls = "off" the password would cross the network in the clear');
   if (!/^[\w.[\]:-]+:\d+$/.test(cfg.preview.admin)) throw new Error('preview.admin must be host:port, e.g. "127.0.0.1:2019"');
   if (cfg.pollMs < 10_000) throw new Error("poll must be at least 10s (GitHub rate limits)");
   const dup = cfg.repos.map((r) => r.name).find((n, i, all) => all.indexOf(n) !== i);
