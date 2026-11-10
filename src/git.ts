@@ -370,8 +370,16 @@ Or comment \`/pr-daemon undo the change to .github/workflows/\` and pr-daemon's 
 /** GitHub refused a push because it changes .github/workflows/ and the login may not. */
 export class WorkflowRefused extends Error {}
 
+const TRANSIENT_PUSH = /fatal error in commit_refs|Internal Server Error|HTTP (500|502|503|504)|\b50[0234]\b.*(error|Gateway|Unavailable)/i;
+
 export async function push(wt: string, branch: string): Promise<void> {
-  const r = await run("git", ["-C", wt, "push", "-q", "-u", "origin", branch]);
+  let r = await run("git", ["-C", wt, "push", "-q", "-u", "origin", branch]);
+  // GitHub sometimes drops a good push on its side ("fatal error in
+  // commit_refs", a 5xx): try again before calling it a failure.
+  for (let i = 1; i <= 2 && r.code !== 0 && TRANSIENT_PUSH.test(r.stderr); i++) {
+    await new Promise((ok) => setTimeout(ok, 5000 * i));
+    r = await run("git", ["-C", wt, "push", "-q", "-u", "origin", branch]);
+  }
   if (r.code === 0) return;
   if (/without `?workflow`? (scope|permission)/i.test(r.stderr)) {
     // gh's default login can't push changes under .github/workflows. That's a

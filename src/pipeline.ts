@@ -916,19 +916,23 @@ Changed your mind mid-way? \`git merge --abort\` puts the branch back. Or commen
   } else {
     if (await git.mergeInProgress(wt)) await git.abortMerge(wt, "HEAD");   // left over from an interrupted run
     if (job.session_id) store.update(job.id, { session_id: "" });          // that session's merge is gone: start clean
-    // This job stopped after committing its merge but before pushing it (a
-    // pause or restart during the check): start over from the PR's head.
+    // The worktree must be exactly the PR: a merge on top of anything else
+    // would push commits nobody asked for. Commits here that the PR hasn't got
+    // are an earlier run's that never went up (a pause or restart before the
+    // push, or a push GitHub dropped: "fatal error in commit_refs" left a clean
+    // merge behind, and the next merge blamed a person for it). Only pr-daemon
+    // commits in its worktrees, so keep them on a local branch and start again
+    // from the PR's head.
     const here = await git.head(wt);
-    if (saved && saved.before === p.head.sha && here !== p.head.sha && (await git.isAncestor(wt, saved.before, here))) {
-      await git.keepAttempt(wt, `${branch}-merge-attempt-${job.id}`).catch(() => {});
-      await git.abortMerge(wt, saved.before);
-      store.event(`an earlier run of this merge stopped before pushing; starting it again from ${saved.before.slice(0, 7)}`, job.id, "warn");
+    if (here !== p.head.sha) {
+      const kept = `${branch}-merge-attempt-${job.id}`;
+      const unpushed = !(await git.isAncestor(wt, here, p.head.sha));
+      if (unpushed) await git.keepAttempt(wt, kept).catch(() => {});
+      await git.abortMerge(wt, p.head.sha);
+      store.event(`${branch}'s worktree was at ${here.slice(0, 7)}, the PR at ${p.head.sha.slice(0, 7)}; starting from the PR's head` +
+        (unpushed ? ` (its unpushed commits are kept as local branch ${kept})` : ""), job.id, "warn");
     }
     before = await git.head(wt);
-    // The worktree must be exactly the PR: a merge on top of anything else
-    // would push commits nobody asked for.
-    if (before !== p.head.sha) await handOver("the worktree isn't at the PR's head", [
-      `the worktree is at ${before.slice(0, 7)}, the PR at ${p.head.sha.slice(0, 7)}: someone else pushed, or there are local commits that never went up`]);
     if (!(await git.isClean(wt))) await handOver("the worktree has uncommitted changes", [`tracked files in ${branch}'s worktree are modified; pr-daemon won't merge over them`]);
     rmSync(reportFile, { force: true });
     m = await git.startMerge(wt, base, branch);
@@ -1020,7 +1024,12 @@ Changed your mind mid-way? \`git merge --abort\` puts the branch back. Or commen
   try { await git.push(wt, branch); }
   catch (e) {
     const msg = (e as Error).message;
-    if (!/workflow/.test(msg)) throw e;
+    if (!/workflow/.test(msg)) {
+      // Don't leave an unpushed merge behind for the next run to trip over.
+      await git.keepAttempt(wt, `${branch}-merge-attempt-${job.id}`).catch(() => {});
+      await git.abortMerge(wt, before);
+      throw e;
+    }
     if (m.clean && (await git.head(wt)) === mergeCommit) {
       await git.abortMerge(wt, before);
       return viaGitHub(ctx, { before, base, branch, wt, n, note, handOver, why: msg });
