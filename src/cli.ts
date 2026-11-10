@@ -99,7 +99,7 @@ async function status(): Promise<void> {
   for (const j of s.jobs.filter((x: any) => ["running", "queued", "paused"].includes(x.state)))
     console.log(`  ${j.state.padEnd(8)} ${j.kind.padEnd(8)} ${j.repo}#${j.number}  ${j.tokensText}  ${j.reason}`);
   for (const st of s.stacks) {
-    if (!st.branch) { console.log(`  work    ${`${st.repo}#${st.issue}`.padEnd(40)} no stack  ${st.title}`); continue; }
+    if (st.state === "none") { console.log(`  work    ${`${st.repo}#${st.issue}`.padEnd(40)} no stack  ${st.title}`); continue; }
     console.log(`  stack   ${st.branch.padEnd(40)} ${String(st.state).padEnd(9)} ${st.public_url || st.url}${st.checks_state ? `  checks: ${st.checks_state}` : ""}`);
     if (st.error) console.log(`          → ${st.error}`);
   }

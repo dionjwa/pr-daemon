@@ -1163,7 +1163,7 @@ export async function teardown(ctx: Ctx): Promise<void> {
 export async function restart(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const s = store.stackForIssue(repo.name, job.number);
-  if (!s) return;
+  if (!s) { if (job.pr) await start(ctx, job.pr); return; }
   // A row whose worktree is gone can never come back: say so on the row
   // instead of finishing instantly and looking like nothing happened.
   if (!existsSync(s.worktree)) {
@@ -1183,6 +1183,23 @@ export async function restart(ctx: Ctx): Promise<void> {
   store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, ...routesOf(r),
     healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now(), stopped_at: null });
   if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);
+}
+
+/**
+ * Bring back a stack whose row is gone (torn down before Tear down kept
+ * rows): a worktree from the PR's head, then `up`, as adopt does. The
+ * builder's session goes back on the row, so a revise still resumes it.
+ */
+async function start(ctx: Ctx, pr: number): Promise<void> {
+  const { store, job, repo } = ctx;
+  const p = await gh.pr(repo.name, pr);
+  if (p.state !== "open") throw new FailError(`PR #${pr} is ${p.state}: there is nothing to start`);
+  const { branch, wt, issue } = await prWorktree(ctx, p);
+  store.event(`starting ${branch} again: a worktree at PR #${pr}'s head, then \`${repo.up}\``, job.id);
+  const r = await bringUp(ctx, { branch, wt, issue, pr });
+  const session = store.jobs(1000).find((j) => j.repo === repo.name && j.branch === branch && ["build", "revise", "ci"].includes(j.kind) && j.session_id)?.session_id;
+  if (session) store.upsertStack({ repo: repo.name, branch, issue, worktree: wt, builder_session: session });
+  if (!r.ok) throw new Error(`start failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 
 export const JOBS = { build, adopt, review, revise, discuss, ci, merge, teardown, restart } as const;

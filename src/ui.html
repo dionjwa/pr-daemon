@@ -403,7 +403,7 @@ const STACK_STATE = {
   down: ["bad", "down", "The stack isn't answering on its own address"],
   unknown: ["", "not checked", "Not probed yet"],
   stopped: ["", "stopped", "Torn down by you: the worktree is kept, and Restart brings the stack back"],
-  none: ["", "no stack", "Labelled, but no stack yet: its build is queued, or stopped before the stack came up"],
+  none: ["", "no stack", "Labelled, but no stack: its build is queued or failed before the stack came up, or it was torn down before rows were kept (Start brings back a PR's)"],
 };
 const CHECKS_NOTE = { success: "passing", pending: "running", failure: "failing", none: "no checks", "": "—" };
 // GitHub's view of the PR against its base, and the badge class for it.
@@ -424,10 +424,12 @@ function renderStacks() {
       const last = s.job ? `<div class="muted" style="font-size:11px"><a href="#job-${s.job.id}">${esc(s.job.kind)}: ${esc(s.job.state)}</a></div>` : "";
       const issueCell = `<td>${s.issue === s.pr ? link(s.repo, s.pr, true) : `${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}`}
           ${s.title ? `<div class="small">${esc(s.title)}</div>` : ""}${last}</td>`;
+      // A PR with no stack (torn down before rows were kept) can be started from its branch.
       if (s.state === "none") return `<tr title="${esc(title)}">
         <td><span class="badge s-none"><span class="dot ${cls}"></span>${esc(word)}</span></td>
-        <td class="small muted">—</td>${issueCell}
-        <td class="small muted">—</td><td class="hide-sm"></td><td class="hide-sm"></td><td class="hide-sm"></td><td></td></tr>`;
+        <td class="small ${s.branch ? "" : "muted"}">${esc(s.branch || "—")}</td>${issueCell}
+        <td class="small muted">—</td><td class="hide-sm"></td><td class="hide-sm"></td><td class="hide-sm"></td>
+        <td class="actions">${s.branch && s.pr ? btn(`restart|${id}`, "Start", "", `Makes a worktree at PR #${s.pr}'s head and runs up.`) : ""}</td></tr>`;
       const row = `<tr class="row" data-stack="${esc(id)}" title="${esc(title)}">
         <td><span class="badge s-${esc(s.state)}"><span class="dot ${cls}"></span>${esc(word)}</span></td>
         <td class="small">${esc(s.branch)}</td>

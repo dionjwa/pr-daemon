@@ -800,14 +800,18 @@ export class Daemon {
    */
   private stackAction(kind: "teardown" | "restart", repo: string, branch: string): void {
     const s = this.store.stack(repo, branch);
-    if (!s || (kind === "teardown" && s.stopped_at)) return;
+    if (s && kind === "teardown" && s.stopped_at) return;
+    // No row (torn down before rows were kept): Start, from the PR a job on this branch recorded.
+    const pr = s ? null : this.store.jobs(1000).find((j) => j.repo === repo && j.branch === branch && j.pr)?.pr ?? null;
+    if (!s && (kind !== "restart" || !pr)) return;
     const pending = this.store.jobs(200).find((j) => j.repo === repo && j.branch === branch && j.kind === kind
       && ["queued", "running"].includes(j.state));
     if (pending) {
       this.store.event(`${kind} of ${branch} is already ${pending.state}`, pending.id, "warn");
       return;
     }
-    this.store.enqueue({ repo, kind, number: s.issue, branch, trigger_key: `${kind}:${repo}:${branch}:manual:${Date.now()}` });
+    this.store.enqueue({ repo, kind, number: s?.issue ?? issueForPr(this.store, repo, branch, pr!), branch, pr,
+      trigger_key: `${kind}:${repo}:${branch}:manual:${Date.now()}` });
     this.tick();
   }
 
@@ -835,7 +839,7 @@ export class Daemon {
     const repos = new Set(this.cfg.repos.map((r) => r.name));
     const items = [...this.labeled].filter(([repo]) => repos.has(repo)).flatMap(([repo, xs]) => xs.map((i) => ({ repo, ...i })));
     const title = (repo: string, ...ns: (number | null)[]) => items.find((i) => i.repo === repo && ns.includes(i.number))?.title ?? "";
-    const jobs = this.store.jobs(200);
+    const jobs = this.store.jobs(1000);
     const lastJob = (match: (j: Job) => boolean) => {
       const j = jobs.find(match);
       return j ? { id: j.id, kind: j.kind, state: j.state } : null;
@@ -849,8 +853,12 @@ export class Daemon {
     for (const i of items) {
       if (stacks.some((s) => s.repo === i.repo && (s.issue === i.number || s.pr === i.number))) continue;
       const isPr = gh.isPullRequest(i);
-      rows.push({ repo: i.repo, branch: "", issue: i.number, pr: isPr ? i.number : null, title: i.title, state: "none",
-        job: lastJob((j) => j.repo === i.repo && j.number === i.number) });
+      // A stack torn down before Tear down kept rows: its build (or adopt)
+      // still knows the branch and the PR, and Start brings it back from those.
+      const past = jobs.find((j) => j.repo === i.repo && j.number === i.number && ["build", "adopt"].includes(j.kind) && j.branch);
+      const branch = past?.branch ?? "", pr = isPr ? i.number : past?.pr ?? null;
+      rows.push({ repo: i.repo, branch, issue: i.number, pr, title: i.title, state: "none",
+        job: lastJob((j) => j.repo === i.repo && ((!!branch && j.branch === branch) || [i.number, pr].includes(j.number))) });
     }
     return rows;
   }

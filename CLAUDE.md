@@ -48,7 +48,10 @@ get its stack and a review. One long-running process on the owner's machine
    health/CI/merge watches (they would bring it back), and Restart (or any
    `up`, via `bringUp()`) clears it. The page's "Issues and PRs" table is
    every stack row plus every labelled issue/PR with no stack yet
-   (`Daemon.work()`).
+   (`Daemon.work()`; the branch and PR come from its build/adopt job). Such
+   a row with a PR gets **Start**: a `restart` job with no stack row and
+   `job.pr` set runs `pipeline.start()` — `prWorktree()` (trust check
+   included), `bringUp()`, and the builder's session back on the row.
 11. with `[preview] domain` set: runs Caddy so each branch is at
     `https://<branch>.<domain>`
 
