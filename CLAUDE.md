@@ -342,6 +342,11 @@ just contract                 # print examples/justfile, the two recipes a proje
   ours touches a workflow (superslides.io #204/#205). `pushWork()` then
   merges the base in first (`git.catchUpWorkflows()`, build only: later
   pushes are compared with the branch's old tip).
+- **A fine-grained token may get 403 on check-runs** ("Resource not
+  accessible by personal access token": it needs Checks, which the token page
+  may not offer). `gh.checks()` then reads the Actions jobs of the commit's
+  workflow runs (`actionsJobs()`): Actions makes one check run per job, so
+  it's the same list minus other apps' checks (kodiak, GitGuardian).
 - **`gh run view --log-failed` can print nothing and still exit 0.** Two
   reasons, both real here: gh **< 2.73** (this laptop had 2.60) returns an
   empty log for runs it can't parse, and GitHub simply has no logs for some

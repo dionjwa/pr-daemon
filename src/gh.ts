@@ -279,10 +279,25 @@ export interface CommitStatus { context: string; state: string; description?: st
  */
 export async function checks(repo: string, sha: string): Promise<Checks> {
   const [runs, combined] = await Promise.all([
-    apiPages<CheckRun>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`, (p) => p.check_runs as CheckRun[] | undefined),
+    apiPages<CheckRun>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`, (p) => p.check_runs as CheckRun[] | undefined)
+      .catch((e: Error) => { if (/not accessible by personal access token/.test(e.message)) return actionsJobs(repo, sha); throw e; }),
     api<{ statuses: CommitStatus[] } | null>(`repos/${repo}/commits/${sha}/status`).catch(() => null),
   ]);
   return summarizeChecks(runs, combined?.statuses ?? []);
+}
+
+/**
+ * The check runs GitHub Actions made for a commit, read through the Actions
+ * API instead: a fine-grained token may not be offered the Checks permission,
+ * and Actions makes one check run per job, so its jobs are the same list.
+ * Check runs from other apps aren't in it.
+ */
+async function actionsJobs(repo: string, sha: string): Promise<CheckRun[]> {
+  const runs = await apiPages<{ id: number }>(`repos/${repo}/actions/runs?head_sha=${sha}&per_page=50`,
+    (p) => p.workflow_runs as { id: number }[] | undefined);
+  const jobs = await Promise.all(runs.map((r) => apiPages<CheckRun>(`repos/${repo}/actions/runs/${r.id}/jobs?per_page=100`,
+    (p) => p.jobs as CheckRun[] | undefined)));
+  return jobs.flat();
 }
 
 /** The verdict for one commit's checks. Pure: unit-tested. */

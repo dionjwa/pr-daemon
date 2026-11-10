@@ -662,7 +662,9 @@ limits what a bad workflow change could reach.
    Repository access: *Only select repositories*, that owner's repos in your
    config; Repository permissions: **Contents**, **Pull requests**,
    **Issues** and **Workflows** read and write; **Commit statuses**,
-   **Actions** and (if listed) **Checks** read. An org may have to allow
+   **Actions** and (if listed) **Checks** read. Without Checks, pr-daemon
+   reads your GitHub Actions jobs instead, but can't see checks from other
+   apps (e.g. GitGuardian). An org may have to allow
    fine-grained tokens and approve yours (org Settings → Personal access
    tokens). Then, on the pr-daemon machine, save each one under its owner's
    name:
