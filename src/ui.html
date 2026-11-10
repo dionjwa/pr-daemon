@@ -56,7 +56,7 @@
   .s-up { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .s-degraded { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
   .s-down { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
-  .s-unknown { color: var(--ink-3); }
+  .s-unknown, .s-stopped, .s-none { color: var(--ink-3); }
   .s-success { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .s-pending { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
   .s-failure { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
@@ -75,11 +75,14 @@
   .stack-error { margin-top: 4px; max-width: 520px; max-height: 220px; overflow: auto; display: flex; flex-direction: column-reverse; background: var(--bg); border-radius: 6px; }
   .stack-error pre { margin: 0; padding: 6px 8px; font: 11px/1.45 var(--mono); color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
   pre.activity { margin: 0; padding: 10px 14px; background: var(--bg); font: 12px/1.5 var(--mono); color: var(--ink-2); max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-  .meter { height: 10px; border-radius: 99px; background: var(--chip); overflow: hidden; margin: 8px 0; }
+  .meter { height: 8px; border-radius: 99px; background: var(--chip); overflow: hidden; }
   .meter > div { height: 100%; background: var(--accent); transition: width .4s; }
   .meter.full > div { background: var(--bad); }
-  .budget { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: baseline; }
-  .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* The token budget: one row, label · amount · meter · details. Wraps on narrow screens. */
+  .budget { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 16px; }
+  .budget .label { color: var(--ink-2); font-size: 13px; text-transform: uppercase; letter-spacing: .6px; }
+  .budget .meter { flex: 1 1 160px; min-width: 120px; }
+  .big { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .events { font: 12px/1.6 var(--mono); max-height: 320px; overflow: auto; }
   .events div { padding: 2px 16px; border-bottom: 1px dashed var(--line); }
   .e-warn { color: var(--warn); } .e-error { color: var(--bad); }
@@ -107,8 +110,7 @@
   .bar { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
   .msg-ok { color: var(--ok); } .msg-bad { color: var(--bad); white-space: pre-wrap; }
   .empty { padding: 18px 16px; color: var(--ink-3); }
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } .hide-sm { display: none; } }
+  @media (max-width: 860px) { .hide-sm { display: none; } }
   .tx { max-height: 560px; overflow: auto; padding: 10px 14px; background: var(--bg); font-size: 13px; }
   .tx > * { margin: 0 0 6px; }
   .tx pre { margin: 4px 0 0; padding: 6px 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
@@ -155,23 +157,14 @@
 </header>
 
 <main id="view-status">
+  <section id="budget" class="budget"></section>
   <section id="needs" hidden>
     <h2>Needs you <span id="needs-count" class="badge s-paused" hidden></span><span class="grow"></span>
       <button id="notices-read" style="text-transform:none;letter-spacing:0">Mark all read</button></h2>
     <div id="notices"></div>
   </section>
-  <div class="cols">
-    <section>
-      <h2>Token budget</h2>
-      <div class="pad" id="budget"></div>
-    </section>
-    <section>
-      <h2>How to use</h2>
-      <div class="pad small" id="howto"></div>
-    </section>
-  </div>
   <section>
-    <h2>Preview stacks <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for its addresses</span></h2>
+    <h2>Issues and PRs <span class="muted small" style="text-transform:none;letter-spacing:0">click a row for its addresses</span></h2>
     <div id="stacks" class="scroll"></div>
     <div class="foot" id="stacks-foot"></div>
   </section>
@@ -226,6 +219,10 @@
 </main>
 
 <main id="view-setup" hidden>
+  <section>
+    <h2>How to use</h2>
+    <div class="pad small" id="howto"></div>
+  </section>
   <section>
     <h2>Setting up a project</h2>
     <div class="pad small" style="padding-bottom:0">Paste this into your open AI chat session on your repo:</div>
@@ -304,10 +301,11 @@ function render() {
 
   const b = S.budget, pct = b.limit ? Math.min(100, (b.used / b.limit) * 100) : 0;
   $("budget").innerHTML = `
-    <div class="budget"><span class="big">${esc(b.usedText)}</span><span class="muted">of ${esc(b.limitText)} · last ${esc(b.window)}</span></div>
-    ${b.limit ? `<div class="meter ${pct >= 100 ? "full" : ""}"><div style="width:${pct}%"></div></div>` : `<div class="muted small" style="margin:8px 0">No window limit set. Add <code>tokens = "40M"</code> under [budget] in Config.</div>`}
-    <div class="small muted">new tokens ${amt(b.breakdown.input + b.breakdown.output + b.breakdown.cache_create)} · cache reads ${amt(b.breakdown.cache_read)} ${b.countCacheReads ? "(counted)" : "(not counted)"}</div>
-    <div class="small muted">per-issue cap: ${b.perIssue ? esc(b.perIssue) : "none"}${b.freesAt ? ` · budget frees up in ${until(b.freesAt)}` : ""}</div>`;
+    <span class="label">Token budget</span>
+    <span><span class="big">${esc(b.usedText)}</span> <span class="muted small">of ${esc(b.limitText)} · last ${esc(b.window)}</span></span>
+    ${b.limit ? `<div class="meter ${pct >= 100 ? "full" : ""}" title="${Math.round(pct)}% of the window"><div style="width:${pct}%"></div></div>` : `<span class="muted small" style="flex:1 1 auto">No window limit: add <code>tokens = "40M"</code> under [budget] in <a href="#config">Config</a>.</span>`}
+    <span class="small muted">new ${amt(b.breakdown.input + b.breakdown.output + b.breakdown.cache_create)} · cache reads ${amt(b.breakdown.cache_read)} ${b.countCacheReads ? "(counted)" : "(not counted)"}
+      · per-issue cap ${b.perIssue ? esc(b.perIssue) : "none"}${b.freesAt ? ` · frees up in ${until(b.freesAt)}` : ""}</span>`;
 
   // Who this acts as, and who can make it act: the two facts that matter most
   // before labelling anything.
@@ -386,7 +384,10 @@ name = "your-org/website"</pre>`);
   $("events").innerHTML = S.events.map((e) => `<div class="e-${e.level}"><span class="muted">${new Date(e.at).toLocaleTimeString()}</span> ${e.job_id ? `<a href="#job-${e.job_id}">job ${e.job_id}</a> ` : ""}${esc(e.message)}</div>`).join("");
 }
 
-// ---------- preview stacks ----------
+// ---------- issues and PRs ----------
+// One row per issue or PR pr-daemon is working on, with its preview stack.
+// A stack you tore down keeps its row (stopped), and a labelled issue with no
+// stack yet gets one too, so freeing the machine never loses track of work.
 // The dot answers one question: can a person open this and get the app?
 //   up        the address people use answers (2xx/3xx, or the same code the
 //             stack itself gives — a proxy relaying the app's own 404 is fine)
@@ -394,11 +395,15 @@ name = "your-org/website"</pre>`);
 //             A restart can't fix that: it's the proxy, DNS, or the Host the
 //             app is given (proxy_host). The row says which.
 //   down      the stack itself isn't answering. auto_restart queues a restart.
+//   stopped   you pressed Tear down: the row and worktree stay, Restart brings it back.
+//   none      labelled, but no stack yet (still queued, or the build failed before up).
 const STACK_STATE = {
   up: ["ok", "up", "The preview URL answers with the app"],
   degraded: ["warn", "degraded", "The stack is running, but its preview URL doesn't serve the app"],
   down: ["bad", "down", "The stack isn't answering on its own address"],
   unknown: ["", "not checked", "Not probed yet"],
+  stopped: ["", "stopped", "Torn down by you: the worktree is kept, and Restart brings the stack back"],
+  none: ["", "no stack", "Labelled, but no stack yet: its build is queued, or stopped before the stack came up"],
 };
 const CHECKS_NOTE = { success: "passing", pending: "running", failure: "failing", none: "no checks", "": "—" };
 // GitHub's view of the PR against its base, and the badge class for it.
@@ -412,13 +417,22 @@ function renderStacks() {
     S.stacks.map((s) => {
       const [cls, word, title] = STACK_STATE[s.state] ?? STACK_STATE.unknown;
       const id = `${s.repo}|${s.branch}`;
-      const url = s.public_url || s.url;
+      const live = !["stopped", "none"].includes(s.state);
+      const url = live ? s.public_url || s.url : "";
       const ch = s.checks_state || "";
+      // What happened last on it, so a "no stack" row says why.
+      const last = s.job ? `<div class="muted" style="font-size:11px"><a href="#job-${s.job.id}">${esc(s.job.kind)}: ${esc(s.job.state)}</a></div>` : "";
+      const issueCell = `<td>${s.issue === s.pr ? link(s.repo, s.pr, true) : `${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}`}
+          ${s.title ? `<div class="small">${esc(s.title)}</div>` : ""}${last}</td>`;
+      if (s.state === "none") return `<tr title="${esc(title)}">
+        <td><span class="badge s-none"><span class="dot ${cls}"></span>${esc(word)}</span></td>
+        <td class="small muted">—</td>${issueCell}
+        <td class="small muted">—</td><td class="hide-sm"></td><td class="hide-sm"></td><td class="hide-sm"></td><td></td></tr>`;
       const row = `<tr class="row" data-stack="${esc(id)}" title="${esc(title)}">
         <td><span class="badge s-${esc(s.state)}"><span class="dot ${cls}"></span>${esc(word)}</span></td>
         <td class="small">${esc(s.branch)}</td>
-        <td>${s.issue === s.pr ? link(s.repo, s.pr, true) : `${link(s.repo, s.issue)}${s.pr ? ` → ${link(s.repo, s.pr, true)}` : ""}`}</td>
-        <td class="small">${url ? a(url) : `<span class="muted">not running</span>`}${
+        ${issueCell}
+        <td class="small">${url ? a(url) : `<span class="muted">${s.state === "stopped" ? `stopped ${ago(s.stopped_at)}` : "not running"}</span>`}${
           s.error ? `<div class="stack-error"><pre>${esc(s.error)}</pre></div>` : ""}</td>
         <td class="hide-sm small">${ch
           ? `<span class="badge s-${esc(ch)}">${esc(CHECKS_NOTE[ch] ?? ch)}</span>${
@@ -426,7 +440,8 @@ function renderStacks() {
           : `<span class="muted">${S.checks?.watch ? "—" : "not watched"}</span>`}</td>
         <td class="hide-sm small">${mergeCell(s)}</td>
         <td class="hide-sm small muted">${ago(s.checked_at)}</td>
-        <td class="actions">${btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${btn(`teardown|${id}`, "Tear down", "danger")}</td></tr>`;
+        <td class="actions">${btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${
+          s.state === "stopped" ? "" : btn(`teardown|${id}`, "Tear down", "danger", "Runs down to free the machine. The row and worktree stay; Restart brings it back.")}</td></tr>`;
       if (!openStacks.has(id)) return row;
       // Expanded: every address this stack has, and what each one really is.
       // With a preview domain the app is wired for its public origin, so the
@@ -446,15 +461,15 @@ function renderStacks() {
       ];
       return row + `<tr><td colspan="8" style="padding:0"><div class="detail"><dl>${
         rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl></div></td></tr>`;
-    }).join("")}</tbody></table>` : `<div class="empty">No preview stacks running.</div>`;
+    }).join("")}</tbody></table>` : `<div class="empty">Nothing labelled <span class="badge">${esc(S.label)}</span> and no stacks.</div>`;
 
   // Say plainly what does and doesn't stop a stack: the question a green dot
   // on a dead preview makes people ask.
   const h = S.health ?? {}, c = S.checks ?? {}, m = S.merge ?? {};
   $("stacks-foot").innerHTML = `Each stack is probed every ${esc(h.every ?? "?")} on its own address and, with a preview domain, on its public URL.
     ${h.autoRestart ? "One that stops answering is restarted automatically." : "<b>auto_restart is off</b>, so one that stops answering stays down."}
-    Nothing is stopped on a timer: a stack goes away when its PR or issue closes, when the <span class="badge">${esc(S.label)}</span> label comes off,
-    or when you press Tear down &mdash; and the <a href="#">Events</a> log says which.
+    Nothing is stopped on a timer: a stack and its row go away when its PR or issue closes, or when the <span class="badge">${esc(S.label)}</span> label comes off
+    &mdash; and the <a href="#">Events</a> log says which. Tear down stops just the stack: the row stays, nothing automatic acts on it, and Restart brings it back.
     ${c.watch ? `GitHub's own checks are read every ${esc(c.every)}${c.fix ? `, and a failing one gets an agent (up to ${c.maxRounds} round${c.maxRounds === 1 ? "" : "s"} per PR)` : " (fixing is off)"}.`
       : "Checks on PRs are not being watched (<code>checks.watch = false</code>)."}
     ${m.watch ? `A PR that conflicts with its base ${m.fix && m.maxRounds ? `gets the base merged in, with an agent resolving the conflicts (up to ${m.maxRounds} round${m.maxRounds === 1 ? "" : "s"} per PR); risky or uncertain ones come to you` : "is shown here and left to you (<code>merge.fix</code> is off)"}${m.behind ? ", and one that's merely behind is updated" : m.catchUp ? ", and an idle one that's behind gets the base merged in and checked (before any CI fix)" : ""}.`

@@ -99,6 +99,7 @@ async function status(): Promise<void> {
   for (const j of s.jobs.filter((x: any) => ["running", "queued", "paused"].includes(x.state)))
     console.log(`  ${j.state.padEnd(8)} ${j.kind.padEnd(8)} ${j.repo}#${j.number}  ${j.tokensText}  ${j.reason}`);
   for (const st of s.stacks) {
+    if (!st.branch) { console.log(`  work    ${`${st.repo}#${st.issue}`.padEnd(40)} no stack  ${st.title}`); continue; }
     console.log(`  stack   ${st.branch.padEnd(40)} ${String(st.state).padEnd(9)} ${st.public_url || st.url}${st.checks_state ? `  checks: ${st.checks_state}` : ""}`);
     if (st.error) console.log(`          → ${st.error}`);
   }
@@ -250,7 +251,7 @@ async function doctor(): Promise<void> {
     if (stacks.length) console.log(`· ${stacks.length} preview stack(s), as pr-daemon last probed them:`);
     for (const s of stacks) {
       const state = stackState(s);
-      ok(state === "up" || state === "unknown", `  ${s.branch}: ${state === "unknown" ? "not probed yet" : state}`, s.error);
+      ok(state === "up" || state === "unknown" || state === "stopped", `  ${s.branch}: ${state === "unknown" ? "not probed yet" : state === "stopped" ? "stopped (Tear down; Restart brings it back)" : state}`, s.error);
     }
   } catch { /* no database yet: nothing has run */ }
   process.exit(bad ? 1 : 0);

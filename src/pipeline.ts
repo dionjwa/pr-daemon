@@ -361,7 +361,7 @@ export async function build(ctx: Ctx): Promise<void> {
   const env = publicEnv(cfg, branch);
   const s = await stack.up(repo.up, wt, env);
   let url = s.ok ? s.url : "";
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   if (!s.ok) store.event(`\`${repo.up}\` failed; the agent has been told to fix it first`, job.id, "warn");
   const stackNote = s.ok
@@ -394,7 +394,7 @@ export async function build(ctx: Ctx): Promise<void> {
     const r = await stack.up(repo.up, wt, env);
     url = r.ok ? r.url || url : "";
     vars.PREVIEW_URL = stackWhere(cfg, branch, r);
-    store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
+    store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url, healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
       networks: withNetworks(store.stack(repo.name, branch)?.networks, r.networks), checked_at: Date.now() });
     if (r.ok && down) store.event(`the stack is up now${pub || url ? ` at ${pub || url}` : ""}`, job.id);
     if (!r.ok) store.event(`\`${repo.up}\` still fails: ${lastLine(r.error)}`, job.id, "warn");
@@ -610,7 +610,7 @@ async function bringUp(ctx: Ctx, o: { branch: string; wt: string; issue: number;
   const prev = store.stack(repo.name, o.branch);
   store.upsertStack({ repo: repo.name, branch: o.branch, issue: o.issue, worktree: o.wt, ...(o.pr ? { pr: o.pr } : {}),
     url: r.ok ? r.url || prev?.url || "" : "", healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
-    networks: withNetworks(prev?.networks, r.networks), checked_at: Date.now() });
+    networks: withNetworks(prev?.networks, r.networks), checked_at: Date.now(), stopped_at: null });
   return r;
 }
 
@@ -677,7 +677,7 @@ export async function revise(ctx: Ctx): Promise<void> {
   mkdirSync(shotsDir, { recursive: true });
   const s = await stack.up(repo.up, wt, publicEnv(ctx.cfg(), branch));
   const url = s.ok ? s.url : "";
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url, pr: job.number, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url, pr: job.number, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   const builder = store.stack(repo.name, branch)?.builder_session || "";
 
@@ -801,7 +801,7 @@ export async function ci(ctx: Ctx): Promise<void> {
   const logs = await gh.failureLogs(repo.name, sha);
 
   const s = await stack.up(repo.up, wt, publicEnv(cfg, branch));
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url: s.ok ? s.url : "", pr: job.number,
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url: s.ok ? s.url : "", pr: job.number,
     healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
 
@@ -993,7 +993,7 @@ Changed your mind mid-way? \`git merge --abort\` puts the branch back. Or commen
   //    break the build (the base renamed something this branch uses), so a
   //    failing check gets the same fix rounds as a build, under the same caps.
   const s = await stack.up(repo.up, wt, publicEnv(cfg, branch));
-  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, url: s.ok ? s.url || store.stack(repo.name, branch)?.url || "" : "", pr: job.number,
+  store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url: s.ok ? s.url || store.stack(repo.name, branch)?.url || "" : "", pr: job.number,
     healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   let local = await stack.check(repo.check, wt);
@@ -1099,12 +1099,27 @@ async function viaGitHub(ctx: Ctx, o: { before: string; base: string; branch: st
 }
 
 // ---------------------------------------------------------------- teardown / restart
+// Two teardowns. The automatic one (the PR or issue closed, the label came
+// off: `deleteBranch`) removes everything. The Tear down button only frees
+// what the stack holds: `down`, its networks, its route. The row, worktree and
+// agent logs stay, so the work is still listed and Restart brings it back.
 export async function teardown(ctx: Ctx): Promise<void> {
   const { store, job, repo } = ctx;
   const s = store.stackForIssue(repo.name, job.number);
   const wt = s?.worktree ?? git.findWorktree(repo.name, job.number);
   if (!wt) { store.event(`no stack for #${job.number}`, job.id); return; }
   const branch = s?.branch ?? wt.split("/").pop()!;
+  if (s && !payload(job).deleteBranch) {
+    if (existsSync(wt)) {
+      const d = await stack.down(repo.down, wt);
+      if (!d.ok) store.event(`down failed (continuing): ${d.output}`, job.id, "warn");
+    }
+    const left = await stack.removeNetworks(s.networks.split(" ").filter(Boolean));
+    if (left.length) store.event(`removed ${left.length} docker network(s) this stack created: ${left.join(", ")}`, job.id);
+    store.upsertStack({ repo: repo.name, branch, issue: s.issue, worktree: s.worktree, stopped_at: Date.now(), networks: "", error: "" });
+    store.event(`stopped ${branch}: its row and worktree stay, Restart brings it back`, job.id);
+    return;
+  }
   if (existsSync(wt)) {
     const d = await stack.down(repo.down, wt);
     if (!d.ok) store.event(`down failed (continuing): ${d.output}`, job.id, "warn");
@@ -1166,7 +1181,7 @@ export async function restart(ctx: Ctx): Promise<void> {
   if (!d.ok) store.event(`down failed (continuing): ${d.output}`, job.id, "warn");
   const r = await stack.up(repo.up, s.worktree, publicEnv(ctx.cfg(), s.branch));
   store.upsertStack({ repo: repo.name, branch: s.branch, issue: s.issue, worktree: s.worktree, url: r.ok ? r.url || s.url : s.url, ...routesOf(r),
-    healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now() });
+    healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, networks: withNetworks(s.networks, r.networks), checked_at: Date.now(), stopped_at: null });
   if (!r.ok) throw new Error(`restart failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 

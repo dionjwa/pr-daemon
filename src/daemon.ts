@@ -35,6 +35,8 @@ export class Daemon {
   lastPollAt = 0;
   lastPollError = "";
   nextPollAt = 0;
+  /** Each repo's open issues and PRs carrying the label, as of its last poll: the work with no stack yet. */
+  labeled = new Map<string, gh.Issue[]>();
   /** The GitHub login gh is authenticated as: everything pr-daemon does on GitHub is done as this user. */
   ghUser = "";
   private pollTimer: NodeJS.Timeout | null = null;
@@ -306,6 +308,7 @@ export class Daemon {
     //    removing and re-adding the label starts a fresh one.
     const items = await gh.labeled(repo, cfg.label);
     const labeled = new Set(items.map((i) => i.number));
+    this.labeled.set(repo, items);
     for (const item of items) {
       const n = item.number;
       const isPr = gh.isPullRequest(item);
@@ -396,6 +399,9 @@ export class Daemon {
         if (id) store.event(`queued teardown of ${s.branch} (${why.text})`, id);
         continue;
       }
+      // Torn down by hand: parked until Restart (or a /pr-daemon comment brings
+      // it up). Nothing automatic acts on it, since that would bring it back.
+      if (s.stopped_at) continue;
       await this.pollMerge(repo, s, pr);
       await this.pollChecks(repo, s, pr);
       await this.pollHealth(repo, s);
@@ -794,7 +800,7 @@ export class Daemon {
    */
   private stackAction(kind: "teardown" | "restart", repo: string, branch: string): void {
     const s = this.store.stack(repo, branch);
-    if (!s) return;
+    if (!s || (kind === "teardown" && s.stopped_at)) return;
     const pending = this.store.jobs(200).find((j) => j.repo === repo && j.branch === branch && j.kind === kind
       && ["queued", "running"].includes(j.state));
     if (pending) {
@@ -819,6 +825,36 @@ export class Daemon {
   }
 
   // ------------------------------------------------------------ status for the page
+  /**
+   * Every issue and PR pr-daemon is working on: each stack row (running, or
+   * stopped by Tear down), then each labelled issue or PR with no stack yet
+   * (a build still queued, or one that failed before `up`). One list, so
+   * tearing a stack down to free the machine never loses track of the work.
+   */
+  private work(): unknown[] {
+    const repos = new Set(this.cfg.repos.map((r) => r.name));
+    const items = [...this.labeled].filter(([repo]) => repos.has(repo)).flatMap(([repo, xs]) => xs.map((i) => ({ repo, ...i })));
+    const title = (repo: string, ...ns: (number | null)[]) => items.find((i) => i.repo === repo && ns.includes(i.number))?.title ?? "";
+    const jobs = this.store.jobs(200);
+    const lastJob = (match: (j: Job) => boolean) => {
+      const j = jobs.find(match);
+      return j ? { id: j.id, kind: j.kind, state: j.state } : null;
+    };
+    const stacks = this.store.stacks();
+    const rows: unknown[] = stacks.map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
+      // One word for the dot: the page shouldn't have to re-derive it from two status codes.
+      state: stack.stackState(s), title: title(s.repo, s.issue, s.pr),
+      job: lastJob((j) => j.repo === s.repo && (j.branch === s.branch || [s.issue, s.pr].includes(j.number))),
+      services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) }));
+    for (const i of items) {
+      if (stacks.some((s) => s.repo === i.repo && (s.issue === i.number || s.pr === i.number))) continue;
+      const isPr = gh.isPullRequest(i);
+      rows.push({ repo: i.repo, branch: "", issue: i.number, pr: isPr ? i.number : null, title: i.title, state: "none",
+        job: lastJob((j) => j.repo === i.repo && j.number === i.number) });
+    }
+    return rows;
+  }
+
   status(): unknown {
     const w = windowState(this.store, this.cfg);
     return {
@@ -846,10 +882,7 @@ export class Daemon {
         out: j.branch ? git.outDir(j.repo, j.branch) : "",
         worktree: j.branch ? join(git.worktreeRoot(j.repo), j.branch) : "",
       })),
-      stacks: this.store.stacks().map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
-        // One word for the dot: the page shouldn't have to re-derive it from two status codes.
-        state: stack.stackState(s),
-        services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) })),
+      stacks: this.work(),
       checks: { watch: this.cfg.checks.watch, fix: this.cfg.checks.fix, maxRounds: this.cfg.checks.maxRounds, every: formatDuration(this.cfg.checks.everyMs) },
       merge: { watch: this.cfg.merge.watch, fix: this.cfg.merge.fix, behind: this.cfg.merge.behind, catchUp: this.cfg.merge.catchUp, maxRounds: this.cfg.merge.maxRounds },
       health: { every: formatDuration(this.cfg.stacks.healthEveryMs), autoRestart: this.cfg.stacks.autoRestart },

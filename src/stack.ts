@@ -129,8 +129,8 @@ export async function probe(url: string): Promise<number> {
 export type HealthState = "up" | "degraded" | "down";
 
 /** A stack row's state in one word, for the page, `status` and `doctor`. */
-export function stackState(s: { healthy: number; public_ok: number }): HealthState | "unknown" {
-  return s.healthy === -1 ? "unknown" : s.healthy === 0 ? "down" : s.public_ok === 0 ? "degraded" : "up";
+export function stackState(s: { healthy: number; public_ok: number; stopped_at?: number | null }): HealthState | "unknown" | "stopped" {
+  return s.stopped_at ? "stopped" : s.healthy === -1 ? "unknown" : s.healthy === 0 ? "down" : s.public_ok === 0 ? "degraded" : "up";
 }
 
 export interface Health {

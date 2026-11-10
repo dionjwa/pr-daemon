@@ -334,29 +334,33 @@ http://localhost:7377. It's only reachable from your own machine.
   needed for notifications on this machine and can send a test one. Beside
   the config editor, a checkbox for each kind of notice turns it off or on
   (saved in the config file as `notify_on`).
-- **Who:** the GitHub user pr-daemon acts as (your `gh` login), and the users
-  allowed to trigger work.
-
-- **Token budget:** tokens used in the current window, the limit, and when it
-  frees up.
+- **Token budget** (one row at the very top): tokens used in the current
+  window, the limit, and when it frees up.
+- **Who** and **how to use** are on the **Setup** tab: the GitHub user
+  pr-daemon acts as (your `gh` login), the users allowed to trigger work, and
+  what the label and `/pr-daemon` comments do.
 - **Work:** every job (build, review, revise, ci, merge, teardown, restart) with its
   state, tokens and the reason it's waiting. Click a row to watch the agent
   live. Buttons: **Cancel**, **Resume** (continue where it stopped) and
   **Retry** (start over).
-- **Preview stacks** (at the top): every running app copy, with a health dot
-  and its CI state. Click a row for every address it has — the public URL, the
+- **Issues and PRs** (at the top): everything pr-daemon is working on, one row
+  each, with its app copy's health dot and its CI state. A labelled issue with
+  no stack yet (its build is queued, or failed before the stack came up) is
+  listed too, as **no stack**. Click a row for every address it has — the public URL, the
   local one behind it, each backend service, the worktree and the commit its
-  checks are about. The dot has three states:
+  checks are about. The dot has these states:
   **up** (the address people open answers with the app),
   **degraded** (the app is running here, but its preview URL doesn't serve it —
   usually DNS, the proxy, or the Host the app is given, and the row says which),
-  and **down** (the app isn't answering at all; it's restarted automatically, the same way as the Restart button).
-  Nothing is stopped on a timer: a stack goes away when its PR or issue closes,
-  when the label comes off, or when you press Tear down.
+  **down** (the app isn't answering at all; it's restarted automatically, the same way as the Restart button),
+  and **stopped** (you pressed Tear down).
+  Nothing is stopped on a timer: a stack and its row go away when its PR or issue closes,
+  or when the label comes off.
   Buttons: **Restart** (runs `down`, then `up`, so the stack picks up a changed
   environment such as a new API key; its data goes too unless `down` honours
-  `PR_DAEMON_KEEP_DATA`), **Tear down** (stops the stack and removes the worktree,
-  but keeps the branch and any PR open).
+  `PR_DAEMON_KEEP_DATA`), **Tear down** (runs `down` to free the machine; the
+  row, worktree, branch and PR stay, nothing automatic acts on it, and Restart
+  brings it back. A `/pr-daemon` comment on it brings it back too).
 - **Events:** what happened, newest first.
 - **Pause:** stops new jobs from starting. Running ones finish.
 - **Config:** edit the config file in place, with TOML colouring. It's checked

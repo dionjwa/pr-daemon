@@ -136,6 +136,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
   const p = cfg.preview;
   const routes: object[] = [];
   for (const s of stacks) {
+    if (s.stopped_at) continue;   // torn down by hand: nothing to route to until Restart
     const repo: RepoConfig | undefined = cfg.repos.find((r) => r.name === s.repo);
     const app = s.url ? proxyTo(s.url, mode, (repo?.proxyHost ?? "public") === "upstream") : null;
     if (app) routes.push({ match: [{ host: [`${hostLabel(s.branch)}.${p.domain}`] }], handle: [app], terminal: true });
@@ -351,7 +352,7 @@ export class Proxy {
         if (!r.ok) throw new Error(`Caddy rejected the config: ${(await r.text()).slice(0, 500)}`);
         this.lastHash = hash;
       }
-      this.status = { enabled, mode, running: true, routes: stacks.filter((s) => s.url).length, error: "", domain: cfg.preview.domain };
+      this.status = { enabled, mode, running: true, routes: stacks.filter((s) => s.url && !s.stopped_at).length, error: "", domain: cfg.preview.domain };
     } catch (e) {
       const msg = (e as Error).message;
       if (msg !== this.status.error) this.store.event(`preview proxy: ${msg}`, null, "error");

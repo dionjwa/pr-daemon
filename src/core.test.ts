@@ -110,7 +110,7 @@ test("budget window, per-issue cap, and when it frees up", () => {
 });
 
 import { caddyConfig, CADDY_LOG, CHECK_BODY, CHECK_PATH, hostLabel, publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
-import { parseUp, poolHint } from "./stack.ts";
+import { parseUp, poolHint, stackState } from "./stack.ts";
 import { stackWhere, withNetworks } from "./pipeline.ts";
 import type { Stack } from "./db.ts";
 
@@ -118,7 +118,17 @@ const stackOf = (branch: string, url: string, repo = "o/r", routes: Record<strin
   repo, branch, issue: Number(branch.split("-")[0]), worktree: "/w", url, pr: null, builder_session: "", healthy: 1, error: "", networks: "",
   routes: JSON.stringify(routes), public_ok: -1, local_code: null, public_code: null,
   checks_state: "", checks_detail: "", checks_sha: "", checks_at: null, checked_at: null, created_at: 0,
-  mergeable: "", merge_note: "", merge_level: "", merge_at: null,
+  mergeable: "", merge_note: "", merge_level: "", merge_at: null, stopped_at: null,
+});
+
+test("a stack torn down by hand is stopped and gets no route", () => {
+  const on = parseConfig(`[preview]\ndomain = "preview.example.com"`);
+  const running = stackOf("1-a", "http://127.0.0.1:3001"), stopped = { ...stackOf("2-b", "http://127.0.0.1:3002"), stopped_at: 1 };
+  assert.equal(stackState(stopped), "stopped");
+  assert.equal(stackState(running), "up");
+  const text = JSON.stringify(caddyConfig(on, [running, stopped], "binary"));
+  assert.ok(text.includes("1-a.preview.example.com"));
+  assert.ok(!text.includes("2-b.preview.example.com"));
 });
 
 test("branch → DNS label", () => {

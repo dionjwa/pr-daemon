@@ -42,7 +42,13 @@ get its stack and a review. One long-running process on the owner's machine
 10. when the PR closes (or the issue, before there's a PR), or the `agent` label
    is removed: `just pr-daemon-down`, remove the worktree, clear labels, and
    delete the branch on GitHub. Removing the label also cancels running jobs
-   for the issue and closes its open PR. The page's Tear down button keeps the branch.
+   for the issue and closes its open PR. The page's Tear down button only
+   runs `down`: the stack row stays as **stopped** (`stacks.stopped_at`),
+   with its worktree and logs, so the work stays listed; the poll skips its
+   health/CI/merge watches (they would bring it back), and Restart (or any
+   `up`, via `bringUp()`) clears it. The page's "Issues and PRs" table is
+   every stack row plus every labelled issue/PR with no stack yet
+   (`Daemon.work()`).
 11. with `[preview] domain` set: runs Caddy so each branch is at
     `https://<branch>.<domain>`
 
@@ -89,7 +95,7 @@ A human always merges.
   whose commands run here. Caddy sends web.ts a local Host, so its Host check
   stays as it is. Vanilla HTML in `src/ui.html`, no
   framework, no build, **no `alert`/`confirm` dialogs** (click twice to
-  confirm). Three tabs, routed off `location.hash`: Status, Setup (the line to
+  confirm). Three tabs, routed off `location.hash`: Status, Setup (who it acts as, how to use it, the line to
   paste into an agent's chat, built from `location.origin` so it always names
   the address you reached the page on) and Config (the raw TOML, plus where
   everything lives on disk).

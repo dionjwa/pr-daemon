@@ -57,6 +57,8 @@ export interface Stack {
   merge_note: string;
   merge_level: string;     // "" | ok | warn | bad
   merge_at: number | null;
+  /** When you pressed Tear down: the stack is down and the row stays, so the work is still listed. Null while it runs. */
+  stopped_at: number | null;
   created_at: number;
 }
 
@@ -120,7 +122,7 @@ export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
     ["stacks", "checks_state", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_detail", "TEXT NOT NULL DEFAULT ''"],
     ["stacks", "checks_sha", "TEXT NOT NULL DEFAULT ''"], ["stacks", "checks_at", "INTEGER"],
     ["stacks", "mergeable", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_note", "TEXT NOT NULL DEFAULT ''"],
-    ["stacks", "merge_level", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_at", "INTEGER"],
+    ["stacks", "merge_level", "TEXT NOT NULL DEFAULT ''"], ["stacks", "merge_at", "INTEGER"], ["stacks", "stopped_at", "INTEGER"],
     ["notices", "kind", "TEXT NOT NULL DEFAULT 'ready'"]]) {
     const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === col);
     if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);

@@ -264,6 +264,7 @@ stateDiagram-v2
   state "degraded" as Degraded
   state "down" as Down
   state "restarting" as Restarting
+  state "stopped" as Stopped
 
   [*] --> Unknown : up runs
   Unknown --> Up : both probes agree
@@ -274,7 +275,9 @@ stateDiagram-v2
   Restarting --> Up : the restart worked
   Restarting --> Down : it did not
   Degraded --> Up : you fix DNS, Caddy or proxy_host
-  Up --> [*] : teardown
+  Up --> Stopped : Tear down (down; row and worktree stay)
+  Stopped --> Restarting : Restart, or a /pr-daemon comment
+  Up --> [*] : PR or issue closed, label removed
 
   classDef rest fill:#1f8a4c,stroke:#1f8a4c,color:#fff
   classDef hold fill:#b26b00,stroke:#b26b00,color:#fff
