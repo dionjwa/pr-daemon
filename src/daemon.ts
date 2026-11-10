@@ -844,11 +844,15 @@ export class Daemon {
       const j = jobs.find(match);
       return j ? { id: j.id, kind: j.kind, state: j.state } : null;
     };
+    // A Tear down or Restart still to finish: the row shows it in place of its buttons.
+    const chore = (repo: string, branch: string) => branch ? lastJob((j) => j.repo === repo && j.branch === branch
+      && ["teardown", "restart"].includes(j.kind) && ["queued", "running"].includes(j.state)) : null;
     const stacks = this.store.stacks();
     const rows: unknown[] = stacks.map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
       // One word for the dot: the page shouldn't have to re-derive it from two status codes.
       state: stack.stackState(s), title: title(s.repo, s.issue, s.pr),
       job: lastJob((j) => j.repo === s.repo && (j.branch === s.branch || [s.issue, s.pr].includes(j.number))),
+      chore: chore(s.repo, s.branch),
       services: Object.entries(stackRoutes(s)).map(([name, upstream]) => ({ name, upstream, url: serviceUrl(this.cfg, s.branch, name) })) }));
     for (const i of items) {
       if (stacks.some((s) => s.repo === i.repo && (s.issue === i.number || s.pr === i.number))) continue;
@@ -857,7 +861,7 @@ export class Daemon {
       // still knows the branch and the PR, and Start brings it back from those.
       const past = jobs.find((j) => j.repo === i.repo && j.number === i.number && ["build", "adopt"].includes(j.kind) && j.branch);
       const branch = past?.branch ?? "", pr = isPr ? i.number : past?.pr ?? null;
-      rows.push({ repo: i.repo, branch, issue: i.number, pr, title: i.title, state: "none",
+      rows.push({ repo: i.repo, branch, issue: i.number, pr, title: i.title, state: "none", chore: chore(i.repo, branch),
         job: lastJob((j) => j.repo === i.repo && ((!!branch && j.branch === branch) || [i.number, pr].includes(j.number))) });
     }
     return rows;

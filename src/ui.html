@@ -405,6 +405,8 @@ const STACK_STATE = {
   stopped: ["", "stopped", "Torn down by you: the worktree is kept, and Restart brings the stack back"],
   none: ["", "no stack", "Labelled, but no stack: its build is queued or failed before the stack came up, or it was torn down before rows were kept (Start brings back a PR's)"],
 };
+// What a row says while its stack chore is [running, queued]. A restart with no stack row is Start.
+const CHORE = { teardown: ["tearing down…", "teardown queued"], restart: ["restarting…", "restart queued"], start: ["starting…", "start queued"] };
 const CHECKS_NOTE = { success: "passing", pending: "running", failure: "failing", none: "no checks", "": "—" };
 // GitHub's view of the PR against its base, and the badge class for it.
 const MERGE_NOTE = { ok: ["s-success", "merges cleanly"], behind: ["s-pending", "behind base"], conflicts: ["s-failure", "conflicts"], unknown: ["", "checking…"] };
@@ -417,7 +419,12 @@ function renderStacks() {
     S.stacks.map((s) => {
       const [cls, word, title] = STACK_STATE[s.state] ?? STACK_STATE.unknown;
       const id = `${s.repo}|${s.branch}`;
-      const live = !["stopped", "none"].includes(s.state);
+      // A Tear down / Restart / Start in flight replaces the dot and the buttons until it finishes.
+      const busy = s.chore && CHORE[s.state === "none" ? "start" : s.chore.kind][s.chore.state === "running" ? 0 : 1];
+      const badge = busy ? `<span class="badge s-pending"><span class="dot"></span>${esc(busy)}</span>`
+        : `<span class="badge s-${esc(s.state)}"><span class="dot ${cls}"></span>${esc(word)}</span>`;
+      const working = busy ? `<a class="small" href="#job-${s.chore.id}">job ${s.chore.id}: ${esc(s.chore.state)}</a>` : "";
+      const live = !busy && !["stopped", "none"].includes(s.state);
       const url = live ? s.public_url || s.url : "";
       const ch = s.checks_state || "";
       // What happened last on it, so a "no stack" row says why.
@@ -426,15 +433,15 @@ function renderStacks() {
           ${s.title ? `<div class="small">${esc(s.title)}</div>` : ""}${last}</td>`;
       // A PR with no stack (torn down before rows were kept) can be started from its branch.
       if (s.state === "none") return `<tr title="${esc(title)}">
-        <td><span class="badge s-none"><span class="dot ${cls}"></span>${esc(word)}</span></td>
+        <td>${badge}</td>
         <td class="small ${s.branch ? "" : "muted"}">${esc(s.branch || "—")}</td>${issueCell}
         <td class="small muted">—</td><td class="hide-sm"></td><td class="hide-sm"></td><td class="hide-sm"></td>
-        <td class="actions">${s.branch && s.pr ? btn(`restart|${id}`, "Start", "", `Makes a worktree at PR #${s.pr}'s head and runs up.`) : ""}</td></tr>`;
+        <td class="actions">${working || (s.branch && s.pr ? btn(`restart|${id}`, "Start", "", `Makes a worktree at PR #${s.pr}'s head and runs up.`) : "")}</td></tr>`;
       const row = `<tr class="row" data-stack="${esc(id)}" title="${esc(title)}">
-        <td><span class="badge s-${esc(s.state)}"><span class="dot ${cls}"></span>${esc(word)}</span></td>
+        <td>${badge}</td>
         <td class="small">${esc(s.branch)}</td>
         ${issueCell}
-        <td class="small">${url ? a(url) : `<span class="muted">${s.state === "stopped" ? `stopped ${ago(s.stopped_at)}` : "not running"}</span>`}${
+        <td class="small">${url ? a(url) : `<span class="muted">${busy ? esc(busy) : s.state === "stopped" ? `stopped ${ago(s.stopped_at)}` : "not running"}</span>`}${
           s.error ? `<div class="stack-error"><pre>${esc(s.error)}</pre></div>` : ""}</td>
         <td class="hide-sm small">${ch
           ? `<span class="badge s-${esc(ch)}">${esc(CHECKS_NOTE[ch] ?? ch)}</span>${
@@ -442,8 +449,8 @@ function renderStacks() {
           : `<span class="muted">${S.checks?.watch ? "—" : "not watched"}</span>`}</td>
         <td class="hide-sm small">${mergeCell(s)}</td>
         <td class="hide-sm small muted">${ago(s.checked_at)}</td>
-        <td class="actions">${btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${
-          s.state === "stopped" ? "" : btn(`teardown|${id}`, "Tear down", "danger", "Runs down to free the machine. The row and worktree stay; Restart brings it back.")}</td></tr>`;
+        <td class="actions">${working || btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${
+          working || s.state === "stopped" ? "" : btn(`teardown|${id}`, "Tear down", "danger", "Runs down to free the machine. The row and worktree stay; Restart brings it back.")}</td></tr>`;
       if (!openStacks.has(id)) return row;
       // Expanded: every address this stack has, and what each one really is.
       // With a preview domain the app is wired for its public origin, so the
