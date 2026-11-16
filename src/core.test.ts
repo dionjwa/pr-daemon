@@ -331,6 +331,7 @@ test("the degraded message names the fix", () => {
   const o = { url: "https://app.localhost:1", pub: "https://4-x.p.example.com", repo: "o/r", local: 200, publicCode: 404 };
   const msg = healthMessage(previewHealth(200, 404), o);
   assert.match(msg, /proxy_host = "upstream" for o\/r/);
+  assert.match(msg, /PR_DAEMON_PUBLIC_HOST.*Restart/);
   assert.match(msg, /4-x\.p\.example\.com/);
   assert.match(healthMessage(previewHealth(200, 0), { ...o, publicCode: 0 }), /\*\.p\.example\.com/);
   assert.equal(healthMessage(previewHealth(200, 200), o), "");

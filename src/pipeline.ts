@@ -43,6 +43,8 @@ export interface Ctx {
   statusUrl: string;
   /** The worktree the agent runs in (set by each job once it has one). */
   current_wt?: string;
+  /** Its branch, when it has a stack: the agent gets the same publicEnv as `up`. */
+  current_branch?: string;
   /**
    * What to tell the person if this job is the last in its chain: set by a
    * job that finished something worth looking at. The daemon sends it only
@@ -94,6 +96,7 @@ async function prWorktree(ctx: Ctx, p: gh.PR): Promise<{ branch: string; wt: str
   const branch = p.head.ref;
   const wt = await git.ensureBranchWorktree(repo, branch);
   ctx.current_wt = wt;
+  ctx.current_branch = branch;
   return { branch, wt, issue: issueForPr(ctx.store, repo, branch, p.number) };
 }
 
@@ -268,6 +271,10 @@ export async function agentStep(ctx: Ctx, o: { prompt: string; log: string; resu
     let stop: Stop | null = null;
     const run = startAgent({
       cwd: ctx.current_wt ?? ".", prompt: promptText, logFile: o.log, resume,
+      // An agent that runs `up` itself (the stack broke mid-build) must start it
+      // as pr-daemon would: without these, the stack serves local-only and its
+      // public preview is refused (Vite's allowedHosts, seen on superslides.io #239).
+      env: ctx.current_branch ? publicEnv(cfg, ctx.current_branch) : undefined,
       model: cfg.agent.model || undefined, maxTurns: cfg.agent.maxTurns, stallMs: cfg.agent.stallMs,
       onActivity: ctx.activity,
       onUsage: (d) => {
@@ -348,6 +355,7 @@ export async function build(ctx: Ctx): Promise<void> {
   await gh.ensureLabels(repo.name, cfg.label);
   const { branch, wt } = await git.ensureWorktree(repo.name, n, base, issue.title);
   ctx.current_wt = wt;
+  ctx.current_branch = branch;
   store.update(job.id, { branch });
   const out = git.outDir(repo.name, branch);
   if (!resuming) rmSync(out, { recursive: true, force: true });
@@ -526,6 +534,7 @@ export async function adopt(ctx: Ctx): Promise<void> {
   await gh.ensureLabels(repo.name, cfg.label);
   const wt = await git.ensureBranchWorktree(repo.name, branch);
   ctx.current_wt = wt;
+  ctx.current_branch = branch;
   store.update(job.id, { branch, pr: n });
   const out = git.outDir(repo.name, branch);
   mkdirSync(out, { recursive: true });

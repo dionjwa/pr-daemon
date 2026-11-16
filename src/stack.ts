@@ -180,7 +180,8 @@ export function healthMessage(h: Health, o: { url: string; pub: string; repo: st
         `Check the preview proxy below, and that *.${host(o.pub, "domain")} points at this machine.`;
     case "preview-rejected":
       return `the stack answers at ${o.url} (${o.local}), but ${o.pub} answers ${o.publicCode}. ` +
-        `The app is given the public Host and doesn't recognise it: set proxy_host = "upstream" for ${o.repo} ` +
-        `in the config to send it its own Host instead, or teach the app to accept ${host(o.pub, "host")}.`;
+        `The app is given the public Host and doesn't recognise it. If its \`up\` reads PR_DAEMON_PUBLIC_HOST, ` +
+        `this server was started without it (by hand, or by an agent): press Restart. Otherwise teach the app to ` +
+        `accept ${host(o.pub, "host")}, or set proxy_host = "upstream" for ${o.repo} in the config to send it its own Host.`;
   }
 }
