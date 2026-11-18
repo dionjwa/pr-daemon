@@ -673,7 +673,7 @@ function notifyNew() {
   if (fired === null) { fired = newest; return; }   // history, not news
   if (browserState() === "on") {
     for (const r of list.filter((r) => r.id > fired).reverse()) {
-      const n = new Notification(r.title, { body: r.body, tag: `pr-daemon:${r.url || r.id}`, renotify: true, requireInteraction: r.level !== "ok" });
+      const n = new Notification(r.title, { body: r.body, tag: `pr-daemon:${r.url.replace(/#(issuecomment|pullrequestreview)-\d+$/, "") || r.id}`, renotify: true, requireInteraction: r.level !== "ok" });
       n.onclick = () => { if (r.url) window.open(r.url, "_blank", "noopener"); markRead(r.id); renderNotices(); n.close(); };
     }
   }

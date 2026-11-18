@@ -74,6 +74,10 @@ export class Daemon {
     this.store.event(`${n.title}: ${n.body}`.slice(0, 500), n.job_id, n.level === "bad" ? "error" : n.level === "warn" ? "warn" : "info");
     // Switched off in notify_on: the event log above is all it gets.
     if (n.kind !== "test" && !this.cfg.notifyOn.includes(n.kind)) return;
+    // A link to an issue/PR goes straight to pr-daemon's newest comment there, as the Issues and PRs links do.
+    const m = n.url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)$/);
+    const last = m && this.store.get(`last-comment:${m[1]}#${m[2]}`);
+    if (last) n = { ...n, url: last };
     this.store.notice(n);
     if (this.cfg.notify) notify(n.title, n.body, n.url);
   }

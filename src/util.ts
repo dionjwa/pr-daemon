@@ -225,7 +225,8 @@ export function notify(title: string, body: string, url = ""): void {
   }
 }
 
-const notifyGroup = (title: string, url: string) => `pr-daemon:${url || title}`;
+// Without a comment/review anchor: a link to one comment is still that PR's group (a status page #job-N stays its own).
+const notifyGroup = (title: string, url: string) => `pr-daemon:${url.replace(/#(issuecomment|pullrequestreview)-\d+$/, "") || title}`;
 
 /**
  * Take notifications off the desktop, best effort: terminal-notifier only
