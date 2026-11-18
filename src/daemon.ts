@@ -60,6 +60,7 @@ export class Daemon {
     this.cfg = parseConfig(this.configOnDisk);
     this.store = new Store(openDb());
     this.proxy = new Proxy(this.store, () => this.cfg);
+    gh.onCommented((repo, n, url) => this.store.set(`last-comment:${repo}#${n}`, url));
   }
 
   get paused(): boolean { return this.store.get("paused") === "1"; }
@@ -895,6 +896,8 @@ export class Daemon {
         worktree: j.branch ? join(git.worktreeRoot(j.repo), j.branch) : "",
       })),
       stacks: this.work(),
+      // "owner/repo#n" → pr-daemon's newest comment there: the page's issue/PR links go to it.
+      lastComments: this.store.kvPrefixed("last-comment:"),
       checks: { watch: this.cfg.checks.watch, fix: this.cfg.checks.fix, maxRounds: this.cfg.checks.maxRounds, every: formatDuration(this.cfg.checks.everyMs) },
       merge: { watch: this.cfg.merge.watch, fix: this.cfg.merge.fix, behind: this.cfg.merge.behind, catchUp: this.cfg.merge.catchUp, maxRounds: this.cfg.merge.maxRounds },
       health: { every: formatDuration(this.cfg.stacks.healthEveryMs), autoRestart: this.cfg.stacks.autoRestart },

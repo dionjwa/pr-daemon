@@ -280,7 +280,12 @@ let target = null;               // a #job-N link (a notice) to scroll to once i
 const openStacks = new Set();    // expanded stack rows ("repo|branch")
 const armed = new Map();         // confirm-twice buttons: key → timeout
 
-function link(repo, n, pr) { return `<a href="https://github.com/${esc(repo)}/${pr ? "pull" : "issues"}/${n}" target="_blank" rel="noopener">${esc(repo.split("/")[1])}#${n}</a>`; }
+// Straight to pr-daemon's newest comment on it, when there is one: long threads otherwise mean scrolling.
+function link(repo, n, pr) {
+  const last = S?.lastComments?.[`${repo}#${n}`];
+  const href = last || `https://github.com/${repo}/${pr ? "pull" : "issues"}/${n}`;
+  return `<a href="${esc(href)}" target="_blank" rel="noopener"${last ? ` title="pr-daemon's latest comment"` : ""}>${esc(repo.split("/")[1])}#${n}</a>`;
+}
 
 function render() {
   if (!S) return;

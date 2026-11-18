@@ -397,8 +397,21 @@ export async function deleteBranch(repo: string, branch: string): Promise<"delet
   throw new Error(`deleting branch ${branch} failed: ${(r.stderr || r.stdout).trim().slice(-400)}`);
 }
 
+/**
+ * Where pr-daemon's newest comment (or review) on each issue/PR is, so the
+ * status page links straight to it instead of the top of a long thread.
+ * The daemon sets the sink (it keeps them in kv); a one-off `run` has none.
+ */
+let commentSink: ((repo: string, n: number, url: string) => void) | null = null;
+export function onCommented(fn: typeof commentSink): void { commentSink = fn; }
+function commented(repo: string, n: number, url: string | undefined): void {
+  if (url && commentSink) try { commentSink(repo, n, url); } catch { /* a link is not worth failing a job over */ }
+}
+
 export async function comment(repo: string, n: number, body: string): Promise<void> {
-  await run("gh", ["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body });
+  const r = await run("gh", ["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body });
+  // gh prints the new comment's URL (…#issuecomment-<id>).
+  if (r.code === 0) commented(repo, n, r.stdout.match(/https:\/\/\S+#issuecomment-\d+/)?.[0]);
 }
 
 /**
@@ -417,7 +430,14 @@ export async function markComment(repo: string, id: number, mark: string): Promi
 /** A COMMENT review (you can't approve or request changes on your own PR). */
 export async function review(repo: string, n: number, bodyFile: string): Promise<void> {
   const r = await run("gh", ["pr", "review", String(n), "-R", repo, "--comment", "--body-file", bodyFile]);
-  if (r.code !== 0) await run("gh", ["pr", "comment", String(n), "-R", repo, "--body-file", bodyFile]);
+  if (r.code !== 0) {
+    const c = await run("gh", ["pr", "comment", String(n), "-R", repo, "--body-file", bodyFile]);
+    if (c.code === 0) commented(repo, n, c.stdout.match(/https:\/\/\S+#issuecomment-\d+/)?.[0]);
+    return;
+  }
+  // `gh pr review` doesn't print where the review went: the newest one is ours.
+  const reviews = await apiAll<{ html_url: string }>(`repos/${repo}/pulls/${n}/reviews?per_page=100`).catch(() => []);
+  commented(repo, n, reviews.at(-1)?.html_url);
 }
 
 export async function ensureLabels(repo: string, label: string): Promise<void> {

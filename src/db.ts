@@ -160,6 +160,12 @@ export class Store {
     this.db.prepare("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
+  /** Every kv row whose key starts with `prefix`, keyed by the rest of the key. */
+  kvPrefixed(prefix: string): Record<string, string> {
+    const rows = this.db.prepare("SELECT key, value FROM kv WHERE substr(key, 1, ?) = ?").all(prefix.length, prefix) as { key: string; value: string }[];
+    return Object.fromEntries(rows.map((r) => [r.key.slice(prefix.length), r.value]));
+  }
+
   // ---------- events ----------
   event(message: string, jobId: number | null = null, level: "info" | "warn" | "error" = "info"): void {
     this.db.prepare("INSERT INTO events(at, job_id, level, message) VALUES(?, ?, ?, ?)").run(Date.now(), jobId, level, message);
