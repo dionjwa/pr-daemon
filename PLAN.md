@@ -39,7 +39,7 @@ stacks, and serves a status and config page on localhost.
 | **pr-daemon decides "done"**, not the agent. | It re-runs the check and resumes the same session with the failure, up to N rounds. |
 | **Your repository's CI is the outer check.** | The local check runs before the PR opens; GitHub's own checks know about other platforms, secrets and matrices. A red PR gets an agent, keyed by the failing commit and capped per PR, so it can't loop. |
 | **The reviewer is a fresh session.** | No build context leaks in. It posts a COMMENT review, since you can't approve your own PR. |
-| **One automatic revise round** after a `VERDICT: changes` review. After that, `/pr-daemon` comments. | Cheap fixes happen without you, with no endless back-and-forth between agents. |
+| **One automatic revise round** after a `VERDICT: changes` review, or one whose follow-ups list items to `### Just do`. After that, `/pr-daemon` comments. | Cheap fixes happen without you, with no endless back-and-forth between agents. Follow-ups that need a decision (`### Needs a decision`) are listed for you, not done. |
 | **Budget = a rolling token window plus a per-issue cap**, in human amounts (`"40M"`). | Matches the 5-hour subscription window. The per-issue cap protects against one runaway issue. |
 | **The config is a TOML file, edited raw** in the web page and validated before it's written. | One source of truth, and your comments survive. |
 | **State is rebuildable.** | GitHub holds the issue/PR truth, the disk holds the worktrees. SQLite holds the queue, the ledger and events, and running jobs resume after a crash. |

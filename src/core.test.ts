@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { asOwner, ghTokenFile, parseAmount, parseDuration, formatAmount, run, sleep } from "./util.ts";
 import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel } from "./config.ts";
-import { buildDiscussion, issueForPr, refsNote, render, restart, workflowsNote, type Ctx } from "./pipeline.ts";
+import { buildDiscussion, issueForPr, refsNote, render, restart, reviewWantsRevise, workflowsNote, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
 import { isListed, isPullRequest, parseCommand, untrustedCommits, untrustedWriters } from "./gh.ts";
@@ -572,4 +572,16 @@ test("GitHub tokens: one file per owner, any case, else gh-token; asOwner carrie
   const seen = await asOwner("metapages/framejs.app", async () => { await sleep(5); return ghTokenFile(undefined, home); });
   assert.equal(seen, join(home, "gh-tokens", "MetaPages"));
   assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"), "and only inside it");
+});
+
+test("a review gets the automatic revise round when it blocks or lists follow-ups to just do", () => {
+  const review = (followUps: string) => `VERDICT: ok\n\n## Review\n\nNothing blocks the merge.\n\n${followUps}\n## Manual test suggestions\n\n- open it\n`;
+  assert.equal(reviewWantsRevise("VERDICT: changes\n\n## Review\n\n- src/a.ts:3 is wrong"), true);
+  assert.equal(reviewWantsRevise(review("")), false);
+  assert.equal(reviewWantsRevise(review("## Follow-ups\n\n### Just do\n\n- `src/a.ts:1` unused import: remove it\n")), true);
+  assert.equal(reviewWantsRevise(review("## Follow-ups\n\n### Just do\n1. fix the typo\n")), true);
+  assert.equal(reviewWantsRevise(review("## Follow-ups\n\n### Needs a decision\n\n- rename the route?\n")), false);
+  assert.equal(reviewWantsRevise(review("## Follow-ups\n\n### Just do\n\nNothing.\n\n### Needs a decision\n\n- rename the route?\n")), false);
+  // the last section of the file
+  assert.equal(reviewWantsRevise("VERDICT: ok\n\n### Just do\n- remove the dead branch"), true);
 });

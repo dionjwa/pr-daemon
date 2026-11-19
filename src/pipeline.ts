@@ -195,6 +195,31 @@ export function workflowsNote(repo: RepoConfig): string {
 }
 
 /**
+ * Whether a review gets the automatic revise round: it blocks the merge, or
+ * it lists follow-ups with an obvious fix (`### Just do`, see
+ * prompts/review.md). Anything that needs a decision stays with the human.
+ */
+export function reviewWantsRevise(review: string): boolean {
+  if (/^VERDICT:\s*changes/im.test(review)) return true;
+  const justDo = /^###\s*Just do\s*$([\s\S]*?)(?=^#{1,3}\s|(?![\s\S]))/im.exec(review)?.[1] ?? "";
+  return /^\s*(?:[-*+]|\d+[.)])\s+\S/m.test(justDo);
+}
+
+/** The revise prompt's `{{FROM_REVIEW}}`: how to work through pr-daemon's own review. */
+const FROM_REVIEW = `
+The feedback is pr-daemon's reviewer. Work through it like this:
+
+- \`## Review\`: fix every finding, unless you can show it's wrong.
+- \`### Just do\`: do every item. These were sorted as having one obvious fix;
+  if one turns out not to (the fix changes behaviour, needs a choice, or is
+  wrong), leave it and say why.
+- \`### Needs a decision\`: don't act on these. A human decides.
+
+In your summary, list every item from those sections exactly once, marked
+✅ done, ↩️ pushed back (why), or 🙋 left for a human (the question to answer).
+`;
+
+/**
  * Push an agent's commits. Its edits to `.github/workflows/` are the risky
  * part — a workflow runs with the repo's secrets — so they land only where the
  * repo allows it (`workflows = true`), flagged "needs your review" on the PR.
@@ -662,8 +687,8 @@ export async function review(ctx: Ctx): Promise<void> {
   const workflows = await git.branchWorkflows(wt, p.base.ref).catch(() => []);
   ctx.notice = { kind: "ready", level: verdict === "changes" || workflows.length ? "warn" : "ok", title: `✅ PR ready: ${repo.name} #${job.number}`,
     body: `${p.title} · review: ${verdict}${workflows.length ? ` · it changes ${workflows.join(", ")}: review that before merging` : ""}`, url: p.html_url };
-  if (cfg.agent.autoRevise && !payload(job).fromReview && /^VERDICT:\s*changes/im.test(reviewText)) {
-    store.event("reviewer asked for changes: one automatic revise round", job.id);
+  if (cfg.agent.autoRevise && !payload(job).fromReview && reviewWantsRevise(reviewText)) {
+    store.event(`reviewer ${verdict === "changes" ? "asked for changes" : "listed follow-ups to just do"}: one automatic revise round`, job.id);
     store.enqueue({ repo: repo.name, kind: "revise", number: job.number, branch, trigger_key: `revise-from-review:job${job.id}`, payload: { feedback: reviewText, fromReview: true } });
   }
 }
@@ -696,7 +721,7 @@ export async function revise(ctx: Ctx): Promise<void> {
   const text = prompt("revise", {
     PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: stackWhere(ctx.cfg(), branch, s),
     FEEDBACK: payload(job).feedback ?? "", DISCUSSION: talk.text || "(none)", UP_CMD: repo.up, CHECK_CMD: repo.check || "(none)",
-    REFERENCES: refsNote(wt), WORKFLOWS: workflowsNote(repo),
+    REFERENCES: refsNote(wt), WORKFLOWS: workflowsNote(repo), FROM_REVIEW: payload(job).fromReview ? FROM_REVIEW : "",
   });
   const summary = await agentStep(ctx, job.session_id
     ? { prompt: "pr-daemon paused you. Continue addressing the feedback from where you left off.", log: agentLog({ ...job, branch })!, resume: job.session_id, fresh: text, issue: n }

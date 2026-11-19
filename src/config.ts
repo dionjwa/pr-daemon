@@ -191,7 +191,7 @@ count_cache_reads = true # cache reads are ~90% of tokens; false counts only new
 # model = ""             # Claude model; unset = claude's default
 max_turns = 200          # per agent run
 max_attempts = 3         # build → check → fix rounds before giving up
-auto_revise = true       # let the builder answer the reviewer once, automatically
+auto_revise = true       # let the builder answer the reviewer once, automatically (blockers + obvious follow-ups)
 stall = "30m"            # no agent output for this long = stalled (kill, retry once)
 
 [stacks]

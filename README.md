@@ -515,7 +515,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | `concurrency` | `1` | Agent runs at the same time |
 | `poll` | `60s` | How often to check GitHub |
 | `agent.max_attempts` | `3` | Build → check → fix rounds before giving up |
-| `agent.auto_revise` | `true` | The builder answers the reviewer once, automatically |
+| `agent.auto_revise` | `true` | The builder answers the reviewer once, automatically: the blocking findings and the follow-ups with an obvious fix. Follow-ups that need a decision are left for you |
 | `stacks.auto_restart` | `true` | Restart preview stacks that stop answering |
 | `checks.watch` | `true` | Read each open PR's checks (your own CI) and show them |
 | `checks.fix` | `true` | Put an agent on a failing check |

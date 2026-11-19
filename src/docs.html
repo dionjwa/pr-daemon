@@ -169,6 +169,7 @@ stateDiagram-v2
   state "handed to you" as Yours
 
   [*] --> Idle : the PR is open, previewed and reviewed
+  [*] --> Revising : the review blocks, or lists follow-ups to just do (once)
 
   Idle --> Revising : a /pr-daemon comment
   Revising --> Idle : pushed

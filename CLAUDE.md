@@ -19,7 +19,12 @@ get its stack and a review. One long-running process on the owner's machine
    failures, up to N rounds
 5. pushes and opens a PR with a description, screenshots and a preview link
 6. runs a **fresh** Claude session to review the PR (it sees only the PR), with
-   one automatic revise round if the verdict is `changes`
+   one automatic revise round if the verdict is `changes` **or** its
+   follow-ups list anything under `### Just do` (`reviewWantsRevise()`). The
+   reviewer sorts non-blocking follow-ups into `### Just do` (one obvious fix)
+   and `### Needs a decision` (left for a human); the revise prompt's
+   `{{FROM_REVIEW}}` tells the builder to do the first, leave the second, and
+   mark every item ✅ / ↩️ / 🙋 in its PR comment
 7. watches **the repo's own CI** on the PR (check runs and commit statuses) and,
    when it goes red, runs an agent to fix it: once per failing head commit, up
    to `checks.max_rounds` per PR

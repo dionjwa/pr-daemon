@@ -27,8 +27,25 @@ Write the review to `{{OUT}}/review.md` as GitHub markdown:
 
 - First line exactly `VERDICT: ok` or `VERDICT: changes`. Use `changes` only for
   problems a reviewer would block a merge on, not for style nits.
-- Then `## Review` with findings, most serious first, each with `path:line`,
-  what is wrong, and a concrete fix. Say so plainly if you found nothing.
+- Then `## Review` with the blocking findings, most serious first, each with
+  `path:line`, what is wrong, and a concrete fix. Say so plainly if there are
+  none.
+- Then `## Follow-ups` for everything that doesn't block the merge, in two
+  lists. The builder does the first list automatically, so sort with care:
+  - `### Just do` — items with one obvious right fix that nobody would argue
+    about: an unused or wrong import, a typo, dead code this PR added, a
+    missing test for code this PR wrote, a missing null/error check, a
+    deprecated call with a drop-in replacement, a comment or doc line that no
+    longer matches the code, an inconsistency with how the rest of the
+    project does the same thing. One bullet each: `path:line`, the problem,
+    the exact fix.
+  - `### Needs a decision` — anything where reasonable people would choose
+    differently: behaviour or UI users would notice, scope beyond the issue,
+    a new dependency, a public API, schema, config or data-format change, a
+    refactor, a performance trade-off. One bullet each: the question and the
+    options you see.
+  Leave a list out when it has nothing in it. When in doubt, it needs a
+  decision.
 - Then `## Manual test suggestions` for the human doing the final check.
 
 Do not post anything yourself. Finish by printing the verdict.
