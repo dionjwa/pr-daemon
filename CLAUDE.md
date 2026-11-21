@@ -226,6 +226,9 @@ A human always merges.
 - **A restart is `down` then `up`, for every project.** Not a per-project
   command: that was tried and dropped as too complicated for each stack to
   implement. `up` alone won't do, because it leaves a running stack as it was.
+  On an open PR, `restart()` first runs `trustCode()` and `git.pullBranch()`
+  (ff-only), so a push made outside pr-daemon is what comes up; a branch
+  that can't fast-forward fails the restart before `down`.
   `down` gets `PR_DAEMON_KEEP_DATA=1` on a restart and on nothing else, an
   environment variable because `down` is an arbitrary command line and a flag
   would break the ones that don't expect it. Deleting stays the default: a

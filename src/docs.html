@@ -254,7 +254,9 @@ stateDiagram-v2
     <p>Two probes, because they answer different questions: the stack's own address says whether the app is
       running, and the public preview URL says whether a person can use it. Only the first is something a restart
       can fix. A restart is <code>down</code> then <code>up</code>, with <code>PR_DAEMON_KEEP_DATA=1</code> set for
-      <code>down</code>: the stack's data survives if the project honours it, and goes if it doesn't.</p>
+      <code>down</code>: the stack's data survives if the project honours it, and goes if it doesn't. On an open PR it
+      first fast-forwards the worktree to the branch on GitHub (after the same trust check as any job on a PR), so a
+      push made outside pr-daemon is what comes up; if it can't fast-forward, the restart fails and nothing stops.</p>
     <figure>
 <pre class="mermaid">
 stateDiagram-v2

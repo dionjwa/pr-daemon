@@ -1214,6 +1214,15 @@ export async function restart(ctx: Ctx): Promise<void> {
       error: `the worktree is gone (${s.worktree}); tear this down`, checked_at: Date.now() });
     throw new FailError(`the worktree ${s.worktree} no longer exists`);
   }
+  // Restart runs what's on GitHub, so a push made outside pr-daemon is picked
+  // up. It's code from outside, so the same trust check as any job on a PR.
+  if (s.pr && (await gh.pr(repo.name, s.pr)).state === "open") {
+    await trustCode(ctx, s.pr);
+    const p = await git.pullBranch(s.worktree, s.branch).catch((e: Error) => {
+      throw new Error(`couldn't fast-forward ${s.branch} to GitHub (local commits GitHub doesn't have?): ${lastLine(e.message)}`);
+    });
+    store.event(p.from === p.to ? `${s.branch} is at GitHub's head (${p.to})` : `pulled ${s.branch}: ${p.from} → ${p.to}`, job.id);
+  }
   // `down` then `up`, for every project: `up` alone leaves a stack that still
   // answers as it was, so a changed secret would never be read. A failed `down`
   // doesn't stop it, as in teardown: `up` is what decides whether this worked.

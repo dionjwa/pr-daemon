@@ -114,6 +114,17 @@ export async function ensureBranchWorktree(repo: string, branch: string): Promis
 }
 
 /**
+ * Fast-forward a worktree to its branch on GitHub and return the old and new
+ * head. Throws when it can't (commits here that GitHub doesn't have), so a
+ * caller never runs old code thinking it's the latest.
+ */
+export async function pullBranch(wt: string, branch: string): Promise<{ from: string; to: string }> {
+  const from = await git(wt, "rev-parse", "--short", "HEAD");
+  await git(wt, "pull", "-q", "--ff-only", "origin", branch);
+  return { from, to: await git(wt, "rev-parse", "--short", "HEAD") };
+}
+
+/**
  * A detached checkout of the base for an agent that only talks about an
  * issue: no branch, so nothing it does can be pushed, and `removeDetached()`
  * deletes it after every run. The path is fixed (`<worktrees>/<dir>`) because
