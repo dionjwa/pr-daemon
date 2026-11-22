@@ -585,3 +585,23 @@ test("a review gets the automatic revise round when it blocks or lists follow-up
   // the last section of the file
   assert.equal(reviewWantsRevise("VERDICT: ok\n\n### Just do\n- remove the dead branch"), true);
 });
+
+test("portClashes: two running stacks on one port are flagged, stopped ones and 443 are not", () => {
+  const nhost = (p: number) => JSON.stringify({ auth: `https://local.auth.local.nhost.run:${p}`, graphql: `https://local.graphql.local.nhost.run:${p}` });
+  const r = "metapages/superslides.io";
+  const m = stack.portClashes([
+    { repo: r, branch: "260-a", url: "http://localhost:13791", routes: nhost(11791) },
+    { repo: r, branch: "266-b", url: "http://127.0.0.1:13791", routes: nhost(11791) },
+    { repo: r, branch: "300-c", url: "http://localhost:13000", routes: nhost(11000) },
+    { repo: r, branch: "301-d", url: "http://localhost:13000", routes: null, stopped_at: 1 },
+    { repo: "o/x", branch: "1-e", url: "https://x.example", routes: null },
+    { repo: "o/x", branch: "2-f", url: "https://y.example", routes: null },
+  ]);
+  assert.deepEqual(m.get(`${r}|266-b`), [{ branch: "260-a", ports: [13791, 11791] }]);
+  assert.deepEqual(m.get(`${r}|260-a`), [{ branch: "266-b", ports: [13791, 11791] }]);
+  assert.equal(m.size, 2);
+  const msg = stack.clashMessage("266-b", m.get(`${r}|266-b`)!);
+  assert.match(msg, /same ports \(13791, 11791\) as 260-a/);
+  assert.match(msg, /Tear down on 260-a/);
+  assert.match(msg, /lsof -nP -iTCP:13791 -sTCP:LISTEN/);
+});

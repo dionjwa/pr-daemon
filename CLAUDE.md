@@ -382,6 +382,12 @@ just contract                 # print examples/justfile, the two recipes a proje
   count as up, so an app whose `/` is a 404 isn't reported as broken and a
   proxy faithfully relaying that 404 isn't either. Only `up` counts as "ready",
   so the notification doesn't fire for a preview nobody can open.
+- **Two stacks can share a port.** superslides.io derives ports from a hash
+  of the branch name, and 260 and 266 got the same slot: 266's `up` printed
+  13791, which 260's vite already held, so 266's preview went to 260's server
+  ("host not allowed"). `stack.portClashes()` compares the ports of every
+  running stack's URL and routes, and the row shows **⚠ port clash** with
+  `clashMessage()` (what to tear down, and how to see who holds the port).
 - **A public 404 with a healthy stack is almost always the Host.** Caddy sends
   the public host upstream unless `proxy_host = "upstream"`, and a local gateway
   that routes on Host (nhost, Traefik, a Vite dev server with `allowedHosts`)

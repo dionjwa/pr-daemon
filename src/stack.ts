@@ -133,6 +133,56 @@ export function stackState(s: { healthy: number; public_ok: number; stopped_at?:
   return s.stopped_at ? "stopped" : s.healthy === -1 ? "unknown" : s.healthy === 0 ? "down" : s.public_ok === 0 ? "degraded" : "up";
 }
 
+/** Another running stack that uses one of this stack's ports. */
+export interface Clash { branch: string; ports: number[] }
+
+/**
+ * Running stacks (not stopped) whose addresses share a port. Ports are
+ * machine-wide, and a project that derives them from a hash of the branch
+ * name can give two branches the same one: the second `up` then reports
+ * the first branch's server as its own, and Caddy sends both previews to it
+ * (seen: superslides.io 260 and 266, both on 13791). Compared by port alone,
+ * because `localhost`, `127.0.0.1` and `local.auth.local.nhost.run` are all
+ * this machine. Keyed by `repo|branch`. Pure: unit-tested.
+ */
+export function portClashes(stacks: { repo: string; branch: string; url: string; routes: string | null; stopped_at?: number | null }[]): Map<string, Clash[]> {
+  const port = (u: string): number => {
+    try { const x = new URL(u); return Number(x.port) || (x.protocol === "https:" ? 443 : 80); } catch { return 0; }
+  };
+  const ports = (s: (typeof stacks)[number]): Set<number> => {
+    let routes: Record<string, string> = {};
+    try { routes = s.routes ? JSON.parse(s.routes) : {}; } catch { /* no routes */ }
+    return new Set([s.url, ...Object.values(routes)].filter(Boolean).map(port).filter((p) => p && p !== 80 && p !== 443));
+  };
+  const live = stacks.filter((s) => !s.stopped_at).map((s) => ({ s, ports: ports(s) }));
+  const out = new Map<string, Clash[]>();
+  for (const a of live) {
+    const clashes = live.filter((b) => b !== a).map((b) => ({ branch: b.s.branch, ports: [...a.ports].filter((p) => b.ports.has(p)) }))
+      .filter((c) => c.ports.length);
+    if (clashes.length) out.set(`${a.s.repo}|${a.s.branch}`, clashes);
+  }
+  return out;
+}
+
+/**
+ * What the row says about a clash, and what to do. Only one server can hold
+ * a port, so one of the previews shows the other branch's app (or a "host
+ * not allowed" error from it). Pure: unit-tested.
+ */
+export function clashMessage(branch: string, clashes: Clash[]): string {
+  const ports = [...new Set(clashes.flatMap((c) => c.ports))];
+  const other = clashes.map((c) => c.branch);
+  return `${branch} uses the same port${ports.length === 1 ? "" : "s"} (${ports.join(", ")}) as ${other.join(", ")}. ` +
+    `Only one server can listen on a port, so one of these previews shows the other branch's app, or the other ` +
+    `branch's "host not allowed" error. This is the project's \`up\`: it gave both branches the same ports.\n\n` +
+    `To fix it now: press Tear down on ${other.join(" and ")} (or on this row), then Restart on the one you keep. ` +
+    `To see which branch holds a port:\n\n` +
+    ports.map((p) => `lsof -nP -iTCP:${p} -sTCP:LISTEN -Fp | sed -n 's/^p//p' | xargs -I{} lsof -a -p {} -d cwd -Fn | sed -n 's/^n//p'`).join("\n") +
+    `\n\nTo fix it for good, in the project: \`up\` should pick a port no other process holds, and fail when its ` +
+    `own server can't start, not print a URL that another branch's server answers. ` +
+    `If you do nothing, both rows stay as they are and one preview stays wrong.`;
+}
+
 export interface Health {
   state: HealthState;
   /** Which fact made it that: used to write the message, and to decide whether a restart could help. */

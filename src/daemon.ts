@@ -853,7 +853,12 @@ export class Daemon {
     const chore = (repo: string, branch: string) => branch ? lastJob((j) => j.repo === repo && j.branch === branch
       && ["teardown", "restart"].includes(j.kind) && ["queued", "running"].includes(j.state)) : null;
     const stacks = this.store.stacks();
-    const rows: unknown[] = stacks.map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch),
+    const clashes = stack.portClashes(stacks);
+    const clash = (s: Stack) => {
+      const c = clashes.get(`${s.repo}|${s.branch}`);
+      return c ? { with: c, message: stack.clashMessage(s.branch, c) } : null;
+    };
+    const rows: unknown[] = stacks.map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch), clash: clash(s),
       // One word for the dot: the page shouldn't have to re-derive it from two status codes.
       state: stack.stackState(s), title: title(s.repo, s.issue, s.pr),
       job: lastJob((j) => j.repo === s.repo && (j.branch === s.branch || [s.issue, s.pr].includes(j.number))),
