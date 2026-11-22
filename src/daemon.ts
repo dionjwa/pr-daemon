@@ -407,6 +407,7 @@ export class Daemon {
       // Torn down by hand: parked until Restart (or a /pr-daemon comment brings
       // it up). Nothing automatic acts on it, since that would bring it back.
       if (s.stopped_at) continue;
+      await this.pollPull(repo, s, pr);
       await this.pollMerge(repo, s, pr);
       await this.pollChecks(repo, s, pr);
       await this.pollHealth(repo, s);
@@ -422,6 +423,20 @@ export class Daemon {
       const gone = store.clearNotices(repo, [n]);
       if (gone.length) { unnotify(gone); store.event(`cleared ${gone.length} notice(s) about ${repo}#${n}: it closed`); }
     }
+  }
+
+  /**
+   * A push to the PR that this worktree doesn't have (made on another
+   * machine, say): queue a `pull`, so the running stack reloads it. One per
+   * GitHub head sha, so a pull that can't fast-forward isn't retried.
+   */
+  private async pollPull(repo: string, s: Stack, pr: gh.PR | null): Promise<void> {
+    if (!pr || pr.state !== "open" || !existsSync(s.worktree)) return;
+    const local = await git.head(s.worktree).catch(() => "");
+    if (!local || local === pr.head.sha) return;
+    const id = this.store.enqueue({ repo, kind: "pull", number: s.issue, branch: s.branch, pr: s.pr,
+      trigger_key: `pull:${repo}:${s.branch}:${pr.head.sha}` });
+    if (id) this.store.event(`${s.branch} is at ${pr.head.sha.slice(0, 7)} on GitHub, ${local.slice(0, 7)} here; queued pull`, id);
   }
 
   /**
@@ -840,6 +855,19 @@ export class Daemon {
    * (a build still queued, or one that failed before `up`). One list, so
    * tearing a stack down to free the machine never loses track of the work.
    */
+  /** worktree → [read at, sha]: the page asks every few seconds, git needn't. */
+  private revs = new Map<string, [number, string]>();
+
+  /** The commit a stack's worktree is on, for the row. Empty when it can't be read. */
+  private rev(wt: string): string {
+    const hit = this.revs.get(wt);
+    if (hit && Date.now() - hit[0] < 5000) return hit[1];
+    let sha = "";
+    try { sha = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { /* worktree gone */ }
+    this.revs.set(wt, [Date.now(), sha]);
+    return sha;
+  }
+
   private work(): unknown[] {
     const repos = new Set(this.cfg.repos.map((r) => r.name));
     const items = [...this.labeled].filter(([repo]) => repos.has(repo)).flatMap(([repo, xs]) => xs.map((i) => ({ repo, ...i })));
@@ -859,6 +887,7 @@ export class Daemon {
       return c ? { with: c, message: stack.clashMessage(s.branch, c) } : null;
     };
     const rows: unknown[] = stacks.map((s) => ({ ...s, public_url: publicUrl(this.cfg, s.branch), clash: clash(s),
+      rev: existsSync(s.worktree) ? this.rev(s.worktree) : "",
       // One word for the dot: the page shouldn't have to re-derive it from two status codes.
       state: stack.stackState(s), title: title(s.repo, s.issue, s.pr),
       job: lastJob((j) => j.repo === s.repo && (j.branch === s.branch || [s.issue, s.pr].includes(j.number))),

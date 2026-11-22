@@ -1254,4 +1254,25 @@ async function start(ctx: Ctx, pr: number): Promise<void> {
   if (!r.ok) throw new Error(`start failed: ${lastLine(r.error)} (the stack row has the full output)`);
 }
 
-export const JOBS = { build, adopt, review, revise, discuss, ci, merge, teardown, restart } as const;
+/**
+ * Bring a running stack's worktree up to its PR's head on GitHub, after a
+ * push made somewhere else (the owner's other machine, a teammate, GitHub's
+ * Update branch). No `down`/`up`: the project's dev servers reload changed
+ * files themselves, which is the point. Code from outside, so the same trust
+ * check as any job on a PR, and fast-forward only, so nothing here is lost.
+ */
+export async function pull(ctx: Ctx): Promise<void> {
+  const { store, job, repo } = ctx;
+  const s = store.stack(repo.name, job.branch);
+  if (!s || s.stopped_at || !s.pr || !existsSync(s.worktree)) return;
+  if ((await gh.pr(repo.name, s.pr)).state !== "open") return;
+  await trustCode(ctx, s.pr);
+  const p = await git.pullBranch(s.worktree, s.branch).catch((e: Error) => {
+    throw new FailError(`couldn't fast-forward ${s.branch} to GitHub's head: ${lastLine(e.message)}. ` +
+      `The worktree has commits or changes GitHub doesn't. To see them: ` +
+      `git -C '${s.worktree}' status && git -C '${s.worktree}' log --oneline origin/${s.branch}..HEAD`);
+  });
+  store.event(p.from === p.to ? `${s.branch} is already at GitHub's head (${p.to})` : `pulled ${s.branch}: ${p.from} → ${p.to}`, job.id);
+}
+
+export const JOBS = { build, adopt, review, revise, discuss, ci, merge, teardown, restart, pull } as const;

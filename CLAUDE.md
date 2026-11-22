@@ -229,6 +229,11 @@ A human always merges.
   On an open PR, `restart()` first runs `trustCode()` and `git.pullBranch()`
   (ff-only), so a push made outside pr-daemon is what comes up; a branch
   that can't fast-forward fails the restart before `down`.
+  Between restarts, `pollPull()` compares each running stack's worktree HEAD
+  with its PR's head on GitHub and queues a `pull` job (one per GitHub sha):
+  `trustCode()` plus `git.pullBranch()`, no `down`/`up`, so the project's dev
+  servers hot-reload a push made on another machine. The row shows the first
+  5 characters of the worktree's commit.
   `down` gets `PR_DAEMON_KEEP_DATA=1` on a restart and on nothing else, an
   environment variable because `down` is an arbitrary command line and a flag
   would break the ones that don't expect it. Deleting stays the default: a
@@ -266,7 +271,7 @@ A human always merges.
 |---|---|
 | `cli.ts` | Commands: `serve`, `status`, `stop`, `doctor`, `setup`, `ref <owner/repo>`, `run <kind> <repo> <n>`, `install-service` / `uninstall-service` (launchd plist / systemd user unit) |
 | `daemon.ts` | The process: GitHub poll loop, scheduler (priority, concurrency, per-branch locks, budget gate), job launch and error→state mapping, page actions, `status()` JSON |
-| `pipeline.ts` | The jobs (`JOBS`): `build`, `adopt`, `review`, `revise`, `discuss`, `ci`, `merge`, `teardown`, `restart`. `bringUp()` is the one place that runs `up` and writes the stack row. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
+| `pipeline.ts` | The jobs (`JOBS`): `build`, `adopt`, `review`, `revise`, `discuss`, `ci`, `merge`, `teardown`, `restart`, `pull`. `bringUp()` is the one place that runs `up` and writes the stack row. `agentStep()` runs Claude under the budget. Prompt templates are rendered from `prompts/*.md` with a single-pass `{{VAR}}` |
 | `agent.ts` | Spawns `claude -p --output-format stream-json --verbose`, with `--session-id` for new sessions and `--resume` to continue. Live usage deltas, tool-activity lines, stall timer, kill switch, rate-limit detection |
 | `transcript.ts` | Parses an agent's `*.jsonl` log into what it said, each tool call and its result, for `GET /api/jobs/<id>/transcript?from=N` (the page polls for new entries). `agentLog(job)` in `pipeline.ts` is the one place that knows each job's log path |
 | `merge.ts` | The pure merge decisions: `assessConflicts()` (agent or human), `hasConflictMarkers()`, `parseMergeReport()` (the agent's `CONFIDENCE` / `NEEDS_HUMAN` trailer), `reviewReasons()` (what makes a pushed merge "needs your review"). The git side (`startMerge`, `conflicts`, `abortMerge`, `commitMerge`) is in `git.ts` |

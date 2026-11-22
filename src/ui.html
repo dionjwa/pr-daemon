@@ -73,6 +73,7 @@
   /* The whole of a failed `up`, which can be thousands of lines. column-reverse
      keeps it scrolled to the END (where the failure is), even across re-renders. */
   .stack-error { margin-top: 4px; max-width: 520px; max-height: 220px; overflow: auto; display: flex; flex-direction: column-reverse; background: var(--bg); border-radius: 6px; }
+  .rev { font: 11px var(--mono); color: var(--ink-3); margin-left: 6px; }
   .clash { color: var(--warn); font-weight: 600; margin-left: 4px; cursor: help; }
   .stack-error.clash-note pre { color: var(--warn); }
   .stack-error pre { margin: 0; padding: 6px 8px; font: 11px/1.45 var(--mono); color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
@@ -342,7 +343,7 @@ name = "your-org/website"</pre>`);
       const isPr = ["adopt", "review", "revise", "ci", "merge"].includes(j.kind);
       // Stack chores are not agent runs: name them so a queued "restart" row
       // doesn't read as a second build.
-      const kindLabel = { restart: "restart stack", teardown: "tear down stack", ci: "fix failing checks", merge: "merge base in",
+      const kindLabel = { restart: "restart stack", teardown: "tear down stack", pull: "pull from GitHub", ci: "fix failing checks", merge: "merge base in",
         adopt: "adopt PR: stack, check, review" }[j.kind] ?? j.kind;
       const when = j.state === "running" ? `for ${dur(Date.now() - j.started_at)}` : j.finished_at ? ago(j.finished_at) : ago(j.created_at);
       const btns = [
@@ -448,7 +449,7 @@ function renderStacks() {
         <td class="actions">${working || (s.branch && s.pr ? btn(`restart|${id}`, "Start", "", `Makes a worktree at PR #${s.pr}'s head and runs up.`) : "")}</td></tr>`;
       const row = `<tr class="row" data-stack="${esc(id)}" title="${esc(title)}">
         <td>${badge}${clash}</td>
-        <td class="small">${esc(s.branch)}</td>
+        <td class="small">${esc(s.branch)}${s.rev ? `<span class="rev" title="the commit this stack's worktree is on: ${esc(s.rev)}">${esc(s.rev.slice(0, 5))}</span>` : ""}</td>
         ${issueCell}
         <td class="small">${url ? a(url) : `<span class="muted">${busy ? esc(busy) : s.state === "stopped" ? `stopped ${ago(s.stopped_at)}` : "not running"}</span>`}${
           s.clash ? `<div class="stack-error clash-note"><pre>${esc(s.clash.message)}</pre></div>` : ""}${
