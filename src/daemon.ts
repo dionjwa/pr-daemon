@@ -812,15 +812,17 @@ export class Daemon {
   }
   teardownStack(repo: string, branch: string): void { this.stackAction("teardown", repo, branch); }
   restartStack(repo: string, branch: string): void { this.stackAction("restart", repo, branch); }
+  /** Pull the PR's head from GitHub now, instead of waiting for the poll to notice it. */
+  pullStack(repo: string, branch: string): void { this.stackAction("pull", repo, branch); }
 
   /**
    * Queue one stack chore. Pressing the button again while the first is still
    * queued (behind a build, say) used to pile up identical jobs, which read
    * like something had gone wrong.
    */
-  private stackAction(kind: "teardown" | "restart", repo: string, branch: string): void {
+  private stackAction(kind: "teardown" | "restart" | "pull", repo: string, branch: string): void {
     const s = this.store.stack(repo, branch);
-    if (s && kind === "teardown" && s.stopped_at) return;
+    if (s && kind !== "restart" && s.stopped_at) return;
     // No row (torn down before rows were kept): Start, from the PR a job on this branch recorded.
     const pr = s ? null : this.store.jobs(1000).find((j) => j.repo === repo && j.branch === branch && j.pr)?.pr ?? null;
     if (!s && (kind !== "restart" || !pr)) return;
@@ -879,7 +881,7 @@ export class Daemon {
     };
     // A Tear down or Restart still to finish: the row shows it in place of its buttons.
     const chore = (repo: string, branch: string) => branch ? lastJob((j) => j.repo === repo && j.branch === branch
-      && ["teardown", "restart"].includes(j.kind) && ["queued", "running"].includes(j.state)) : null;
+      && ["teardown", "restart", "pull"].includes(j.kind) && ["queued", "running"].includes(j.state)) : null;
     const stacks = this.store.stacks();
     const clashes = stack.portClashes(stacks);
     const clash = (s: Stack) => {

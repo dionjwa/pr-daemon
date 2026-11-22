@@ -414,7 +414,7 @@ const STACK_STATE = {
   none: ["", "no stack", "Labelled, but no stack: its build is queued or failed before the stack came up, or it was torn down before rows were kept (Start brings back a PR's)"],
 };
 // What a row says while its stack chore is [running, queued]. A restart with no stack row is Start.
-const CHORE = { teardown: ["tearing down…", "teardown queued"], restart: ["restarting…", "restart queued"], start: ["starting…", "start queued"] };
+const CHORE = { teardown: ["tearing down…", "teardown queued"], restart: ["restarting…", "restart queued"], pull: ["pulling…", "pull queued"], start: ["starting…", "start queued"] };
 const CHECKS_NOTE = { success: "passing", pending: "running", failure: "failing", none: "no checks", "": "—" };
 // GitHub's view of the PR against its base, and the badge class for it.
 const MERGE_NOTE = { ok: ["s-success", "merges cleanly"], behind: ["s-pending", "behind base"], conflicts: ["s-failure", "conflicts"], unknown: ["", "checking…"] };
@@ -460,7 +460,7 @@ function renderStacks() {
           : `<span class="muted">${S.checks?.watch ? "—" : "not watched"}</span>`}</td>
         <td class="hide-sm small">${mergeCell(s)}</td>
         <td class="hide-sm small muted">${ago(s.checked_at)}</td>
-        <td class="actions">${working || btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${
+        <td class="actions">${working || !s.pr || s.state === "stopped" ? "" : btn(`pull|${id}`, "Pull", "", `Fast-forwards the worktree to PR #${s.pr}'s head on GitHub, now. No down/up: the dev servers reload the changes.`)}${working || btn(`restart|${id}`, "Restart", "", "Runs down, then up. Deletes this stack's data unless the project's down keeps it (PR_DAEMON_KEEP_DATA).")}${
           working || s.state === "stopped" ? "" : btn(`teardown|${id}`, "Tear down", "danger", "Runs down to free the machine. The row and worktree stay; Restart brings it back.")}</td></tr>`;
       if (!openStacks.has(id)) return row;
       // Expanded: every address this stack has, and what each one really is.

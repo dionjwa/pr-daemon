@@ -67,10 +67,12 @@ export function serve(d: Daemon): void {
       const job = /^\/api\/jobs\/(\d+)\/(cancel|resume|retry)$/.exec(url.pathname);
       if (m === "POST" && job) { d[job[2] as "cancel" | "resume" | "retry"](Number(job[1])); return send(res, 200, { ok: true }); }
 
-      const st = /^\/api\/stacks\/(teardown|restart)$/.exec(url.pathname);
+      const st = /^\/api\/stacks\/(teardown|restart|pull)$/.exec(url.pathname);
       if (m === "POST" && st) {
         const { repo, branch } = await body(req);
-        if (st[1] === "teardown") d.teardownStack(String(repo), String(branch)); else d.restartStack(String(repo), String(branch));
+        if (st[1] === "teardown") d.teardownStack(String(repo), String(branch));
+        else if (st[1] === "pull") d.pullStack(String(repo), String(branch));
+        else d.restartStack(String(repo), String(branch));
         return send(res, 200, { ok: true });
       }
       send(res, 404, { error: "not found" });
