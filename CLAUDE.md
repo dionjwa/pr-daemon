@@ -115,7 +115,11 @@ A human always merges.
   author of `/pr-daemon` comments must be in `allowed_users` (default: the gh user).
   So must everyone who **wrote** the issue: author, body editors and title
   renamers (`gh.provenance()`, GraphQL), checked at label time and again at
-  every build start. Revise prompts only get PR comments from trusted authors
+  every build start. `github-actions[bot]` (every workflow's `GITHUB_TOKEN`)
+  is allowed **per repo** (`[[repos]] actions = true`) and only while the repo
+  is private (`gh.repoBots()`, `gh.isPrivate()`); `parseConfig()` refuses it in
+  `allowed_users`. GraphQL spells bots without `[bot]`, so `provenance()`
+  normalizes with `gh.graphqlLogin()`. Revise prompts only get PR comments from trusted authors
   (`gh.trustedDiscussion()`: allowed users plus the gh user). Agents are
   told not to fetch comments themselves; don't reintroduce `--comments`.
   A PR's **code** is agent input too: every commit's author and committer

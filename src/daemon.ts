@@ -37,6 +37,8 @@ export class Daemon {
   nextPollAt = 0;
   /** Each repo's open issues and PRs carrying the label, as of its last poll: the work with no stack yet. */
   labeled = new Map<string, gh.Issue[]>();
+  /** Repos that set `actions = true` but are public, so the setting is ignored (warned once). */
+  actionsPublic = new Set<string>();
   /** The GitHub login gh is authenticated as: everything pr-daemon does on GitHub is done as this user. */
   ghUser = "";
   private pollTimer: NodeJS.Timeout | null = null;
@@ -294,9 +296,15 @@ export class Daemon {
     }
   }
 
-  private async allowed(): Promise<string[]> {
+  private async allowed(repo: string): Promise<string[]> {
     this.ghUser ||= await gh.viewer();
-    return gh.allowedUsers(this.cfg.allowedUsers);
+    const rc = this.cfg.repos.find((r) => r.name === repo);
+    // `actions = true` in a public repo is a mistake to point out once, not to act on.
+    if (rc?.actions && !(await gh.isPrivate(repo))) {
+      if (!this.actionsPublic.has(repo)) this.store.event(`${repo} sets actions = true, but it isn't private, so ${gh.ACTIONS_BOT} can't direct pr-daemon there`, null, "warn");
+      this.actionsPublic.add(repo);
+    } else this.actionsPublic.delete(repo);
+    return gh.allowedUsers(this.cfg.allowedUsers, rc);
   }
 
   /** Who may trigger work: allowed_users, or else only the gh user (empty until that's known). */
@@ -306,7 +314,7 @@ export class Daemon {
 
   private async pollRepo(repo: string): Promise<void> {
     const { store, cfg } = this;
-    const allowed = await this.allowed();
+    const allowed = await this.allowed(repo);
 
     // 1. The label on an issue → build it. The label on a PR → adopt it
     //    (start its stack, then review it). Keyed by the label event, so
@@ -331,7 +339,7 @@ export class Daemon {
       // Who added the label isn't enough: the text is what the agent is given
       // — an issue's is its instructions, a PR's is what it reviews — so
       // whoever wrote it (or edited it since) must be trusted too.
-      const strangers = gh.untrustedWriters(await gh.provenance(repo, n), await gh.trustedAuthors(cfg.allowedUsers));
+      const strangers = gh.untrustedWriters(await gh.provenance(repo, n), await gh.trustedAuthors(cfg.allowedUsers, cfg.repos.find((r) => r.name === repo)));
       if (strangers.length) {
         const why = gh.untrustedText(strangers);
         if (store.enqueue({ repo, kind, number: n, trigger_key: key, state: "ignored", reason: why })) {
@@ -918,7 +926,8 @@ export class Daemon {
       repos: this.cfg.repos.map((r) => r.name),
       label: this.cfg.label,
       github: { actingAs: this.ghUser, allowedUsers: this.allowedNow(), allowedFromConfig: this.cfg.allowedUsers.length > 0,
-        logins: Object.fromEntries(this.cfg.repos.map((r) => [r.name, loginName(ghAuth(r.name.split("/")[0]))])), workflows: this.cfg.repos.filter((r) => r.workflows).map((r) => r.name) },
+        logins: Object.fromEntries(this.cfg.repos.map((r) => [r.name, loginName(ghAuth(r.name.split("/")[0]))])), workflows: this.cfg.repos.filter((r) => r.workflows).map((r) => r.name),
+        actions: this.cfg.repos.filter((r) => r.actions).map((r) => ({ repo: r.name, public: this.actionsPublic.has(r.name) })) },
       poll: { lastAt: this.lastPollAt, nextAt: this.nextPollAt, error: this.lastPollError, every: formatDuration(this.cfg.pollMs) },
       budget: {
         used: w.used, limit: w.limit, usedText: formatAmount(w.used), limitText: w.limit === null ? "unlimited" : formatAmount(w.limit),

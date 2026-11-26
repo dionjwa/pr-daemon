@@ -8,7 +8,7 @@ import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel 
 import { buildDiscussion, issueForPr, refsNote, render, restart, reviewWantsRevise, workflowsNote, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
 import { gate, windowState } from "./budget.ts";
-import { isListed, isPullRequest, parseCommand, untrustedCommits, untrustedWriters } from "./gh.ts";
+import { graphqlLogin, isListed, isPullRequest, parseCommand, untrustedCommits, untrustedWriters } from "./gh.ts";
 import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
 import * as stack from "./stack.ts";
@@ -269,6 +269,19 @@ test("issue text must come from trusted users only", () => {
   assert.deepEqual(untrustedWriters({ author: "stranger", editors: [], renamers: [] }, ["owner"]), ["stranger"]);
   assert.ok(isListed(["Alice"], "alice"));
   assert.ok(!isListed([], "alice"));
+  // A bot is spelled as REST spells it (label events, comments), so one allowed_users entry covers both APIs
+  assert.equal(graphqlLogin({ login: "github-actions", __typename: "Bot" }), "github-actions[bot]");
+  assert.equal(graphqlLogin({ login: "github-actions", __typename: "User" }), "github-actions");
+  assert.equal(graphqlLogin(null), "ghost");
+  assert.deepEqual(untrustedWriters({ author: graphqlLogin({ login: "github-actions", __typename: "Bot" }), editors: [], renamers: [] }, ["github-actions[bot]"]), []);
+});
+
+test("github-actions[bot] is allowed per repo, never globally", () => {
+  const base = `[[repos]]\nname = "o/a"\n`;
+  assert.equal(parseConfig(base).repos[0].actions, false);
+  assert.equal(parseConfig(base + "actions = true\n").repos[0].actions, true);
+  assert.throws(() => parseConfig(`allowed_users = ["me", "GitHub-Actions[bot]"]\n` + base), /actions = true/);
+  assert.equal(parseConfig(`allowed_users = ["kodiakhq[bot]"]\n` + base).allowedUsers[0], "kodiakhq[bot]");
 });
 
 test("transcript: said, called, came back, once each", () => {

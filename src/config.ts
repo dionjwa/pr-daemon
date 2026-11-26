@@ -7,6 +7,9 @@ import { parse } from "smol-toml";
 import { HOME, parseAmount, parseDuration } from "./util.ts";
 
 export { HOME };
+
+/** The login every workflow's GITHUB_TOKEN acts as (gh.ts re-exports it). */
+export const ACTIONS_BOT = "github-actions[bot]";
 export const CONFIG_PATH = process.env.PR_DAEMON_CONFIG ?? join(HOME, "config.toml");
 
 /**
@@ -44,6 +47,8 @@ export interface RepoConfig {
   proxyHost: "public" | "upstream";
   /** Agents may edit .github/workflows/ and pr-daemon pushes it (flagged for your review), instead of holding it back. */
   workflows: boolean;
+  /** github-actions[bot] may direct pr-daemon here, as an allowed user does. Private repos only. */
+  actions: boolean;
 }
 
 export interface PreviewConfig {
@@ -174,7 +179,9 @@ port = 7377              # status page: http://localhost:<port> (localhost only)
 poll = "60s"             # how often to check GitHub
 label = "agent"          # add this label to an issue to start a build
 allowed_users = []       # who may direct the agent: add the label, write/edit labelled issues, and write
-                         # /pr-daemon and PR comments the agent reads. [] = only you (the gh user)
+                         # /pr-daemon and PR comments the agent reads. [] = only you (the gh user).
+                         # Setting it replaces that default, so list yourself too. github-actions[bot] is
+                         # allowed per repo instead: actions = true under [[repos]]
 concurrency = 1          # agent runs at the same time
 prevent_sleep = true     # macOS: keep the machine awake while pr-daemon runs
 notify = true            # desktop notification when the agent needs you: a PR ready, a fix pushed, a failure (terminal-notifier on macOS; notify-send on Linux)
@@ -308,6 +315,9 @@ admin = "127.0.0.1:2019" # Caddy's admin API (stays local)
 #                                   # it and flags it "needs your review". Needs a GitHub login
 #                                   # that may push workflows (~/.pr-daemon/gh-tokens/<owner>, see the README's
 #                                   # Safety section). false: such an edit is held back for you
+#   actions = false                 # true: github-actions[bot] may direct the agent here, as an allowed
+#                                   # user does (e.g. a workflow that opens a labelled issue when a deploy
+#                                   # fails). Private repos only: ignored, with a warning, in a public one
 `;
 
 type Raw = Record<string, unknown>;
@@ -360,6 +370,9 @@ export function parseConfig(text: string): Config {
   if (!Array.isArray(repos)) throw new Error(`repos needs DOUBLE brackets, one block per repository:\n\n${REPOS_EXAMPLE}`);
   const users = raw.allowed_users ?? [];
   if (!Array.isArray(users) || users.some((u) => typeof u !== "string")) throw new Error("allowed_users must be a list of GitHub usernames");
+  if ((users as string[]).some((u) => u.toLowerCase() === ACTIONS_BOT)) {
+    throw new Error(`allowed_users can't list ${ACTIONS_BOT}: every workflow in every repo acts as it. Set actions = true under each private repo's [[repos]] block that may use it instead`);
+  }
 
   const cfg: Config = {
     port: num(raw.port, 7377, "port"),
@@ -436,6 +449,7 @@ export function parseConfig(text: string): Config {
         check: str(r.check, "just pr-daemon-check"),
         proxyHost: oneOf(r.proxy_host, ["public", "upstream"], "public", `${at}: proxy_host`),
         workflows: bool(r.workflows, false, `${at}: workflows`),
+        actions: bool(r.actions, false, `${at}: actions`),
       };
     }),
   };

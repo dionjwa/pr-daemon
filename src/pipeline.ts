@@ -109,7 +109,7 @@ async function prWorktree(ctx: Ctx, p: gh.PR): Promise<{ branch: string; wt: str
  */
 async function trustCode(ctx: Ctx, pr: number): Promise<void> {
   const repo = ctx.repo.name;
-  const bad = gh.untrustedCommits(await gh.prCommits(repo, pr), await gh.trustedAuthors(ctx.cfg().allowedUsers));
+  const bad = gh.untrustedCommits(await gh.prCommits(repo, pr), await gh.trustedAuthors(ctx.cfg().allowedUsers, ctx.repo));
   if (!bad.length) return;
   const why = gh.untrustedCode(bad);
   await gh.comment(repo, pr, `🚫 **pr-daemon** won't work on this: ${why}. ${gh.UNTRUSTED_CODE_HELP}`);
@@ -367,7 +367,7 @@ export async function build(ctx: Ctx): Promise<void> {
   const issue = await gh.issue(repo.name, n);
   if (issue.state !== "open") throw new FailError(`issue #${n} is closed`);
   // Checked when the label was added, and again now: the text may have been edited since.
-  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
+  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers, repo));
   if (strangers.length) {
     const why = gh.untrustedText(strangers);
     await gh.comment(repo.name, n, `🚫 **pr-daemon** stopped: ${why}. ${gh.UNTRUSTED_HELP}`);
@@ -403,7 +403,7 @@ export async function build(ctx: Ctx): Promise<void> {
 
   // A `/pr-daemon` discussion on the issue is part of the task: what was agreed
   // there refines the body. Only trusted people's words, as for a revise.
-  const talk = await gh.trustedDiscussion(repo.name, n, await gh.trustedAuthors(cfg.allowedUsers), undefined, true);
+  const talk = await gh.trustedDiscussion(repo.name, n, await gh.trustedAuthors(cfg.allowedUsers, repo), undefined, true);
   if (talk.dropped) store.event(`left ${talk.dropped} issue comment(s) from people not in allowed_users out of the prompt`, job.id);
   const vars = {
     REPO: repo.name, BRANCH: branch, BASE: base, ISSUE_NUMBER: n, ISSUE_TITLE: issue.title, ISSUE_URL: issue.html_url,
@@ -546,7 +546,7 @@ export async function adopt(ctx: Ctx): Promise<void> {
   }
   // Checked when the label was added, and again now: the title and body are
   // the reviewer's input, and they may have been edited since.
-  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
+  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers, repo));
   if (strangers.length) {
     const why = gh.untrustedText(strangers);
     await gh.setStatus(repo.name, n, cfg.label, "failed").catch(() => {});
@@ -716,7 +716,7 @@ export async function revise(ctx: Ctx): Promise<void> {
   const builder = store.stack(repo.name, branch)?.builder_session || "";
 
   // Only words from trusted users reach the agent, never the whole thread.
-  const talk = await gh.trustedDiscussion(repo.name, job.number, await gh.trustedAuthors(ctx.cfg().allowedUsers), payload(job).commentId);
+  const talk = await gh.trustedDiscussion(repo.name, job.number, await gh.trustedAuthors(ctx.cfg().allowedUsers, ctx.repo), payload(job).commentId);
   if (talk.dropped) store.event(`left ${talk.dropped} PR comment(s) from people not in allowed_users out of the prompt`, job.id);
   const text = prompt("revise", {
     PR_NUMBER: job.number, ISSUE_NUMBER: n, REPO: repo.name, BRANCH: branch, OUT: out, PREVIEW_URL: stackWhere(ctx.cfg(), branch, s),
@@ -763,7 +763,7 @@ export async function discuss(ctx: Ctx): Promise<void> {
   const issue = await gh.issue(repo.name, n);
   if (issue.state !== "open") throw new FailError(`issue #${n} is closed`);
   // The issue's text is the agent's input, exactly as it is for a build.
-  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers));
+  const strangers = gh.untrustedWriters(await gh.provenance(repo.name, n), await gh.trustedAuthors(cfg.allowedUsers, repo));
   if (strangers.length) {
     const why = gh.untrustedText(strangers);
     await gh.comment(repo.name, n, `🚫 **pr-daemon** won't discuss this: ${why}. ${gh.UNTRUSTED_HELP}`);
@@ -780,7 +780,7 @@ export async function discuss(ctx: Ctx): Promise<void> {
   const out = git.outDir(repo.name, branch);
   mkdirSync(out, { recursive: true });
   try {
-    const talk = await gh.trustedDiscussion(repo.name, n, await gh.trustedAuthors(cfg.allowedUsers), commentId, true);
+    const talk = await gh.trustedDiscussion(repo.name, n, await gh.trustedAuthors(cfg.allowedUsers, repo), commentId, true);
     if (talk.dropped) store.event(`left ${talk.dropped} issue comment(s) from people not in allowed_users out of the prompt`, job.id);
     const discussion = talk.text || "(none)";
     const full = prompt("discuss", {

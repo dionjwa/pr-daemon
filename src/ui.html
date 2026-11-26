@@ -324,7 +324,10 @@ function render() {
        ${(() => { const by = {}; for (const [r, l] of Object.entries(g.logins ?? {})) (by[l] ??= []).push(r);
          const parts = Object.entries(by).map(([l, rs]) => `<code>${esc(l)}</code>${Object.keys(by).length > 1 ? ` for ${rs.map(esc).join(", ")}` : ""}`);
          return parts.length ? `GitHub login: ${parts.join("; ")}.` : ""; })()}
-       ${g.workflows?.length ? `Agents may edit <code>.github/workflows/</code> in ${g.workflows.map((r) => esc(r)).join(", ")} (each change is flagged for your review); elsewhere such edits are held back for you.` : "Agents' edits to <code>.github/workflows/</code> are held back for you (no repo sets <code>workflows = true</code>)."}</div>`;
+       ${g.workflows?.length ? `Agents may edit <code>.github/workflows/</code> in ${g.workflows.map((r) => esc(r)).join(", ")} (each change is flagged for your review); elsewhere such edits are held back for you.` : "Agents' edits to <code>.github/workflows/</code> are held back for you (no repo sets <code>workflows = true</code>)."}
+       ${(() => { const a = g.actions ?? [], on = a.filter((x) => !x.public), off = a.filter((x) => x.public);
+         return (on.length ? `<code>github-actions[bot]</code> can also start work in ${on.map((x) => esc(x.repo)).join(", ")} (<code>actions = true</code>).` : "")
+           + (off.length ? ` <span style="color: var(--warn)">${off.map((x) => esc(x.repo)).join(", ")} ${off.length > 1 ? "set" : "sets"} <code>actions = true</code> but ${off.length > 1 ? "are" : "is"} public, so it's ignored.</span>` : ""); })()}</div>`;
   $("howto").innerHTML = who + (S.repos.length
     ? `Add the <span class="badge">${esc(S.label)}</span> label to an issue in ${S.repos.map((r) => `<a href="https://github.com/${esc(r)}/issues" target="_blank">${esc(r)}</a>`).join(", ")}
        to get a PR, or to a PR that already exists to get the same preview stack and a review.

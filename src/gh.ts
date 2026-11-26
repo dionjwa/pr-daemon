@@ -2,6 +2,7 @@
 // `gh auth git-credential`) use your own login, or the repo owner's token from
 // ~/.pr-daemon/gh-tokens/ when there is one (util.ts ghAuth() and asOwner():
 // cleanEnv() hands it to every child as GH_TOKEN).
+import { ACTIONS_BOT } from "./config.ts";
 import { ghAuth, must, run, tail } from "./util.ts";
 
 async function api<T>(path: string, args: string[] = []): Promise<T> {
@@ -26,17 +27,42 @@ export async function viewer(): Promise<string> {
   return viewerLogin;
 }
 
-/** Who may direct pr-daemon: `allowed_users`, or else only the gh user. */
-export async function allowedUsers(configured: string[]): Promise<string[]> {
-  return configured.length ? configured : [await viewer()];
+/** The login every workflow's GITHUB_TOKEN acts as. Allowed per repo (`actions = true`), and only in a private one. */
+export { ACTIONS_BOT };
+
+const visibility = new Map<string, { private: boolean; at: number }>();
+/** Whether a repo is private, asked again every 5 minutes (a repo can be made public). An error counts as public. */
+export async function isPrivate(repo: string): Promise<boolean> {
+  const v = visibility.get(repo);
+  if (v && Date.now() - v.at < 5 * 60_000) return v.private;
+  const priv = await api<{ private: boolean }>(`repos/${repo}`).then((r) => r.private === true, () => false);
+  visibility.set(repo, { private: priv, at: Date.now() });
+  return priv;
+}
+
+/** What a repo's own settings add to who may direct pr-daemon there. */
+export interface RepoTrust { name: string; actions: boolean }
+
+/**
+ * github-actions[bot], when the repo sets `actions = true` and is private. In a
+ * public repo anyone can start a workflow (an issue, a comment, a fork's PR),
+ * and what that workflow writes into an issue would become agent instructions.
+ */
+export async function repoBots(repo?: RepoTrust): Promise<string[]> {
+  return repo?.actions && await isPrivate(repo.name) ? [ACTIONS_BOT] : [];
+}
+
+/** Who may direct pr-daemon: `allowed_users`, or else only the gh user; plus the repo's own additions. */
+export async function allowedUsers(configured: string[], repo?: RepoTrust): Promise<string[]> {
+  return [...(configured.length ? configured : [await viewer()]), ...(await repoBots(repo))];
 }
 
 /**
  * Whose words may reach an agent: the allowed users plus the gh user (whose
  * account pr-daemon itself writes with: PR bodies, reviews, summaries).
  */
-export async function trustedAuthors(configured: string[]): Promise<string[]> {
-  return [...new Set([...(await allowedUsers(configured)), await viewer()])];
+export async function trustedAuthors(configured: string[], repo?: RepoTrust): Promise<string[]> {
+  return [...new Set([...(await allowedUsers(configured, repo)), await viewer()])];
 }
 
 /** GitHub logins are case-insensitive. */
@@ -114,6 +140,18 @@ export const untrustedCode = (bad: { sha: string; who: string }[]) => {
 export const UNTRUSTED_CODE_HELP = "pr-daemon runs a PR's code on its own machine and lets an agent change it, so only allowed users may write it. " +
   "Add them to allowed_users if you trust them, then label the PR again (or comment `/pr-daemon` again).";
 
+type Who = { login: string; __typename?: string } | null;
+
+/**
+ * An actor's login as REST spells it. GraphQL gives a bot's login without the
+ * `[bot]` suffix ("github-actions"), REST gives it with ("github-actions[bot]"),
+ * and allowed_users must match both the same way. A deleted account is "ghost".
+ */
+export function graphqlLogin(w: Who | undefined): string {
+  if (!w) return "ghost";
+  return w.__typename === "Bot" && !w.login.endsWith("[bot]") ? `${w.login}[bot]` : w.login;
+}
+
 /**
  * Who wrote an issue or a PR. One query for both: issues and PRs share a
  * number space, and a labelled PR's text is agent input exactly as an issue's
@@ -121,17 +159,16 @@ export const UNTRUSTED_CODE_HELP = "pr-daemon runs a PR's code on its own machin
  */
 export async function provenance(repo: string, n: number): Promise<Provenance> {
   const [owner, name] = repo.split("/");
-  const wrote = `author { login }
-    userContentEdits(last: 100) { nodes { editor { login } } }
-    timelineItems(last: 100, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { actor { login } } } }`;
+  const wrote = `author { login __typename }
+    userContentEdits(last: 100) { nodes { editor { login __typename } } }
+    timelineItems(last: 100, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { actor { login __typename } } } }`;
   const query = `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { issueOrPullRequest(number: $n) {
     ... on Issue { ${wrote} }
     ... on PullRequest { ${wrote} } } } }`;
-  type Who = { login: string } | null;
   const r = JSON.parse(await must("gh", ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `n=${n}`]));
   const i = r.data.repository.issueOrPullRequest as { author: Who; userContentEdits: { nodes: { editor: Who }[] }; timelineItems: { nodes: { actor?: Who }[] } };
   if (!i) throw new Error(`${repo}#${n}: GitHub has no issue or PR with that number`);
-  const who = (w: Who | undefined) => w?.login ?? "ghost";
+  const who = graphqlLogin;
   return { author: who(i.author), editors: i.userContentEdits.nodes.map((e) => who(e.editor)), renamers: i.timelineItems.nodes.map((e) => who(e.actor)) };
 }
 

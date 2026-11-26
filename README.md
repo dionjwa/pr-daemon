@@ -531,6 +531,7 @@ See the comments in `~/.pr-daemon/config.toml`. The main ones:
 | `[[repos]] up / down / check` | `just pr-daemon-up` / `-down` / `-check` | Override for projects without `just` |
 | `[[repos]] proxy_host` | `public` | Host header the app sees through the preview proxy: `public` or `upstream` |
 | `[[repos]] workflows` | `false` | Agents may edit `.github/workflows/` in this repo, each change flagged for your review. See [Letting agents edit workflows](#letting-agents-edit-workflows) |
+| `[[repos]] actions` | `false` | `github-actions[bot]` may direct the agent in this repo, as an allowed user does. Private repos only. See [Safety](#safety) |
 
 ## Commands
 
@@ -605,6 +606,23 @@ it at one.
   An issue from someone else is refused even if you add the label. To build
   it, open a new issue in your own words and label that, or add the person
   to `allowed_users`.
+
+  **Issues from a workflow (private repos only).** To let a GitHub Actions
+  workflow open labelled issues with the default `GITHUB_TOKEN` (for example,
+  a follow-up issue when a deploy on `main` fails), set `actions = true` on
+  that repo:
+
+  ```toml
+  [[repos]]
+  name = "your-org/private-app"
+  actions = true
+  ```
+
+  Then `github-actions[bot]` counts as an allowed user **in that repo only**.
+  pr-daemon ignores the setting (and warns) in a public repo, where anyone can
+  start a workflow, and refuses `github-actions[bot]` in `allowed_users`.
+  Every workflow in the repo acts as that bot, so keep issue text to things
+  you control (run URL, commit, which deploy), not raw logs.
 - **The agent has your access.** It runs Claude Code with permission prompts
   off, as your user, on your machine. It can run any command, read your files,
   and use your `gh` and git logins, so it could push to or comment on any repo
