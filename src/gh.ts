@@ -3,7 +3,7 @@
 // ~/.pr-daemon/gh-tokens/ when there is one (util.ts ghAuth() and asOwner():
 // cleanEnv() hands it to every child as GH_TOKEN).
 import { ACTIONS_BOT } from "./config.ts";
-import { ghAuth, must, run, tail } from "./util.ts";
+import { asViewer, ghAuth, must, run, tail } from "./util.ts";
 
 async function api<T>(path: string, args: string[] = []): Promise<T> {
   return JSON.parse((await must("gh", ["api", ...args, path])) || "null") as T;
@@ -23,7 +23,7 @@ async function apiPages<T>(path: string, pick: (page: Record<string, unknown>) =
 
 let viewerLogin: string | undefined;
 export async function viewer(): Promise<string> {
-  viewerLogin ??= (await api<{ login: string }>("user")).login;
+  viewerLogin ??= (await asViewer(() => api<{ login: string }>("user"))).login;
   return viewerLogin;
 }
 

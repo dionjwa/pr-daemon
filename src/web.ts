@@ -81,11 +81,14 @@ export function serve(d: Daemon): void {
       send(res, 500, { error: (e as Error).message });
     }
   });
-  // Loopback on a host install. In a container loopback is the container's
-  // own, which Docker's published port can't reach (it dials the container's
-  // address), so bind every interface there — the port is still published to
-  // the host's 127.0.0.1 only, the container sits on one internal network, and
-  // the Host check above still refuses anything but a local name.
-  const bind = inContainer() ? "0.0.0.0" : "127.0.0.1";
-  server.listen(d.cfg.port, bind, () => d.store.event(`status page: http://localhost:${d.cfg.port}`));
+  // Loopback unless PR_DAEMON_BIND says otherwise. docker/compose.yaml sets
+  // 0.0.0.0, because in a container loopback is the container's own, which
+  // Docker's published port can't reach (it dials the container's address);
+  // there the port is published to the host's 127.0.0.1 only. It is an explicit
+  // setting and not "any container", because a devcontainer or
+  // `network_mode: host` has no such publishing, and the Host check alone is
+  // a header any client can send.
+  const bind = process.env.PR_DAEMON_BIND?.trim() || "127.0.0.1";
+  server.listen(d.cfg.port, bind, () => d.store.event(`status page: http://localhost:${d.cfg.port}${bind === "127.0.0.1" ? "" : ` (listening on ${bind})`}`));
+  if (inContainer() && bind === "127.0.0.1") d.store.event("the status page listens on this container's own loopback, which a published port can't reach: set PR_DAEMON_BIND=0.0.0.0 (docker/compose.yaml does) and publish the port to 127.0.0.1 only", null, "warn");
 }

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { asOwner, ghTokenFile, parseAmount, parseDuration, formatAmount, run, sleep, viaHost } from "./util.ts";
+import { asOwner, ghTokenFile, VIEWER, parseAmount, parseDuration, formatAmount, run, sleep, viaHost } from "./util.ts";
 import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel } from "./config.ts";
 import { buildDiscussion, issueForPr, refsNote, render, restart, reviewWantsRevise, workflowsNote, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
@@ -597,7 +597,7 @@ test("GitHub tokens: one file per owner, any case, else gh-token; asOwner carrie
   delete process.env.GH_CONFIG_DIR;
 });
 
-test("in a container there is no gh login to fall back on, so an ownerless call borrows a token", () => {
+test("in a container there is no gh login to fall back on, so the viewer question borrows a token", () => {
   const home = mkdtempSync(join(tmpdir(), "prd-ghc-"));
   mkdirSync(join(home, "gh-tokens"));
   writeFileSync(join(home, "gh-tokens", "metapages"), "github_pat_org\n");
@@ -605,11 +605,15 @@ test("in a container there is no gh login to fall back on, so an ownerless call 
   process.env.GH_CONFIG_DIR = mkdtempSync(join(tmpdir(), "prd-nogh-"));   // no hosts.yml: gh has no login
   // Who pr-daemon acts as is asked with no owner at all. With no gh-token file that
   // question had no answer in a container, which left git without an identity too.
-  assert.equal(ghTokenFile(undefined, home), join(home, "gh-tokens", "dionjwa"), "any of them: they are the same user");
+  assert.equal(ghTokenFile(VIEWER, home), join(home, "gh-tokens", "dionjwa"), "any of them: they are the same user");
   assert.equal(ghTokenFile("metapages", home), join(home, "gh-tokens", "metapages"), "an owner with a file still gets its own");
+  // Any other call with no owner borrows nothing: another owner's fine-grained
+  // token would only fail as a confusing 404.
+  assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"));
+  assert.equal(ghTokenFile("someone", home), join(home, "gh-token"));
   // And an explicit fallback file always wins over borrowing one.
   writeFileSync(join(home, "gh-token"), "github_pat_default\n");
-  assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"));
+  assert.equal(ghTokenFile(VIEWER, home), join(home, "gh-token"));
   delete process.env.GH_CONFIG_DIR;
 });
 

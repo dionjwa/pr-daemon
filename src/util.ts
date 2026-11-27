@@ -174,6 +174,19 @@ export function asOwner<T>(repo: string, fn: () => T): T {
   return owner.run(repo.split("/")[0], fn);
 }
 
+/**
+ * The question "which GitHub user is pr-daemon?" — not a repo's owner. Only
+ * that question may borrow any owner's token (see ghTokenFile); a gh call for
+ * a repo that runs outside asOwner() must not quietly get another owner's
+ * fine-grained token and fail as a confusing 404.
+ */
+export const VIEWER = "*viewer*";
+
+/** Run `fn` as the viewer question (gh.viewer(), doctor's "logged in as"). */
+export function asViewer<T>(fn: () => T): T {
+  return owner.run(VIEWER, fn);
+}
+
 /** The token file for an owner: `gh-tokens/<owner>` (any case, as GitHub names are), else `gh-token`. */
 export function ghTokenFile(who = owner.getStore(), home = CREDENTIALS_HOME): string {
   let files: string[] = [];
@@ -183,13 +196,13 @@ export function ghTokenFile(who = owner.getStore(), home = CREDENTIALS_HOME): st
     if (hit) return join(home, "gh-tokens", hit);
   }
   const fallback = join(home, "gh-token");
-  // A call with no owner — gh.viewer(), which is who pr-daemon acts as — would
-  // otherwise have no login at all in a container: there is no `gh auth login`
+  // The viewer question (asViewer: gh.viewer(), which is who pr-daemon acts
+  // as) would otherwise have no login at all in a container: there is no `gh auth login`
   // in there (the credentials mount is read-only and nothing can open a
   // browser), and without it the daemon starts up not knowing its own user,
   // which also leaves git without an identity to commit with. Any of the
   // tokens answers that question, because they are all the same GitHub user.
-  if (!existsSync(fallback) && files.length && !ghOwnLogin()) return join(home, "gh-tokens", files[0]);
+  if (who === VIEWER && !existsSync(fallback) && files.length && !ghOwnLogin()) return join(home, "gh-tokens", files[0]);
   return fallback;
 }
 

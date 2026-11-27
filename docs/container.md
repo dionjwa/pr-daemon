@@ -81,8 +81,10 @@ three job rows while this was being tested, and nothing reported an error.
 
 So: query it **inside** the container. `just db 'select …'` does that for you
 whenever one is running, and `openDb()` opens the file read-only on the host
-while the daemon's marker (`.daemon-in-a-container`) is present, so a stray
-`pr-daemon` command on the host can read but never damage it. Inside the
+while the daemon's marker (`.daemon-in-a-container`) is fresh, so a stray
+`pr-daemon` command on the host can read but never damage it, and `pr-daemon
+serve` on the host refuses to start. The daemon touches the marker every 30
+seconds; a marker left by a killed container stops counting after 2 minutes. Inside the
 container it is an ordinary database on an ordinary mount, and a second process
 there sees the daemon's commits as it should.
 

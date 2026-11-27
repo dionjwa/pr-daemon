@@ -585,10 +585,12 @@ just container-restart        # rebuild and restart: how a code change is picked
   otherwise had to be fixed, and each fix is deliberate:
   - **The status page was bound to `127.0.0.1`,** which Docker's published port
     cannot reach: the port forwarder dials the *container's address*, not its
-    loopback. It connected and then got an empty reply (curl exit 52). In a
-    container `web.ts` binds `0.0.0.0`; that is still safe, because the port is
-    published to the host's loopback only and the Host check already refuses
-    anything but a local name.
+    loopback. It connected and then got an empty reply (curl exit 52). So
+    `docker/compose.yaml` sets `PR_DAEMON_BIND=0.0.0.0`, which is safe only
+    because compose publishes the port to the host's loopback. It is an
+    explicit variable, not "any container": a devcontainer or
+    `network_mode: host` has `/.dockerenv` but no such publishing, and the Host
+    check is a header any client can send.
   - **Health probes use `curl --resolve`, not a rewritten URL.** The request
     goes to the host while the `Host` header and the TLS name stay what the URL
     says — which is the whole point of those two probes (is it running vs. can
@@ -665,7 +667,10 @@ just container-restart        # rebuild and restart: how a code change is picked
   the only sign was `pr-daemon.db-wal (deleted)` in `/proc/<pid>/fd`. So
   `openDb()` opens the database **read-only** outside the container whenever
   the daemon's marker is there (`.daemon-in-a-container` on the work disk,
-  written at startup and removed on shutdown), and `just db` runs sqlite3
+  written at startup, touched every 30s, removed on shutdown, and ignored
+  once 2 minutes old, so a `docker kill` can't lock the host out for good).
+  A host `serve` refuses to start beside a live marker instead of opening
+  read-only and dying on its first write. `just db` runs sqlite3
   inside the container when one is up. Inside, it is an ordinary file on an
   ordinary mount and the usual rules hold (verified: a second process sees the
   daemon's commits). `just logs` is safe either way — a log file has no locks.
@@ -676,9 +681,13 @@ just container-restart        # rebuild and restart: how a code change is picked
   who it acts as, and whose answer `start()` feeds to `git.ensureIdentity()`.
   Its rejection was swallowed by a `.catch(() => {})`, so the daemon polled and
   built normally and the first agent commit would have failed with "Please tell
-  me who you are". Two fixes: `ghTokenFile()` borrows any `gh-tokens/<owner>`
+  me who you are". Two fixes: for that one question (`asViewer()`: `gh.viewer()`
+  and doctor's login check) `ghTokenFile()` borrows any `gh-tokens/<owner>`
   file when there is no `gh-token` and gh has no login of its own (they are all
-  the same GitHub user), and `noteViewer()` is called from the first poll too,
+  the same GitHub user). Nothing else borrows: a repo call outside `asOwner()`
+  must not get another owner's fine-grained token and fail as a 404. And
+  `ensureIdentity()` only writes git config in a container (never the owner's
+  own `~/.gitconfig`), name and email checked separately, and `noteViewer()` is called from the first poll too,
   not only from `start()`.
 - **`doctor` may only use tools the image has.** The DNS check shelled out to
   `dig`, which isn't in the container, so it reported the owner's working

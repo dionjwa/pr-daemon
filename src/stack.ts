@@ -131,11 +131,18 @@ export async function probe(url: string): Promise<number> {
   const curl = (args: string[]) => run("curl", [...args, "-sk", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", url]);
   const via = await viaHostCurl(url);
   const code = Number((await curl(via)).stdout.trim()) || 0;
-  // Nothing on the host at that address: try it unchanged, in case the stack is
-  // a plain dev server that `up` started inside this container rather than a
-  // sibling container of its own.
-  if (!code && via.length) return Number((await curl([])).stdout.trim()) || 0;
+  // Nothing on the host at a loopback address: try it unchanged, in case the
+  // stack is a plain dev server that `up` started inside this container rather
+  // than a sibling container of its own. Never for any other name: that retry
+  // would go through public DNS instead of the host, and could report a
+  // preview as working while the host's route to it is broken.
+  if (!code && via.length && isLoopback(url)) return Number((await curl([])).stdout.trim()) || 0;
   return code;
+}
+
+function isLoopback(url: string): boolean {
+  try { return /^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(url).hostname); }
+  catch { return false; }
 }
 
 export type HealthState = "up" | "degraded" | "down";

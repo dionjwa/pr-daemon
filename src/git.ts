@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { claudeEnv } from "./agent.ts";
 import { WORK_HOME } from "./config.ts";
-import { must, run, sleep, slugify } from "./util.ts";
+import { inContainer, must, run, sleep, slugify } from "./util.ts";
 
 const key = (repo: string) => repo.replace("/", "__");
 export const repoDir = (repo: string) => join(WORK_HOME, "repos", key(repo));
@@ -208,21 +208,30 @@ export async function commitLeftovers(wt: string): Promise<string[]> {
 }
 
 /**
- * Give git an identity if this machine has none. A fresh container has no
+ * Give git an identity in a container that has none. A fresh container has no
  * ~/.gitconfig, and git refuses to commit without one ("Please tell me who you
  * are") — which would fail every build at the last step. pr-daemon acts as the
- * gh user, so that login's noreply address is the honest answer. Anything
- * already configured (PR_DAEMON_GIT_NAME, or your own ~/.gitconfig on a host
- * install) is left alone.
+ * gh user, so that login's name and noreply address are the honest answer.
+ * Only in a container: on a host install ~/.gitconfig is the owner's own, and
+ * pr-daemon never writes it. Name and email are checked on their own (the
+ * entrypoint may have set only one), through every config git reads
+ * (includes and system config too) and git's own environment variables.
  */
 export async function ensureIdentity(login: string): Promise<string> {
-  if (!login) return "";
-  const have = await run("git", ["config", "--global", "--get", "user.email"]);
-  if (have.stdout.trim()) return "";
+  if (!login || !inContainer()) return "";
+  const has = async (key: string, env: string[]) =>
+    env.some((v) => process.env[v]?.trim()) || !!(await run("git", ["config", "--get", key])).stdout.trim();
   const email = `${login}@users.noreply.github.com`;
-  await run("git", ["config", "--global", "user.name", login]);
-  await run("git", ["config", "--global", "user.email", email]);
-  return email;
+  const set: string[] = [];
+  if (!(await has("user.name", ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]))) {
+    await run("git", ["config", "--global", "user.name", login]);
+    set.push(login);
+  }
+  if (!(await has("user.email", ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL", "EMAIL"]))) {
+    await run("git", ["config", "--global", "user.email", email]);
+    set.push(`<${email}>`);
+  }
+  return set.join(" ");
 }
 
 /** The commit a worktree is on, to tell "the agent committed something" from "it didn't". */

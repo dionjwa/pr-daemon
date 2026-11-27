@@ -6,7 +6,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
 import { parseConfig, saveConfigText, setTopLevel, CONFIG_PATH, NOTICE_KINDS, readConfigText, type Config } from "./config.ts";
-import { AGENT_KINDS, IN_USE, openDb, Store, type Job, type JobKind, type Notice, type Stack } from "./db.ts";
+import { AGENT_KINDS, dbInUseByContainer, IN_USE, IN_USE_BEAT_MS, openDb, Store, type Job, type JobKind, type Notice, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { syncHosts } from "./hosts.ts";
@@ -64,6 +64,11 @@ export class Daemon {
     // against it to tell a real edit from the write we just made ourselves.
     this.configOnDisk = readConfigText();
     this.cfg = parseConfig(this.configOnDisk);
+    // A read-only database (see openDb) would let this start and then die on
+    // its first write. Say why instead, and how to do it.
+    if (dbInUseByContainer()) {
+      throw new Error(`pr-daemon is already running in a container on this work disk (${IN_USE} was touched in the last few minutes). Two daemons on one database lose each other's writes. Use the container (just container-up / just container-shell), or stop it first: just container-down`);
+    }
     this.store = new Store(openDb());
     this.proxy = new Proxy(this.store, () => this.cfg);
     gh.onCommented((repo, n, url) => this.store.set(`last-comment:${repo}#${n}`, url));
@@ -114,7 +119,11 @@ export class Daemon {
     if (n) this.store.event(`${n} job(s) were running when pr-daemon stopped; re-queued to resume`);
     this.store.event(`pr-daemon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
     // So nothing on the host opens this database read-write while we hold it (see openDb).
-    if (inContainer()) { try { writeFileSync(IN_USE, `${hostname()}\n`); } catch { /* read-only work disk: the guard is the only loss */ } }
+    if (inContainer()) {
+      const beat = () => { try { writeFileSync(IN_USE, `${hostname()}\n`); } catch { /* read-only work disk: the guard is the only loss */ } };
+      beat();
+      setInterval(() => { if (!this.quitting) beat(); }, IN_USE_BEAT_MS).unref?.();
+    }
     if (process.platform === "darwin" && this.cfg.preventSleep) {
       spawn("caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore", detached: true }).unref();
     }
@@ -342,8 +351,8 @@ export class Daemon {
     this.ghUser = u;
     if (this.identity) return;
     this.identity = true;
-    const email = await git.ensureIdentity(u);
-    if (email) this.store.event(`git had no identity here; commits are now @${u} <${email}>`);
+    const set = await git.ensureIdentity(u);
+    if (set) this.store.event(`git had no identity here; commits now use ${set}`);
   }
 
   /** Who may trigger work: allowed_users, or else only the gh user (empty until that's known). */

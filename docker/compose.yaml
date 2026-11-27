@@ -39,6 +39,10 @@ services:
       PR_DAEMON_DOCKER_NETWORK: pr-daemon
       # And how Caddy reaches the status page: this container, by service name.
       PR_DAEMON_SELF_HOST: pr-daemon
+      # The status page listens on every interface IN HERE, because a published
+      # port can't reach the container's loopback. Safe only because `ports:`
+      # below publishes it to the host's 127.0.0.1 and nowhere else.
+      PR_DAEMON_BIND: 0.0.0.0
       # Git needs an identity to commit with. pr-daemon fills in the gh user's
       # noreply address when these are empty.
       PR_DAEMON_GIT_NAME: ${PR_DAEMON_GIT_NAME:-}

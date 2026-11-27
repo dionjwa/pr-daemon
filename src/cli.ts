@@ -1,5 +1,5 @@
 // pr-daemon command line.
-import { resolve4, resolveCname } from "node:dns/promises";
+import { resolve4, resolve6, resolveCname } from "node:dns/promises";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,7 +13,7 @@ import { caddyHasDns, CADDY_LOG, CHECK_BODY, CHECK_LABEL, CHECK_PATH, DNS_MODULE
 import { openDb, Store, type JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
 import { stackState } from "./stack.ts";
-import { asOwner, CONFIG_HOME, CREDENTIALS_HOME, GH_TOKENS_DIR, ghAuth, HOME, inContainer, loginName, LOCAL_HOST, run } from "./util.ts";
+import { asOwner, asViewer, CONFIG_HOME, CREDENTIALS_HOME, GH_TOKENS_DIR, ghAuth, HOME, inContainer, loginName, LOCAL_HOST, run, VIEWER } from "./util.ts";
 import { serve } from "./web.ts";
 
 const HELP = `pr-daemon — label an issue, get a pull request.
@@ -177,9 +177,9 @@ async function doctor(): Promise<void> {
   ok(!!ghv && (+ghv[1] > 2 || (+ghv[1] === 2 && +ghv[2] >= 73)), `gh ≥ 2.73 (have ${ghv ? `${ghv[1]}.${ghv[2]}` : "none"})`, "brew upgrade gh");
   // What pr-daemon itself would use, not `gh auth status`: in a container gh has no
   // login of its own and every call goes through a token file (ghAuth / asOwner).
-  const who = await run("gh", ["api", "user", "--jq", ".login"]);
+  const who = await asViewer(() => run("gh", ["api", "user", "--jq", ".login"]));
   const login = who.code === 0 ? who.stdout.trim() : "";
-  ok(!!login, `gh is logged in${login ? ` as @${login}, through ${loginName(ghAuth())}: pr-daemon pushes, opens PRs and comments as this user` : ""}`,
+  ok(!!login, `gh is logged in${login ? ` as @${login}, through ${loginName(ghAuth(VIEWER))}: pr-daemon pushes, opens PRs and comments as this user` : ""}`,
     inContainer()
       ? `no GitHub login this container can use, so pr-daemon doesn't know who it acts as and git has no identity to commit with.
       There is no \`gh auth login\` in here: the credentials mount is read-only and nothing can open a browser. Write the token
@@ -302,22 +302,14 @@ async function doctor(): Promise<void> {
 }
 
 /**
- * The container's own setup, which has failure modes a host install can't have.
- * The one that matters most is the work disk's path: a preview stack's
- * `docker compose` runs against the host's Docker and bind-mounts its worktree
- * by host path, so if the work mount isn't at the same path on both sides the
- * stack comes up with empty mounts and nothing says why. That is checked for
- * real, by having the host's Docker show us the directory from a sibling
- * container.
- */
-/**
  * The address `name` resolves to, and — when nothing does — the CNAME chain it
  * ends in, which is what tells the owner where to look.
  */
 async function resolves(name: string): Promise<{ ip: string; chain: string[] }> {
   const first = async (f: (n: string) => Promise<string[]>, n: string): Promise<string> =>
     await f(n).then((a) => a[0] ?? "", () => "");
-  const ip = await first(resolve4, name);
+  // An IPv6-only name (AAAA, or a CNAME to one) resolves too.
+  const ip = await first(resolve4, name) || await first(resolve6, name);
   if (ip) return { ip, chain: [] };
   const chain: string[] = [];
   for (let n = name; chain.length < 4;) {
@@ -329,6 +321,15 @@ async function resolves(name: string): Promise<{ ip: string; chain: string[] }> 
   return { ip: "", chain };
 }
 
+/**
+ * The container's own setup, which has failure modes a host install can't have.
+ * The one that matters most is the work disk's path: a preview stack's
+ * `docker compose` runs against the host's Docker and bind-mounts its worktree
+ * by host path, so if the work mount isn't at the same path on both sides the
+ * stack comes up with empty mounts and nothing says why. That is checked for
+ * real, by having the host's Docker show us the directory from a sibling
+ * container.
+ */
 async function containerChecks(ok: (good: boolean, what: string, fix?: string) => void, docker: boolean): Promise<void> {
   console.log(`· running in a container (the host is reached as ${LOCAL_HOST || "nothing: set PR_DAEMON_LOCAL_HOST=host.docker.internal"})`);
   console.log(`    config      ${CONFIG_HOME}`);
@@ -451,6 +452,10 @@ async function installService(): Promise<void> {
   const roots = Object.entries({
     PR_DAEMON_CONFIG_HOME: CONFIG_HOME, PR_DAEMON_CREDENTIALS_HOME: CREDENTIALS_HOME, PR_DAEMON_WORK_HOME: WORK_HOME,
   }).filter(([, v]) => v !== HOME);
+  // PR_DAEMON_HOME itself too: the roots default to it, so with it set and the
+  // roots not, the filter above keeps nothing and the service would start on
+  // ~/.pr-daemon instead.
+  if (process.env.PR_DAEMON_HOME) roots.unshift(["PR_DAEMON_HOME", HOME]);
   if (process.platform === "darwin") {
     // AbandonProcessGroup: preview stacks started by pr-daemon survive it restarting.
     writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>

@@ -189,7 +189,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
   return {
     // Inside Docker the admin API must listen on all interfaces (it's published
     // to 127.0.0.1 only). pr-daemon always sends Origin = the admin address.
-    admin: { listen: mode === "docker" ? `0.0.0.0:${adminPort(cfg)}` : p.admin, origins: [...new Set([p.admin, adminAddress(cfg)])] },
+    admin: { listen: mode === "docker" ? `0.0.0.0:${adminPort(cfg)}` : p.admin, origins: [...new Set([p.admin, adminAddress(cfg, mode)])] },
     // Leave out the admin API's own lines: pr-daemon asks it whether Caddy is
     // alive every 5s, and that was nearly every line of a 170 MB log. The
     // binary writes its own rolled file; Docker's log is capped by `docker run`.
@@ -247,12 +247,13 @@ function adminPort(cfg: Config): string {
 
 /**
  * Where Caddy's admin API is from pr-daemon's point of view. `preview.admin`
- * is where Caddy listens; in a container that is Caddy's own loopback, not
- * ours, so we use the shared Docker network's container name, or failing that
- * the host's address.
+ * is where Caddy listens. A binary Caddy runs beside us (in the container too,
+ * when one is installed there), so that address is right as it is. A Docker
+ * Caddy's loopback is its own, not ours, so in a container we use the shared
+ * Docker network's container name, or failing that the host's address.
  */
-export function adminAddress(cfg: Config): string {
-  if (!LOCAL_HOST) return cfg.preview.admin;
+export function adminAddress(cfg: Config, mode: ProxyMode | null = "docker"): string {
+  if (!LOCAL_HOST || mode !== "docker") return cfg.preview.admin;
   if (DOCKER_NETWORK) return `${CONTAINER}:${adminPort(cfg)}`;
   return viaHost(`http://${cfg.preview.admin}`).replace(/^http:\/\//, "");
 }
@@ -304,13 +305,16 @@ export class Proxy {
     else this.store.event(`preview proxy (${managed}) still running after ${secs}s; the next start adopts it`, null, "warn");
   }
 
+  /** The Caddy the admin API calls are about: the mode being started, checked or stopped. */
+  private via: ProxyMode | null = null;
+
   private adminUrl(path: string): string {
-    return `http://${adminAddress(this.cfg())}${path}`;
+    return `http://${adminAddress(this.cfg(), this.via)}${path}`;
   }
 
   /** Caddy's admin API refuses Node's fetch (Sec-Fetch-Mode: cors) unless the Origin is allowed. */
   private admin(path: string, init: RequestInit = {}): Promise<Response> {
-    return fetch(this.adminUrl(path), { ...init, headers: { ...(init.headers ?? {}), origin: `http://${adminAddress(this.cfg())}` } });
+    return fetch(this.adminUrl(path), { ...init, headers: { ...(init.headers ?? {}), origin: `http://${adminAddress(this.cfg(), this.via)}` } });
   }
 
   private async alive(): Promise<boolean> {
@@ -353,6 +357,7 @@ export class Proxy {
         return;
       }
       this.status = { ...this.status, enabled, mode, domain: cfg.preview.domain };
+      this.via = mode;
 
       const stacks = this.store.stacks();
       const config = caddyConfig(cfg, stacks, mode);
@@ -438,6 +443,7 @@ export class Proxy {
   /** Stop Caddy and wait until it has exited (and released its ports). Returns false if it's still running. */
   async stop(mode: ProxyMode): Promise<boolean> {
     // Its pid, so we can wait for the process itself and not just its admin API.
+    this.via = mode;
     const pid = mode === "binary" ? await this.pid() : 0;
     const deadline = Date.now() + STOP_WAIT_MS;
     if (mode === "docker") await run("docker", ["rm", "-f", CONTAINER], { timeoutMs: STOP_WAIT_MS });

@@ -474,12 +474,15 @@ export async function build(ctx: Ctx): Promise<void> {
     throw new FailError("check still failing");
   }
 
-  const prNumber = await publishPr(ctx, { n, branch, base, url, pub, out, issueTitle: issue.title });
+  // The stack row keeps the last good address (Caddy routes on it), but the
+  // PR must not offer a link to a stack that isn't running.
+  const shown = down ? "" : url;
+  const prNumber = await publishPr(ctx, { n, branch, base, url: shown, pub, out, issueTitle: issue.title });
   store.update(job.id, { pr: prNumber });
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, pr: prNumber, builder_session: store.job(job.id)!.session_id });
   await gh.setStatus(repo.name, n, cfg.label, "in-review");
   if (held.comment) await gh.comment(repo.name, prNumber, held.comment);
-  await gh.comment(repo.name, n, `✅ **pr-daemon** opened #${prNumber}. Preview: ${pub || url || "n/a"}`);
+  await gh.comment(repo.name, n, `✅ **pr-daemon** opened #${prNumber}. Preview: ${pub || shown || "_not running_"}`);
   ctx.notice = { kind: "ready", level: held.comment ? "warn" : "ok", title: `✅ PR ready: ${repo.name} #${prNumber}`,
     body: `${issue.title}${held.note}`, url: `https://github.com/${repo.name}/pull/${prNumber}` };
   store.enqueue({ repo: repo.name, kind: "review", number: prNumber, branch, trigger_key: `review:${repo.name}#${prNumber}:job${job.id}` });

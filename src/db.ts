@@ -1,7 +1,7 @@
 // Local state in SQLite (node:sqlite, built in; no native modules).
 // GitHub stays the source of truth for issues/PRs; this holds the queue,
 // token ledger, stacks, and an event log for the status page.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { WORK_HOME, type NoticeKind } from "./config.ts";
@@ -73,10 +73,23 @@ export const AGENT_KINDS: JobKind[] = ["build", "adopt", "review", "revise", "di
 
 /**
  * Where a containerised daemon says so, for everything outside it (see openDb).
- * It is written at startup and removed on shutdown; left behind by a crash, it
- * costs a host command its write access and nothing else.
+ * It is written at startup, touched every IN_USE_BEAT_MS while the daemon
+ * runs, and removed on shutdown. One left behind by a crash (`docker kill`,
+ * the OOM killer) stops counting once it is IN_USE_STALE_MS old, so it can't
+ * lock the host out for good.
  */
 export const IN_USE = join(WORK_HOME, ".daemon-in-a-container");
+export const IN_USE_BEAT_MS = 30_000;
+const IN_USE_STALE_MS = 4 * IN_USE_BEAT_MS;
+
+/** Is a containerised daemon using this database right now (as far as the host can tell)? */
+export function dbInUseByContainer(): boolean {
+  if (inContainer()) return false;
+  try { return Date.now() - statSync(IN_USE).mtimeMs < IN_USE_STALE_MS; }
+  catch { return false; }
+}
+
+const CONTAINER_HINT = "docker compose -f docker/compose.yaml exec -u pr-daemon pr-daemon <command>";
 
 export function openDb(path = join(WORK_HOME, "pr-daemon.db")): DatabaseSync {
   mkdirSync(WORK_HOME, { recursive: true });
@@ -87,12 +100,15 @@ export function openDb(path = join(WORK_HOME, "pr-daemon.db")): DatabaseSync {
   // commit is lost (this ate three job rows before anyone noticed, and only a
   // `(deleted)` line in /proc/<pid>/fd said so). A read-only connection does
   // none of that, so outside the container that is all anyone gets.
-  const guarded = !inContainer() && existsSync(IN_USE);
-  const db = new DatabaseSync(path, guarded ? { readOnly: true } : {});
+  // Read-only means no schema or migrations either, so this is only for
+  // callers that just read (doctor); serve refuses outright (dbInUseByContainer).
+  const guarded = dbInUseByContainer();
   if (guarded) {
-    log(`pr-daemon is running in a container, so ${path} is open read-only: the host and the container don't share file locks, and a second writer would throw the daemon's writes away. Run this inside it instead: docker compose -f docker/compose.yaml exec -u pr-daemon pr-daemon <command>`);
-    return db;
+    if (!existsSync(path)) throw new Error(`pr-daemon is running in a container and ${path} doesn't exist yet. Run this inside it instead: ${CONTAINER_HINT}`);
+    log(`pr-daemon is running in a container, so ${path} is open read-only: the host and the container don't share file locks, and a second writer would throw the daemon's writes away. Run this inside it instead: ${CONTAINER_HINT}`);
+    return new DatabaseSync(path, { readOnly: true });
   }
+  const db = new DatabaseSync(path);
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
