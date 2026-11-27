@@ -382,7 +382,9 @@ name = "your-org/website"</pre>`);
   renderStacks();
 
   const P = S.paths ?? {};
-  $("paths").innerHTML = `<pre style="margin:0;overflow-x:auto">${[
+  // In a container these are three mounts, and which to back up is the whole point.
+  const C = S.container;
+  $("paths").innerHTML = `${C ? `<div class="small" style="margin-bottom:6px">in a container \u00b7 back up <code>${esc(C.config)}</code> and <code>${esc(C.credentials)}</code> (read-only in here) \u00b7 <code>${esc(C.work)}</code> is rebuildable, don't back it up</div>` : ""}<pre style="margin:0;overflow-x:auto">${[
     [P.config, "settings: what this page's Config tab edits"],
     [`${P.repos}/<org>__<repo>`, "the cached clone of each repo, fetched once and reused"],
     [`${P.worktrees}/<org>__<repo>/<branch>`, "the checkout the agent works in; your up/down/check commands run here"],

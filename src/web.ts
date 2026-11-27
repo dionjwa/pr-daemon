@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_TOML } from "./config.ts";
 import type { Daemon } from "./daemon.ts";
+import { inContainer } from "./util.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE = join(HERE, "ui.html");
@@ -80,5 +81,11 @@ export function serve(d: Daemon): void {
       send(res, 500, { error: (e as Error).message });
     }
   });
-  server.listen(d.cfg.port, "127.0.0.1", () => d.store.event(`status page: http://localhost:${d.cfg.port}`));
+  // Loopback on a host install. In a container loopback is the container's
+  // own, which Docker's published port can't reach (it dials the container's
+  // address), so bind every interface there — the port is still published to
+  // the host's 127.0.0.1 only, the container sits on one internal network, and
+  // the Host check above still refuses anything but a local name.
+  const bind = inContainer() ? "0.0.0.0" : "127.0.0.1";
+  server.listen(d.cfg.port, bind, () => d.store.event(`status page: http://localhost:${d.cfg.port}`));
 }

@@ -3,14 +3,14 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { claudeEnv } from "./agent.ts";
-import { HOME } from "./config.ts";
+import { WORK_HOME } from "./config.ts";
 import { must, run, sleep, slugify } from "./util.ts";
 
 const key = (repo: string) => repo.replace("/", "__");
-export const repoDir = (repo: string) => join(HOME, "repos", key(repo));
-export const worktreeRoot = (repo: string) => join(HOME, "worktrees", key(repo));
-export const outDir = (repo: string, branch: string) => join(HOME, "out", key(repo), branch);
-export const refsDir = (repo: string, branch: string) => join(HOME, "refs", key(repo), branch);
+export const repoDir = (repo: string) => join(WORK_HOME, "repos", key(repo));
+export const worktreeRoot = (repo: string) => join(WORK_HOME, "worktrees", key(repo));
+export const outDir = (repo: string, branch: string) => join(WORK_HOME, "out", key(repo), branch);
+export const refsDir = (repo: string, branch: string) => join(WORK_HOME, "refs", key(repo), branch);
 
 // Every worktree shares the clone's .git (config, refs), and jobs on different
 // branches of one repo run at once, so git's lock files can collide: two merge
@@ -37,7 +37,7 @@ export function ensureClone(repo: string): Promise<string> {
 async function syncClone(repo: string): Promise<string> {
   const dir = repoDir(repo);
   if (!existsSync(join(dir, ".git"))) {
-    mkdirSync(join(HOME, "repos"), { recursive: true });
+    mkdirSync(join(WORK_HOME, "repos"), { recursive: true });
     await must("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
       "clone", "-q", `https://github.com/${repo}.git`, dir]);
   }
@@ -157,11 +157,11 @@ export const topLevel = (dir: string) => git(dir, "rev-parse", "--show-toplevel"
 /**
  * Where a worktree's references live: the path mapping `pr-daemon ref` uses,
  * so it needs no configuration and no database. A worktree is
- * `<HOME>/worktrees/<org>__<repo>/<branch>`; its references sit under
- * `<HOME>/refs/` at the same place, i.e. refsDir() for that repo and branch.
+ * `<work>/worktrees/<org>__<repo>/<branch>`; its references sit under
+ * `<work>/refs/` at the same place, i.e. refsDir() for that repo and branch.
  * "" for a directory that isn't one of pr-daemon's worktrees. Pure.
  */
-export function refsFor(worktree: string, home = HOME): string {
+export function refsFor(worktree: string, home = WORK_HOME): string {
   const root = resolve(home, "worktrees") + sep;
   const abs = resolve(worktree) + sep;
   if (!abs.startsWith(root)) return "";
@@ -205,6 +205,24 @@ export async function commitLeftovers(wt: string): Promise<string[]> {
   const staged = await run("git", ["-C", wt, "diff", "--cached", "--quiet"]);
   if (staged.code !== 0) await git(wt, "commit", "-q", "-m", "pr-daemon: uncommitted agent changes");
   return (await git(wt, "ls-files", "--others", "--exclude-standard")).split("\n").filter(Boolean);
+}
+
+/**
+ * Give git an identity if this machine has none. A fresh container has no
+ * ~/.gitconfig, and git refuses to commit without one ("Please tell me who you
+ * are") — which would fail every build at the last step. pr-daemon acts as the
+ * gh user, so that login's noreply address is the honest answer. Anything
+ * already configured (PR_DAEMON_GIT_NAME, or your own ~/.gitconfig on a host
+ * install) is left alone.
+ */
+export async function ensureIdentity(login: string): Promise<string> {
+  if (!login) return "";
+  const have = await run("git", ["config", "--global", "--get", "user.email"]);
+  if (have.stdout.trim()) return "";
+  const email = `${login}@users.noreply.github.com`;
+  await run("git", ["config", "--global", "user.name", login]);
+  await run("git", ["config", "--global", "user.email", email]);
+  return email;
 }
 
 /** The commit a worktree is on, to tell "the agent committed something" from "it didn't". */
@@ -415,7 +433,7 @@ export async function removeWorktree(repo: string, wt: string, branch: string): 
 // orphan branch and linked. In a private repo they render for anyone who can see the PR.
 export async function uploadScreenshots(repo: string, branch: string, files: string[], assetsBranch = "pr-daemon-assets"): Promise<string> {
   if (!files.length) return "";
-  const dir = join(HOME, "assets", key(repo));
+  const dir = join(WORK_HOME, "assets", key(repo));
   if (!existsSync(join(dir, ".git"))) {
     mkdirSync(dir, { recursive: true });
     await git(dir, "init", "-q");

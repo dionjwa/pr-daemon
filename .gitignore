@@ -1,4 +1,9 @@
 .DS_Store
 node_modules
-.pr-daemon
+docker/.env
 
+# pr-daemon's own state, kept here rather than in $HOME so it syncs with the repo:
+#   .pr-daemon/config       config.toml                      (sync this)
+#   .pr-daemon/credentials  the tokens and each repo's secrets (sync this, it is every login)
+#   .pr-daemon/work         clones, worktrees, logs, the db   (do NOT sync: gigabytes, rebuildable)
+/.pr-daemon/

@@ -64,7 +64,7 @@ stacks, and serves a status and config page on localhost.
 - [x] TLS: Let's Encrypt per host (auto), Caddy's CA (internal, for testing), or plain http
 - [x] `pr-daemon-up` gets `PR_DAEMON_PUBLIC_URL` / `PR_DAEMON_PUBLIC_HOST`, plus a per-repo `proxy_host`
 - [x] Verified locally with `*.pr-daemon.localhost` in both modes: switching modes live, adopting a running Caddy after a restart, relaunching on port changes, stopping when the domain is unset
-- [ ] A real domain with ports 80/443 forwarded (yours to set up), so Let's Encrypt can issue certificates
+- [x] A real domain with ports 80/443 forwarded, Let's Encrypt issuing a wildcard through Cloudflare DNS-01 — in the container too: its own Caddy obtained `*.<domain>` and serves every preview
 - [ ] framejs.app: use `PR_DAEMON_PUBLIC_URL` for its origins. Its browser code also calls nhost services on their own `*.local.nhost.run` hosts, and those need public routes too
 
 ### Phase 3: polish
@@ -74,6 +74,24 @@ stacks, and serves a status and config page on localhost.
 - [ ] Verify `[merge]` end to end on a real conflicting PR (and the `update-branch` fallback when the base changed workflows)
 - [x] Preview health that tells "the app is running" from "a person can open it": two probes, up / degraded / down, with the fix named on the row
 - [x] Status page: stacks first, each row expands to every address; TOML colouring and an "All options" tab in Config
+- [x] Run it in a container: three mounts (config and credentials, backed up;
+  the work disk, not), the Docker socket, and nothing else of the host
+  (`docker/`, `docs/container.md`). Every credential's scope is written down
+  (`docs/credentials.md`).
+- [x] A container run on the owner's own machine and repos: the three mounts,
+  the work disk moved beside the checkout, Caddy in Docker mode with a real
+  wildcard certificate, public preview URLs reachable from inside, the GitHub
+  poll pulling a push into a worktree, four merges pushed and a `ci` agent that
+  fixed a red check and pushed it — committing as the user, which needed the
+  git-identity fix. Four bugs came out of it (see CLAUDE.md's gotchas): no gh
+  login in a container, `doctor` calling `dig`, the database opened from the
+  host, and `install-service` dropping the three roots.
+- [ ] Still unverified in a container: a **build** from a labelled issue (the
+  one job kind nothing has exercised in there), and a preview stack for a repo
+  whose `up` is not Docker — `metapages/public-compute-grid` starts a plain dev
+  server, which comes up *inside* the container and is unreachable from the
+  host unless its ports are published (docs/container.md, "If your stack isn't
+  Docker").
 - Spend per PR in the description, per-repo budgets.
 - Optional access control on previews (basic auth or a shared secret), and a wildcard certificate via a DNS challenge.
 - A form view of the config next to the raw TOML.

@@ -1,0 +1,10 @@
+# What the image never needs (and must not pick up from a developer's checkout).
+node_modules
+.git
+# The daemon's own state lives here now: gigabytes, and the image must not see it.
+.pr-daemon
+.github
+docker/.env
+journal.md
+PLAN.md
+**/.DS_Store

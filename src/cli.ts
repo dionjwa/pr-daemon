@@ -1,9 +1,10 @@
 // pr-daemon command line.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { resolve4, resolveCname } from "node:dns/promises";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_PATH, HOME, loadConfig } from "./config.ts";
+import { CONFIG_PATH, WORK_HOME, loadConfig } from "./config.ts";
 import { CLAUDE_TOKEN_ENV, CLAUDE_TOKEN_FILE, claudeAuth, claudeEnv } from "./agent.ts";
 import { Daemon, EXIT_DEADLINE_MS } from "./daemon.ts";
 import * as gh from "./gh.ts";
@@ -12,7 +13,7 @@ import { caddyHasDns, CADDY_LOG, CHECK_BODY, CHECK_LABEL, CHECK_PATH, DNS_MODULE
 import { openDb, Store, type JobKind } from "./db.ts";
 import { setupDoc } from "./setup.ts";
 import { stackState } from "./stack.ts";
-import { asOwner, GH_TOKENS_DIR, ghAuth, loginName, run } from "./util.ts";
+import { asOwner, CONFIG_HOME, CREDENTIALS_HOME, GH_TOKENS_DIR, ghAuth, HOME, inContainer, loginName, LOCAL_HOST, run } from "./util.ts";
 import { serve } from "./web.ts";
 
 const HELP = `pr-daemon — label an issue, get a pull request.
@@ -78,7 +79,7 @@ async function main(argv: string[]): Promise<void> {
       if (!name || !/^[\w.-]+\/[\w.-]+$/.test(name)) throw new Error('usage: pr-daemon ref <owner/repo> [branch]   (from inside the worktree you are working in)');
       const top = await git.topLevel(process.cwd()).catch(() => "");
       const refs = top && git.refsFor(top);
-      if (!refs) throw new Error(`run this from inside a pr-daemon worktree (one of ${join(HOME, "worktrees")}/*/*), not ${top || process.cwd()}`);
+      if (!refs) throw new Error(`run this from inside a pr-daemon worktree (one of ${join(WORK_HOME, "worktrees")}/*/*), not ${top || process.cwd()}`);
       console.log(await git.addReference(refs, name, branch ?? ""));
       return;
     }
@@ -174,9 +175,22 @@ async function doctor(): Promise<void> {
   // gh < 2.73 asks for the sunset Projects (classic) fields on `gh pr edit` and fails (cli/cli#10942).
   const ghv = /gh version (\d+)\.(\d+)/.exec((await run("gh", ["--version"])).stdout);
   ok(!!ghv && (+ghv[1] > 2 || (+ghv[1] === 2 && +ghv[2] >= 73)), `gh ≥ 2.73 (have ${ghv ? `${ghv[1]}.${ghv[2]}` : "none"})`, "brew upgrade gh");
-  const auth = await run("gh", ["auth", "status"]);
-  const login = auth.code === 0 ? (await run("gh", ["api", "user", "--jq", ".login"])).stdout.trim() : "";
-  ok(auth.code === 0, `gh is logged in${login ? ` as @${login}: pr-daemon pushes, opens PRs and comments as this user` : ""}`, "gh auth login");
+  // What pr-daemon itself would use, not `gh auth status`: in a container gh has no
+  // login of its own and every call goes through a token file (ghAuth / asOwner).
+  const who = await run("gh", ["api", "user", "--jq", ".login"]);
+  const login = who.code === 0 ? who.stdout.trim() : "";
+  ok(!!login, `gh is logged in${login ? ` as @${login}, through ${loginName(ghAuth())}: pr-daemon pushes, opens PRs and comments as this user` : ""}`,
+    inContainer()
+      ? `no GitHub login this container can use, so pr-daemon doesn't know who it acts as and git has no identity to commit with.
+      There is no \`gh auth login\` in here: the credentials mount is read-only and nothing can open a browser. Write the token
+      on the HOST instead, into the directory docker/.env gives as PR_DAEMON_CREDENTIALS_DIR:
+
+        printf %s '<the token>' > "$PR_DAEMON_CREDENTIALS_DIR/gh-tokens/<owner>"   # one per repo owner
+        chmod 600 "$PR_DAEMON_CREDENTIALS_DIR/gh-tokens/<owner>"
+
+      (or gh-token in that directory, for owners with no file of their own). Then: just container-restart
+      The scopes each one needs are in docs/credentials.md.`
+      : "gh auth login");
   // The same login the agents get. Claude's own (the Keychain on macOS) can differ
   // between this shell and the service: an SSH session can't read the Keychain.
   const ca = claudeAuth();
@@ -186,14 +200,24 @@ async function doctor(): Promise<void> {
     → for a login the service can always use: claude setup-token, then put the token in ${CLAUDE_TOKEN_FILE} (chmod 600)`);
   if (ca.loose) ok(false, `${CLAUDE_TOKEN_FILE} is private`, `chmod 600 ${CLAUDE_TOKEN_FILE}`);
   // Desktop notices: osascript works without it, but shows as "Script Editor", can't open the PR, and is often dropped under launchd.
-  if (process.platform === "darwin") ok((await run("which", ["terminal-notifier"])).code === 0, "terminal-notifier installed (desktop notices you can click)", "brew install terminal-notifier, then allow it in System Settings → Notifications");
-  else if (process.platform === "linux") ok((await run("which", ["notify-send"])).code === 0, "notify-send installed (desktop notices)", "install libnotify (notify-send)");
+  if (inContainer()) console.log(`· in a container: desktop notices can't leave it, so "Needs you" on the status page (and its browser notifications) is where they appear`);
+  else if (process.platform === "darwin") ok((await run("which", ["terminal-notifier"])).code === 0, "terminal-notifier installed (desktop notices you can click)", "brew install terminal-notifier, then allow it in System Settings → Notifications");
+  else if (process.platform === "linux" && !inContainer()) ok((await run("which", ["notify-send"])).code === 0, "notify-send installed (desktop notices)", "install libnotify (notify-send)");
   const docker = await run("docker", ["info"], { timeoutMs: 20_000 });
   ok(docker.code === 0, "docker is running", "start Docker Desktop");
   if (docker.code === 0) await dockerNetworks(ok);
+  if (inContainer()) await containerChecks(ok, docker.code === 0);
   try {
     const cfg = loadConfig();
     ok(true, `config is valid (${CONFIG_PATH})`);
+    // Two places name the page's port in a container, and they have to agree:
+    // compose publishes PR_DAEMON_PORT, the page listens on config.toml's.
+    const published = Number(process.env.PR_DAEMON_PORT ?? 0);
+    if (inContainer() && published) {
+      ok(published === cfg.port, `the published port is the one the page listens on (${cfg.port})`,
+        `docker/.env publishes ${published}, ${CONFIG_PATH} says port = ${cfg.port}, so nothing answers on either.
+      Make them the same, then: just container-up`);
+    }
     ok(cfg.repos.length > 0, cfg.repos.length ? `${cfg.repos.length} repo(s) configured: ${cfg.repos.map((r) => r.name).join(", ")}` : "no repositories configured yet",
       `add one block per repo to ${CONFIG_PATH} (the double brackets make it a list):\n\n      [[repos]]\n      name = "your-org/your-repo"\n`);
     if (!cfg.allowedUsers.length) console.log(`· allowed_users is empty, so only the gh user may direct agents. To keep it that way if the login ever changes:
@@ -219,14 +243,34 @@ async function doctor(): Promise<void> {
       const hasCaddy = (await run("which", ["caddy"])).code === 0;
       const usable = p.proxy === "binary" ? hasCaddy : p.proxy === "docker" ? docker.code === 0 : hasCaddy || docker.code === 0;
       ok(usable, `preview proxy for *.${p.domain} (${p.proxy}${p.proxy === "auto" ? `: ${hasCaddy ? "caddy binary" : "docker"}` : ""})`,
-        "brew install caddy, or start Docker");
+        inContainer()
+          ? `in a container the proxy has to be Docker — it binds the host's ports ${p.httpPort} and ${p.httpsPort}, which this container doesn't have.\n      In ${CONFIG_PATH}, under [preview]: proxy = "docker"`
+          : "brew install caddy, or start Docker");
       if (p.dns) await wildcardChecks(ok, p.domain, p.dns, p.proxy === "docker" || (p.proxy === "auto" && !hasCaddy));
+      // curl and Chrome resolve *.localhost themselves, so a .localhost preview
+      // domain is unreachable from inside the container whatever /etc/hosts says.
+      if (inContainer() && /(^|\.)localhost$/.test(p.domain)) {
+        ok(false, `the preview domain is one agents in here can resolve`,
+          `curl and Chrome map every *.localhost name to loopback themselves (RFC 6761) and ignore /etc/hosts, so an agent
+      in this container opening https://<branch>.${p.domain} reaches the container, not Caddy. Your own browser is fine;
+      the agents, Playwright and the screenshots are not. Use any other name — a made-up one is enough, pr-daemon writes
+      the /etc/hosts entries inside the container itself:
+
+        in ${CONFIG_PATH}, under [preview]: domain = "previews.test"
+
+      To open previews in your own browser too, add one line per host to the machine's /etc/hosts:
+
+        sudo sh -c 'echo "127.0.0.1 pr-daemon.previews.test" >> /etc/hosts'
+
+      (or keep a real domain, which needs nothing extra.) Leaving it as it is costs you the agents' screenshots.`);
+      }
       const example = `${cfg.repos[0] ? "42-example" : "x"}.${p.domain}`;
-      // +short prints any CNAME chain first; only an address at the end means it resolves
-      // (a CNAME to a dead name, e.g. "home." instead of "home.example.com.", prints just the name).
-      const answers = (await run("dig", ["+short", example])).stdout.trim().split("\n").filter(Boolean);
-      const ip = answers.find((a) => /^[\d.]+$|:/.test(a));
-      ok(!!ip || /\.localhost$/.test(p.domain), `DNS: ${example} resolves${ip ? ` (${ip})` : answers.length ? ` (no: ${answers.join(" → ")} has no address)` : ""}`,
+      // Node's resolver, not `dig`: the container has no dig, and the question is the same.
+      // resolve4 follows any CNAME chain at the resolver, so only a missing address is a
+      // failure. The chain is then the diagnostic, because a CNAME to a dead name ("home."
+      // rather than "home.example.com.") resolves to nothing and says nothing about why.
+      const { ip, chain } = await resolves(example);
+      ok(!!ip || /\.localhost$/.test(p.domain), `DNS: ${example} resolves${ip ? ` (${ip})` : chain.length ? ` (no: ${[example, ...chain].join(" → ")} has no address)` : ""}`,
         `point *.${p.domain} at this machine (a wildcard A record, or a CNAME to its full name), and forward ports ${p.httpPort} and ${p.httpsPort} to it`);
       // The proxy's own page: DNS, port forward, Caddy and TLS together, no preview stack involved.
       const url = `${publicUrl(cfg, CHECK_LABEL)}${CHECK_PATH}`;
@@ -255,6 +299,75 @@ async function doctor(): Promise<void> {
     }
   } catch { /* no database yet: nothing has run */ }
   process.exit(bad ? 1 : 0);
+}
+
+/**
+ * The container's own setup, which has failure modes a host install can't have.
+ * The one that matters most is the work disk's path: a preview stack's
+ * `docker compose` runs against the host's Docker and bind-mounts its worktree
+ * by host path, so if the work mount isn't at the same path on both sides the
+ * stack comes up with empty mounts and nothing says why. That is checked for
+ * real, by having the host's Docker show us the directory from a sibling
+ * container.
+ */
+/**
+ * The address `name` resolves to, and — when nothing does — the CNAME chain it
+ * ends in, which is what tells the owner where to look.
+ */
+async function resolves(name: string): Promise<{ ip: string; chain: string[] }> {
+  const first = async (f: (n: string) => Promise<string[]>, n: string): Promise<string> =>
+    await f(n).then((a) => a[0] ?? "", () => "");
+  const ip = await first(resolve4, name);
+  if (ip) return { ip, chain: [] };
+  const chain: string[] = [];
+  for (let n = name; chain.length < 4;) {
+    const next = await first(resolveCname, n);
+    if (!next) break;
+    chain.push(next);
+    n = next;
+  }
+  return { ip: "", chain };
+}
+
+async function containerChecks(ok: (good: boolean, what: string, fix?: string) => void, docker: boolean): Promise<void> {
+  console.log(`· running in a container (the host is reached as ${LOCAL_HOST || "nothing: set PR_DAEMON_LOCAL_HOST=host.docker.internal"})`);
+  console.log(`    config      ${CONFIG_HOME}`);
+  console.log(`    credentials ${CREDENTIALS_HOME}`);
+  console.log(`    work        ${WORK_HOME}`);
+  for (const [what, dir] of [["config", CONFIG_HOME], ["work", WORK_HOME]] as const) {
+    const probe = join(dir, `.pr-daemon-write-test-${process.pid}`);
+    let wrote = false;
+    try { writeFileSync(probe, "x"); wrote = true; rmSync(probe); } catch { /* reported below */ }
+    ok(wrote, `the ${what} mount is writable (${dir})`, "mount it read-write in docker/compose.yaml");
+  }
+  // The credentials mount is meant to be read-only: nothing that runs in this
+  // container should be able to add or alter a login.
+  const credProbe = join(CREDENTIALS_HOME, `.pr-daemon-write-test-${process.pid}`);
+  let credWritable = false;
+  try { writeFileSync(credProbe, "x"); credWritable = true; rmSync(credProbe); } catch { /* as intended */ }
+  if (credWritable) console.log(`· the credentials mount is writable. Adding ":ro" to it in docker/compose.yaml means nothing in here can alter a login.`);
+  else ok(true, `the credentials mount is read-only (${CREDENTIALS_HOME})`);
+
+  const host = process.env.PR_DAEMON_WORK_HOST ?? "";
+  if (host) {
+    ok(host === WORK_HOME, `the work disk is at the same path on the host (${host})`,
+      `it is ${host} outside and ${WORK_HOME} in here. Mount it as "${host}:${host}" so a preview stack's bind mounts point at the right place.`);
+  }
+  if (!docker) return;
+  // Ask the host's Docker to read, through that same path, a file we just wrote.
+  const marker = `${Date.now()}-${process.pid}`;
+  const file = ".pr-daemon-work-marker";
+  try {
+    writeFileSync(join(WORK_HOME, file), marker);
+    const self = (await run("docker", ["inspect", "-f", "{{.Config.Image}}", hostname()], { timeoutMs: 20_000 })).stdout.trim();
+    if (!self) { console.log("· couldn't find this container's own image, so the work path wasn't verified through the host's Docker"); return; }
+    const r = await run("docker", ["run", "--rm", "-v", `${WORK_HOME}:/probe:ro`, "--entrypoint", "cat", self, `/probe/${file}`], { timeoutMs: 60_000 });
+    ok(r.stdout.trim() === marker, `the host's Docker sees the work disk at ${WORK_HOME}, so a preview stack can bind-mount its worktree`,
+      `a sibling container mounting ${WORK_HOME} got ${r.stdout.trim() ? "different content" : (r.stderr.trim().slice(-200) || "nothing")}.
+      Preview stacks would come up with empty mounts. Mount the work disk at the same path inside and outside (docker/compose.yaml).`);
+  } catch (e) {
+    console.log(`· couldn't verify the work path through the host's Docker: ${(e as Error).message}`);
+  }
 }
 
 /** preview.dns: the token works and sees the zone, and Caddy can use it. */
@@ -321,9 +434,23 @@ const unitPath = join(homedir(), ".config", "systemd", "user", `${LABEL}.service
 const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 async function installService(): Promise<void> {
-  mkdirSync(HOME, { recursive: true });
+  if (inContainer()) {
+    throw new Error(`this is the container: there is no launchd or systemd in here to install into.
+  Restarting at boot is the compose restart policy, which docker/compose.yaml already sets:
+      just container-up        # start it, and again whenever Docker starts
+      just container-down      # stop it
+  To have Docker itself start at login, enable that in Docker Desktop (or: systemctl enable docker).`);
+  }
+  mkdirSync(WORK_HOME, { recursive: true });
   const args = [process.execPath, "--no-warnings=ExperimentalWarning", join(SRC, "cli.ts"), "serve"];
-  const logFile = join(HOME, "pr-daemon.log");
+  const logFile = join(WORK_HOME, "pr-daemon.log");
+  // Carry the roots into the service when they aren't the one default directory —
+  // a host install that uses the container's three directories (going back to
+  // launchd for a while, say) has to find them again, and a service that quietly
+  // started on an empty state instead would look like it had lost everything.
+  const roots = Object.entries({
+    PR_DAEMON_CONFIG_HOME: CONFIG_HOME, PR_DAEMON_CREDENTIALS_HOME: CREDENTIALS_HOME, PR_DAEMON_WORK_HOME: WORK_HOME,
+  }).filter(([, v]) => v !== HOME);
   if (process.platform === "darwin") {
     // AbandonProcessGroup: preview stacks started by pr-daemon survive it restarting.
     writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
@@ -333,7 +460,8 @@ async function installService(): Promise<void> {
   <key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join("")}</array>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>${xml(process.env.PATH ?? "")}</string>
-    <key>HOME</key><string>${xml(homedir())}</string>
+    <key>HOME</key><string>${xml(homedir())}</string>${roots.map(([k, v]) => `
+    <key>${k}</key><string>${xml(v)}</string>`).join("")}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -350,7 +478,7 @@ async function installService(): Promise<void> {
     console.log(`Installed and started. Logs: ${logFile}\nStatus page: http://localhost:${loadConfig().port}`);
   } else {
     mkdirSync(dirname(unitPath), { recursive: true });
-    writeFileSync(unitPath, `[Unit]\nDescription=pr-daemon\n\n[Service]\nExecStart=${args.join(" ")}\nEnvironment=PATH=${process.env.PATH}\nRestart=always\nKillMode=process\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`);
+    writeFileSync(unitPath, `[Unit]\nDescription=pr-daemon\n\n[Service]\nExecStart=${args.join(" ")}\nEnvironment=PATH=${process.env.PATH}\n${roots.map(([k, v]) => `Environment=${k}=${v}\n`).join("")}Restart=always\nKillMode=process\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`);
     await run("systemctl", ["--user", "daemon-reload"]);
     const r = await run("systemctl", ["--user", "enable", "--now", LABEL]);
     if (r.code !== 0) throw new Error(`systemctl failed: ${r.stderr}`);

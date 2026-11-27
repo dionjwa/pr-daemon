@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { asOwner, ghTokenFile, parseAmount, parseDuration, formatAmount, run, sleep } from "./util.ts";
+import { asOwner, ghTokenFile, parseAmount, parseDuration, formatAmount, run, sleep, viaHost } from "./util.ts";
 import { DEFAULT_TOML, HOME, NOTICE_KINDS, parseConfig, secretsFor, setTopLevel } from "./config.ts";
 import { buildDiscussion, issueForPr, refsNote, render, restart, reviewWantsRevise, workflowsNote, type Ctx } from "./pipeline.ts";
 import { AGENT_KINDS, openDb, PRIORITY, Store } from "./db.ts";
@@ -13,6 +13,7 @@ import { MAX_RESULT, parseTranscript } from "./transcript.ts";
 import { agentPids } from "./agent.ts";
 import * as stack from "./stack.ts";
 import { refsFor } from "./git.ts";
+import { hostsBlock, stackNames } from "./hosts.ts";
 
 test("human amounts", () => {
   assert.equal(parseAmount("40M"), 40_000_000);
@@ -109,7 +110,7 @@ test("budget window, per-issue cap, and when it frees up", () => {
   assert.equal(!g2.ok && g2.needsHuman, false);
 });
 
-import { caddyConfig, CADDY_LOG, CHECK_BODY, CHECK_PATH, hostLabel, publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
+import { adminAddress, caddyConfig, CADDY_LOG, CHECK_BODY, CHECK_PATH, hostLabel, publicEnv, publicUrl, serviceUrl } from "./proxy.ts";
 import { parseUp, poolHint, stackState } from "./stack.ts";
 import { stackWhere, withNetworks } from "./pipeline.ts";
 import type { Stack } from "./db.ts";
@@ -518,10 +519,14 @@ test("run() timeout kills a detached command's whole group", async () => {
 
 test("a repo's dev secrets are one file per repo, shared by its branches", () => {
   const home = "/home/u/.pr-daemon";
-  assert.equal(secretsFor(`${home}/worktrees/org__repo/42-thing`, home), `${home}/secrets/org__repo.env`);
-  assert.equal(secretsFor(`${home}/worktrees/org__repo/feat/nested/sub`, home), `${home}/secrets/org__repo.env`);
-  assert.equal(secretsFor("/tmp/somewhere-else", home), "");
-  assert.equal(secretsFor(`${home}/worktrees`, home), "");
+  assert.equal(secretsFor(`${home}/worktrees/org__repo/42-thing`, home, home), `${home}/secrets/org__repo.env`);
+  assert.equal(secretsFor(`${home}/worktrees/org__repo/feat/nested/sub`, home, home), `${home}/secrets/org__repo.env`);
+  assert.equal(secretsFor("/tmp/somewhere-else", home, home), "");
+  assert.equal(secretsFor(`${home}/worktrees`, home, home), "");
+  // In a container the worktrees are on the work disk and the secrets are on
+  // the read-only credentials mount, so the two roots are not the same place.
+  assert.equal(secretsFor("/work/worktrees/org__repo/42-thing", "/work", "/creds"), "/creds/secrets/org__repo.env");
+  assert.equal(secretsFor("/creds/worktrees/org__repo/42-thing", "/work", "/creds"), "");
 });
 
 test("a reference repo's clone lands outside the worktree", () => {
@@ -579,12 +584,33 @@ test("GitHub tokens: one file per owner, any case, else gh-token; asOwner carrie
   const home = mkdtempSync(join(tmpdir(), "prd-gh-"));
   mkdirSync(join(home, "gh-tokens"));
   writeFileSync(join(home, "gh-tokens", "MetaPages"), "github_pat_org\n");
+  // gh has a login of its own, so a call with no token file of its own falls back to it.
+  const ghConfig = mkdtempSync(join(tmpdir(), "prd-ghcfg-"));
+  writeFileSync(join(ghConfig, "hosts.yml"), "github.com:\n");
+  process.env.GH_CONFIG_DIR = ghConfig;
   assert.equal(ghTokenFile("metapages", home), join(home, "gh-tokens", "MetaPages"));
   assert.equal(ghTokenFile("someone", home), join(home, "gh-token"), "no file for that owner: the default");
   assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"), "no owner: the default");
   const seen = await asOwner("metapages/framejs.app", async () => { await sleep(5); return ghTokenFile(undefined, home); });
   assert.equal(seen, join(home, "gh-tokens", "MetaPages"));
   assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"), "and only inside it");
+  delete process.env.GH_CONFIG_DIR;
+});
+
+test("in a container there is no gh login to fall back on, so an ownerless call borrows a token", () => {
+  const home = mkdtempSync(join(tmpdir(), "prd-ghc-"));
+  mkdirSync(join(home, "gh-tokens"));
+  writeFileSync(join(home, "gh-tokens", "metapages"), "github_pat_org\n");
+  writeFileSync(join(home, "gh-tokens", "dionjwa"), "github_pat_me\n");
+  process.env.GH_CONFIG_DIR = mkdtempSync(join(tmpdir(), "prd-nogh-"));   // no hosts.yml: gh has no login
+  // Who pr-daemon acts as is asked with no owner at all. With no gh-token file that
+  // question had no answer in a container, which left git without an identity too.
+  assert.equal(ghTokenFile(undefined, home), join(home, "gh-tokens", "dionjwa"), "any of them: they are the same user");
+  assert.equal(ghTokenFile("metapages", home), join(home, "gh-tokens", "metapages"), "an owner with a file still gets its own");
+  // And an explicit fallback file always wins over borrowing one.
+  writeFileSync(join(home, "gh-token"), "github_pat_default\n");
+  assert.equal(ghTokenFile(undefined, home), join(home, "gh-token"));
+  delete process.env.GH_CONFIG_DIR;
 });
 
 test("a review gets the automatic revise round when it blocks or lists follow-ups to just do", () => {
@@ -617,4 +643,82 @@ test("portClashes: two running stacks on one port are flagged, stopped ones and 
   assert.match(msg, /same ports \(13791, 11791\) as 260-a/);
   assert.match(msg, /Tear down on 260-a/);
   assert.match(msg, /lsof -nP -iTCP:13791 -sTCP:LISTEN/);
+});
+
+// ---------------------------------------------------------------- in a container
+// The container's whole networking problem in three pure functions: inside it,
+// "localhost" is not where the preview stacks are.
+
+test("viaHost rewrites only the container's own localhost", () => {
+  // The stack's ports are published on the host, so an agent in here needs its address.
+  assert.equal(viaHost("http://localhost:5173", "host.docker.internal"), "http://host.docker.internal:5173");
+  assert.equal(viaHost("http://127.0.0.1:8080/app", "host.docker.internal"), "http://host.docker.internal:8080/app");
+  assert.equal(viaHost("https://127.0.0.1:443", "host.docker.internal"), "https://host.docker.internal");   // a default port is dropped
+  // A name is left alone: rewriting it would change the Host the app is routed by.
+  assert.equal(viaHost("http://app.localhost:1234", "host.docker.internal"), "http://app.localhost:1234");
+  assert.equal(viaHost("https://42-x.example.com", "host.docker.internal"), "https://42-x.example.com");
+  // No container, nothing to rewrite.
+  assert.equal(viaHost("http://localhost:5173", ""), "http://localhost:5173");
+  assert.equal(viaHost("not a url", "host.docker.internal"), "not a url");
+  assert.equal(viaHost("", "host.docker.internal"), "");
+});
+
+test("the container's /etc/hosts block is rebuilt from the stacks, and leaves the rest alone", () => {
+  const cfg = parseConfig(`[preview]\ndomain = "previews.example.com"\n`);
+  const stacks = [
+    { repo: "org/repo", branch: "42-thing", url: "http://localhost:5173",
+      routes: JSON.stringify({ auth: "https://local.auth.local.nhost.run:1337" }), stopped_at: null },
+    // Torn down: no route, so no name.
+    { repo: "org/repo", branch: "9-old", url: "http://localhost:5174", routes: null, stopped_at: 1 },
+  ] as any;
+  const names = stackNames(cfg, stacks);
+  // "localhost" itself is never redirected: it is where the status page listens.
+  assert.ok(!names.includes("localhost"));
+  assert.deepEqual(names, ["42-thing--auth.previews.example.com", "42-thing.previews.example.com",
+    "local.auth.local.nhost.run", "pr-daemon.previews.example.com"]);
+  assert.ok(!names.some((n) => n.startsWith("9-old")));
+
+  const before = "127.0.0.1 localhost\n::1 localhost ip6-localhost\n";
+  const after = hostsBlock(before, names, "192.168.65.254");
+  assert.match(after, /^127\.0\.0\.1 localhost/);
+  assert.match(after, /192\.168\.65\.254 42-thing\.previews\.example\.com/);
+  // Rebuilding replaces the block instead of stacking another one on top.
+  const again = hostsBlock(after, ["one.example.com"], "192.168.65.254");
+  assert.equal((again.match(/pr-daemon previews/g) ?? []).length, 2);   // the begin and end markers, once
+  assert.doesNotMatch(again, /42-thing/);
+  // Nothing running: the file goes back to how it arrived.
+  assert.equal(hostsBlock(again, [], "192.168.65.254").trimEnd(), before.trimEnd());
+  // No address found for the host gateway: no block either, rather than a broken one.
+  assert.equal(hostsBlock(before, names, ""), before.replace(/\n$/, "\n"));
+});
+
+test("Caddy's admin API is reached by container name when pr-daemon shares its network", () => {
+  // On a host it is the address Caddy listens on. In a container that address
+  // is Caddy's own loopback, not ours (and publishing it to 127.0.0.1 on a
+  // Linux host would not be reachable through host-gateway at all).
+  const cfg = parseConfig(`[preview]\nadmin = "127.0.0.1:2019"\n`);
+  assert.equal(adminAddress(cfg), "127.0.0.1:2019");
+});
+
+test("a name UNDER localhost is a host address, and the testing domain depends on it", () => {
+  // `[preview] domain = "pr-daemon.localhost"` is the documented way to try
+  // previews without a real domain, and `app.localhost` is how some stacks
+  // print their own address. Both are the host's, so both belong in the block.
+  const cfg = parseConfig(`[preview]\ndomain = "pr-daemon.localhost"\ntls = "internal"\nhttps_port = 8443\n`);
+  const stacks = [{ repo: "org/repo", branch: "4-x", url: "http://app.localhost:1234", routes: null, stopped_at: null }] as any;
+  assert.deepEqual(stackNames(cfg, stacks),
+    ["4-x.pr-daemon.localhost", "app.localhost", "pr-daemon.pr-daemon.localhost"]);
+});
+
+test("with no preview domain, a containerised agent is told both addresses", () => {
+  const cfg = parseConfig("");
+  const up = { ok: true as const, url: "http://localhost:5173", routes: {}, networks: [] };
+  // On a host there is one address and nothing to explain.
+  assert.equal(stackWhere(cfg, "4-x", up), "http://localhost:5173");
+  // In a container the agent can only reach the first and a person only the
+  // second, so the note says which goes in the PR.
+  const where = stackWhere(cfg, "4-x", up, "host.docker.internal");
+  assert.match(where, /^http:\/\/host\.docker\.internal:5173 — use that address yourself/);
+  assert.match(where, /a PERSON opens is http:\/\/localhost:5173/);
+  assert.match(where, /never host\.docker\.internal:5173/);
 });

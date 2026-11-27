@@ -1,10 +1,11 @@
 // Local state in SQLite (node:sqlite, built in; no native modules).
 // GitHub stays the source of truth for issues/PRs; this holds the queue,
 // token ledger, stacks, and an event log for the status page.
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { HOME, type NoticeKind } from "./config.ts";
+import { WORK_HOME, type NoticeKind } from "./config.ts";
+import { inContainer, log } from "./util.ts";
 
 export type JobKind = "build" | "adopt" | "review" | "revise" | "discuss" | "ci" | "merge" | "teardown" | "restart" | "pull";
 export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled" | "ignored";
@@ -70,9 +71,28 @@ export interface Stack {
 export const PRIORITY: Record<JobKind, number> = { teardown: 0, restart: 1, pull: 1, merge: 2, ci: 3, revise: 4, discuss: 4, review: 5, adopt: 6, build: 7 };
 export const AGENT_KINDS: JobKind[] = ["build", "adopt", "review", "revise", "discuss", "ci", "merge"];
 
-export function openDb(path = join(HOME, "pr-daemon.db")): DatabaseSync {
-  mkdirSync(HOME, { recursive: true });
-  const db = new DatabaseSync(path);
+/**
+ * Where a containerised daemon says so, for everything outside it (see openDb).
+ * It is written at startup and removed on shutdown; left behind by a crash, it
+ * costs a host command its write access and nothing else.
+ */
+export const IN_USE = join(WORK_HOME, ".daemon-in-a-container");
+
+export function openDb(path = join(WORK_HOME, "pr-daemon.db")): DatabaseSync {
+  mkdirSync(WORK_HOME, { recursive: true });
+  // A bind mount does NOT share file locks between the host and the container,
+  // so the two SQLite connections cannot see each other at all. The host's then
+  // finds a WAL nobody holds, recovers it, and on close CHECKPOINTS AND UNLINKS
+  // it — while the daemon keeps writing to that now-nameless inode, where every
+  // commit is lost (this ate three job rows before anyone noticed, and only a
+  // `(deleted)` line in /proc/<pid>/fd said so). A read-only connection does
+  // none of that, so outside the container that is all anyone gets.
+  const guarded = !inContainer() && existsSync(IN_USE);
+  const db = new DatabaseSync(path, guarded ? { readOnly: true } : {});
+  if (guarded) {
+    log(`pr-daemon is running in a container, so ${path} is open read-only: the host and the container don't share file locks, and a second writer would throw the daemon's writes away. Run this inside it instead: docker compose -f docker/compose.yaml exec -u pr-daemon pr-daemon <command>`);
+    return db;
+  }
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;

@@ -1,13 +1,15 @@
 // The single long-running process: polls GitHub, queues jobs, runs them under
 // the token budget, watches stacks, and serves the status page.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, readFileSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gate, issueUsed, windowState } from "./budget.ts";
 import { parseConfig, saveConfigText, setTopLevel, CONFIG_PATH, NOTICE_KINDS, readConfigText, type Config } from "./config.ts";
-import { AGENT_KINDS, openDb, Store, type Job, type JobKind, type Notice, type Stack } from "./db.ts";
+import { AGENT_KINDS, IN_USE, openDb, Store, type Job, type JobKind, type Notice, type Stack } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
+import { syncHosts } from "./hosts.ts";
 import { catchUpBlocker } from "./merge.ts";
 import { agentLog, CancelError, discussBranch, FailError, issueForPr, PauseError, JOBS, type Ctx } from "./pipeline.ts";
 import { Proxy, publicUrl, serviceUrl, stackRoutes, STOP_WAIT_MS } from "./proxy.ts";
@@ -15,7 +17,7 @@ import { paths, setupDoc } from "./setup.ts";
 import * as stack from "./stack.ts";
 import { agentPids } from "./agent.ts";
 import { parseTranscript, type Entry } from "./transcript.ts";
-import { asOwner, formatAmount, formatDuration, ghAuth, loginName, notifier, notify, unnotify } from "./util.ts";
+import { asOwner, CONFIG_HOME, CREDENTIALS_HOME, formatAmount, formatDuration, ghAuth, inContainer, loginName, notifier, notify, unnotify, WORK_HOME } from "./util.ts";
 
 const MAX_HOUSEKEEPING = 2;      // teardown/restart jobs at once (no agent, no tokens)
 /** The kinds the `agent` label itself starts, and that removing it cancels: one per issue (build) or PR (adopt). */
@@ -23,6 +25,8 @@ const TRIGGERED: JobKind[] = ["build", "adopt"];
 const COMMAND = "/pr-daemon";    // the PR comment prefix that asks for a revision
 /** Shutdown waits this long for running agents to exit (agent.ts SIGKILLs after 10s). */
 const AGENT_STOP_MS = 12_000;
+/** How often config.toml is re-read when its watch doesn't fire (a bind mount in a container). */
+const CONFIG_RECHECK_MS = 5000;
 /** Shutdown waits this long for Caddy to exit, then quits regardless. launchd's ExitTimeOut must be longer. */
 export const EXIT_DEADLINE_MS = STOP_WAIT_MS + 10_000;
 
@@ -109,10 +113,12 @@ export class Daemon {
     const n = this.store.recoverRunning();
     if (n) this.store.event(`${n} job(s) were running when pr-daemon stopped; re-queued to resume`);
     this.store.event(`pr-daemon started (config ${CONFIG_PATH}, ${this.cfg.repos.length} repo(s))`);
+    // So nothing on the host opens this database read-write while we hold it (see openDb).
+    if (inContainer()) { try { writeFileSync(IN_USE, `${hostname()}\n`); } catch { /* read-only work disk: the guard is the only loss */ } }
     if (process.platform === "darwin" && this.cfg.preventSleep) {
       spawn("caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore", detached: true }).unref();
     }
-    gh.viewer().then((u) => { this.ghUser = u; this.store.event(`acting on GitHub as @${u}`); }, () => {});
+    gh.viewer().then((u) => this.noteViewer(u), () => {});
     this.schedulePoll(1000);
     setInterval(() => this.tick(), 2000).unref?.();
     this.proxy.start();
@@ -174,6 +180,7 @@ export class Daemon {
     this.configWatcher?.close();
     this.configWatcher = null;
     this.store.event("pr-daemon is shutting down");
+    rmSync(IN_USE, { force: true });    // the host may open the database again
     // Stop the agents too. The service lets children outlive pr-daemon (so
     // preview stacks survive a restart), and an agent left running would work
     // on alongside the resumed copy of its own session. Jobs stay `running`,
@@ -196,6 +203,9 @@ export class Daemon {
 
   /** Swap in a new config and do the things that don't pick it up by themselves. */
   private apply(cfg: Config, why: string): Config {
+    // A new preview domain renames every preview host, so the container's view
+    // of them moves with it rather than waiting for the next poll.
+    void syncHosts(cfg, this.store.stacks());
     const before = this.cfg;
     this.cfg = cfg;
     this.store.event(why);
@@ -242,6 +252,14 @@ export class Daemon {
     } catch (e) {
       this.store.event(`cannot watch ${CONFIG_PATH} (${(e as Error).message}); edits need a restart`, null, "warn");
     }
+    // And a re-read on a timer, because the watch can be deaf through no fault
+    // of its own: a bind mount delivers no inotify events for an edit made
+    // outside the container (Docker Desktop's file sharing drops them), so
+    // config.toml opened in the owner's own editor would never be noticed.
+    // reloadConfig() compares the text with what it last applied, so this
+    // costs one read of a small file and makes the watch an optimisation
+    // rather than the only mechanism.
+    setInterval(() => this.reloadConfig(), CONFIG_RECHECK_MS).unref?.();
   }
 
   /** Re-read config.toml after an edit. A file that no longer parses is ignored, not applied. */
@@ -283,6 +301,9 @@ export class Daemon {
     this.polling = true;
     const errors: string[] = [];
     try {
+      // The container's view of the preview names, reconciled with the stacks
+      // table once a poll (bringUp does it the moment a stack starts).
+      await syncHosts(this.cfg, this.store.stacks());
       for (const repo of this.cfg.repos) {
         try { await asOwner(repo.name, () => this.pollRepo(repo.name)); }
         catch (e) { errors.push(`${repo.name}: ${(e as Error).message}`); }
@@ -297,7 +318,7 @@ export class Daemon {
   }
 
   private async allowed(repo: string): Promise<string[]> {
-    this.ghUser ||= await gh.viewer();
+    if (!this.ghUser) await this.noteViewer(await gh.viewer());
     const rc = this.cfg.repos.find((r) => r.name === repo);
     // `actions = true` in a public repo is a mistake to point out once, not to act on.
     if (rc?.actions && !(await gh.isPrivate(repo))) {
@@ -305,6 +326,24 @@ export class Daemon {
       this.actionsPublic.add(repo);
     } else this.actionsPublic.delete(repo);
     return gh.allowedUsers(this.cfg.allowedUsers, rc);
+  }
+
+  private identity = false;
+
+  /**
+   * Who pr-daemon acts as, as soon as GitHub will say: start() asks, and the
+   * first poll asks again if that failed, because everything downstream needs
+   * it — the trust check, and a commit, which git refuses without an identity
+   * (a container starts with no ~/.gitconfig at all).
+   */
+  private async noteViewer(u: string): Promise<void> {
+    if (!u) return;
+    if (this.ghUser !== u) this.store.event(`acting on GitHub as @${u}`);
+    this.ghUser = u;
+    if (this.identity) return;
+    this.identity = true;
+    const email = await git.ensureIdentity(u);
+    if (email) this.store.event(`git had no identity here; commits are now @${u} <${email}>`);
   }
 
   /** Who may trigger work: allowed_users, or else only the gh user (empty until that's known). */
@@ -923,6 +962,8 @@ export class Daemon {
       paused: this.paused,
       configPath: CONFIG_PATH,
       paths: paths(),
+      // Which mounts are which, so the page can say what to back up.
+      container: inContainer() ? { config: CONFIG_HOME, credentials: CREDENTIALS_HOME, work: WORK_HOME } : null,
       repos: this.cfg.repos.map((r) => r.name),
       label: this.cfg.label,
       github: { actingAs: this.ghUser, allowedUsers: this.allowedNow(), allowedFromConfig: this.cfg.allowedUsers.length > 0,

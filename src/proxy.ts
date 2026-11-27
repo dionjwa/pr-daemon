@@ -12,13 +12,21 @@ import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { HOME, type Config, type RepoConfig } from "./config.ts";
+import { CREDENTIALS_HOME, WORK_HOME, type Config, type RepoConfig } from "./config.ts";
 import type { Stack, Store } from "./db.ts";
-import { run } from "./util.ts";
+import { LOCAL_HOST, run, viaHost } from "./util.ts";
 
-const CADDY_DIR = join(HOME, "caddy");
+const CADDY_DIR = join(WORK_HOME, "caddy");
 const CONTAINER = "pr-daemon-caddy";
 const IMAGE = "caddy:2";
+// When pr-daemon is itself a container, it and Caddy join one Docker network
+// (docker/compose.yaml creates it) and it reaches Caddy's admin API by
+// container name. That is better than publishing the admin port: on a Linux
+// host a port published to 127.0.0.1 is NOT reachable through host-gateway, and
+// publishing it on every interface would put Caddy's admin API on the LAN.
+const DOCKER_NETWORK = process.env.PR_DAEMON_DOCKER_NETWORK?.trim() ?? "";
+/** pr-daemon's own name on that network, so Caddy can route the status page to it. */
+const SELF_HOST = process.env.PR_DAEMON_SELF_HOST?.trim() ?? "";
 /** How long Caddy lets open connections (HMR websockets, …) finish when it stops or reloads. */
 const GRACE = "5s";
 /** How long shutdown waits for Caddy to exit. pr-daemon's own exit deadline (cli.ts) must be longer. */
@@ -36,7 +44,7 @@ export const STOP_WAIT_MS = 15_000;
 
 /** Where the DNS provider's API token comes from: the environment, then a file. */
 export const DNS_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
-export const DNS_TOKEN_FILE = join(HOME, "cloudflare-token");
+export const DNS_TOKEN_FILE = join(CREDENTIALS_HOME, "cloudflare-token");
 export const DNS_MODULE = "github.com/caddy-dns/cloudflare";
 const DNS_IMAGE = "pr-daemon-caddy-cloudflare";
 const DNS_DOCKERFILE = `FROM caddy:2-builder AS builder
@@ -157,7 +165,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
     routes.push({ match: [{ host: [self], path: [CHECK_PATH] }], handle: [check], terminal: true });
     const auth = { handler: "authentication", providers: { http_basic: {
       accounts: [{ username: p.pageUser, password: p.pagePasswordHash }], hash: { algorithm: "bcrypt" }, realm: "pr-daemon" } } };
-    routes.push({ match: [{ host: [self] }], handle: [auth, proxyTo(`http://127.0.0.1:${cfg.port}`, mode, true)], terminal: true });
+    routes.push({ match: [{ host: [self] }], handle: [auth, proxyTo(`http://127.0.0.1:${cfg.port}`, mode, true, SELF_HOST)], terminal: true });
   } else {
     routes.push({ match: [{ host: [self] }], handle: [check], terminal: true });
   }
@@ -181,7 +189,7 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
   return {
     // Inside Docker the admin API must listen on all interfaces (it's published
     // to 127.0.0.1 only). pr-daemon always sends Origin = the admin address.
-    admin: { listen: mode === "docker" ? `0.0.0.0:${adminPort(cfg)}` : p.admin, origins: [p.admin] },
+    admin: { listen: mode === "docker" ? `0.0.0.0:${adminPort(cfg)}` : p.admin, origins: [...new Set([p.admin, adminAddress(cfg)])] },
     // Leave out the admin API's own lines: pr-daemon asks it whether Caddy is
     // alive every 5s, and that was nearly every line of a 170 MB log. The
     // binary writes its own rolled file; Docker's log is capped by `docker run`.
@@ -204,8 +212,13 @@ export function caddyConfig(cfg: Config, stacks: Stack[], mode: ProxyMode): obje
   };
 }
 
-/** A reverse_proxy handler for a local URL, or null if it isn't one. */
-function proxyTo(url: string, mode: ProxyMode, keepHost: boolean): Record<string, unknown> | null {
+/**
+ * A reverse_proxy handler for a local URL, or null if it isn't one.
+ * `dialHost` overrides where Caddy connects: the status page is pr-daemon
+ * itself, which in a container is a container on Caddy's own network, not
+ * something on the host.
+ */
+function proxyTo(url: string, mode: ProxyMode, keepHost: boolean, dialHost = ""): Record<string, unknown> | null {
   let up: URL;
   try { up = new URL(url); } catch { return null; }
   const port = up.port || (up.protocol === "https:" ? "443" : "80");
@@ -213,7 +226,7 @@ function proxyTo(url: string, mode: ProxyMode, keepHost: boolean): Record<string
   // The binary dials *.localhost and 127.0.0.1 by address, and anything else by
   // name (e.g. local.auth.local.nhost.run, whose public DNS says 127.0.0.1).
   const local = /(^|\.)localhost$/.test(up.hostname) || up.hostname === "127.0.0.1";
-  const host = mode === "docker" ? "host.docker.internal" : local ? "127.0.0.1" : up.hostname;
+  const host = dialHost || (mode === "docker" ? "host.docker.internal" : local ? "127.0.0.1" : up.hostname);
   const handler: Record<string, unknown> = { handler: "reverse_proxy", upstreams: [{ dial: `${host}:${port}` }] };
   if (up.protocol === "https:") {
     // Local stacks use self-signed (mkcert) certs: skip verification, keep the SNI they expect.
@@ -230,6 +243,18 @@ function proxyTo(url: string, mode: ProxyMode, keepHost: boolean): Record<string
 
 function adminPort(cfg: Config): string {
   return cfg.preview.admin.split(":").pop() ?? "2019";
+}
+
+/**
+ * Where Caddy's admin API is from pr-daemon's point of view. `preview.admin`
+ * is where Caddy listens; in a container that is Caddy's own loopback, not
+ * ours, so we use the shared Docker network's container name, or failing that
+ * the host's address.
+ */
+export function adminAddress(cfg: Config): string {
+  if (!LOCAL_HOST) return cfg.preview.admin;
+  if (DOCKER_NETWORK) return `${CONTAINER}:${adminPort(cfg)}`;
+  return viaHost(`http://${cfg.preview.admin}`).replace(/^http:\/\//, "");
 }
 
 export interface ProxyStatus {
@@ -280,12 +305,12 @@ export class Proxy {
   }
 
   private adminUrl(path: string): string {
-    return `http://${this.cfg().preview.admin}${path}`;
+    return `http://${adminAddress(this.cfg())}${path}`;
   }
 
   /** Caddy's admin API refuses Node's fetch (Sec-Fetch-Mode: cors) unless the Origin is allowed. */
   private admin(path: string, init: RequestInit = {}): Promise<Response> {
-    return fetch(this.adminUrl(path), { ...init, headers: { ...(init.headers ?? {}), origin: `http://${this.cfg().preview.admin}` } });
+    return fetch(this.adminUrl(path), { ...init, headers: { ...(init.headers ?? {}), origin: `http://${adminAddress(this.cfg())}` } });
   }
 
   private async alive(): Promise<boolean> {
@@ -399,7 +424,10 @@ export class Proxy {
     const r = await run("docker", ["run", "-d", "--name", CONTAINER, "--restart", "unless-stopped",
       "--log-opt", "max-size=10m", "--log-opt", "max-file=5",
       "--add-host", "host.docker.internal:host-gateway",
-      ...ports.flatMap((p) => ["-p", `${p}:${p}`]), "-p", `127.0.0.1:${port}:${port}`,
+      ...(DOCKER_NETWORK ? ["--network", DOCKER_NETWORK] : []),
+      ...ports.flatMap((p) => ["-p", `${p}:${p}`]),
+      // Published only when pr-daemon has no other way in (see DOCKER_NETWORK).
+      ...(DOCKER_NETWORK ? [] : ["-p", `127.0.0.1:${port}:${port}`]),
       "-v", `${CADDY_DIR}:/etc/pr-daemon:ro`, "-v", "pr-daemon-caddy-data:/data",
       // `-e NAME` alone takes the value from this process's env, so the token isn't on the command line.
       ...(cfg.dns ? ["-e", DNS_TOKEN_ENV] : []),

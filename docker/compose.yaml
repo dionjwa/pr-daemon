@@ -1,0 +1,114 @@
+# pr-daemon in a container. Read docs/container.md once before changing a line
+# here: every mount is a deliberate decision about what an agent can reach.
+#
+#   just container-build && just container-up
+#
+# Settings live in docker/.env (copy .env.example). Paths are absolute host
+# paths, because the work disk has to be mounted at the same path inside the
+# container as outside (see the volumes below).
+name: pr-daemon
+
+services:
+  pr-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        WITH_PLAYWRIGHT: "${PR_DAEMON_PLAYWRIGHT:-true}"
+        EXTRA_APT: "${PR_DAEMON_EXTRA_APT:-}"
+        EXTRA_SETUP: "${PR_DAEMON_EXTRA_SETUP:-}"
+    image: pr-daemon:local
+    container_name: pr-daemon
+    restart: unless-stopped
+    # No `init: true`: the image's entrypoint is already tini (as a subreaper),
+    # which is what reaps the processes an agent's tools leave behind.
+
+    environment:
+      # The three roots, matching the mounts below.
+      PR_DAEMON_CONFIG_HOME: /pr-daemon/config
+      PR_DAEMON_CREDENTIALS_HOME: /pr-daemon/credentials
+      PR_DAEMON_WORK_HOME: ${PR_DAEMON_WORK:?set PR_DAEMON_WORK in docker/.env}
+      # What the work mount is on the host. The entrypoint compares the two and
+      # complains if an edit ever makes them differ.
+      PR_DAEMON_WORK_HOST: ${PR_DAEMON_WORK}
+      # Inside here, "localhost" is this container. The stacks and Caddy are on
+      # the host, reachable at Docker's host-gateway.
+      PR_DAEMON_LOCAL_HOST: host.docker.internal
+      # pr-daemon and the Caddy it starts share this network, so it reaches
+      # Caddy's admin API by name and that port is published nowhere.
+      PR_DAEMON_DOCKER_NETWORK: pr-daemon
+      # And how Caddy reaches the status page: this container, by service name.
+      PR_DAEMON_SELF_HOST: pr-daemon
+      # Git needs an identity to commit with. pr-daemon fills in the gh user's
+      # noreply address when these are empty.
+      PR_DAEMON_GIT_NAME: ${PR_DAEMON_GIT_NAME:-}
+      PR_DAEMON_GIT_EMAIL: ${PR_DAEMON_GIT_EMAIL:-}
+      TZ: ${TZ:-UTC}
+
+    volumes:
+      # 1. Config: one small file, hand-edited, and written by the status page.
+      #    Back this up. The directory is the mount, never config.toml itself:
+      #    a save renames a temporary file over it, which a mounted file refuses.
+      - ${PR_DAEMON_CONFIG_DIR:?set PR_DAEMON_CONFIG_DIR in docker/.env}:/pr-daemon/config
+
+      # 2. Credentials: claude-token, gh-token, gh-tokens/<owner>,
+      #    cloudflare-token, secrets/<org>__<repo>.env. Back this up, and keep
+      #    it read-only: pr-daemon never writes here, so nothing that runs in
+      #    this container can alter or add a login.
+      - ${PR_DAEMON_CREDENTIALS_DIR:?set PR_DAEMON_CREDENTIALS_DIR in docker/.env}:/pr-daemon/credentials:ro
+
+      # 3. Work: clones, worktrees, agent logs, screenshots, the database, the
+      #    log, Caddy's state. Large and rebuildable — do NOT back it up.
+      #    Mounted at the same path on both sides, because a preview stack's
+      #    `docker compose` runs against the HOST's Docker: the bind mounts in
+      #    its compose file are host paths, so a worktree has to be at the same
+      #    place in both namespaces or the stack comes up with empty mounts.
+      - ${PR_DAEMON_WORK}:${PR_DAEMON_WORK}
+
+      # 4. The Docker socket: preview stacks and the preview proxy are the
+      #    host's containers, started from in here. This is the one mount that
+      #    is equivalent to root on the host — docs/container.md says what that
+      #    means and what to do if you don't want it.
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+
+    # The status page, on the host's loopback only. It edits config.toml, whose
+    # commands run on this machine: it is never published to a LAN.
+    ports:
+      - "127.0.0.1:${PR_DAEMON_PORT:-7377}:${PR_DAEMON_PORT:-7377}"
+      # If a project's `up` starts a plain dev server (no compose), that server
+      # runs IN HERE and its port is published nowhere, so neither your browser
+      # nor Caddy can reach it. Publish a range and have `up` pick its port from
+      # it. See "If your stack isn't Docker" in docs/container.md.
+      # - "127.0.0.1:${PR_DAEMON_STACK_PORTS:-30000-30031}:${PR_DAEMON_STACK_PORTS:-30000-30031}"
+
+    # How the host is reached from in here (Docker gives Linux no such name by default).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Blast radius. The entrypoint needs just enough to become the work disk's
+    # owner and join the socket's group, and then drops to that user.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN         # hand the mounts and /etc/hosts to the pr-daemon user
+      - FOWNER
+      - DAC_OVERRIDE
+      - SETUID        # drop privileges (setpriv)
+      - SETGID
+    pids_limit: ${PR_DAEMON_PIDS_LIMIT:-4096}
+    # /tmp in memory: an agent's scratch files never touch the work disk.
+    tmpfs:
+      - /tmp:exec,size=${PR_DAEMON_TMPFS_SIZE:-2g}
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    networks:
+      - pr-daemon
+
+networks:
+  # An explicit name, because pr-daemon passes it to `docker run` for Caddy
+  # (PR_DAEMON_DOCKER_NETWORK) and compose would otherwise prefix it.
+  pr-daemon:
+    name: pr-daemon

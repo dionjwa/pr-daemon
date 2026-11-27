@@ -277,6 +277,43 @@ login.
 
 ---
 
+## Or run it in a container (recommended once it works)
+
+Everything above runs pr-daemon directly on your machine, which means an agent
+can read everything you can: your `~/.ssh`, your cloud logins, your other
+repositories. The container narrows that to a list you write.
+
+```bash
+cp docker/.env.example docker/.env   # set three paths (below)
+just container-build                 # the daemon plus git, gh, just, docker, deno, claude, chromium
+just container-up                    # starts now, and whenever Docker starts
+just container-doctor                # every line should be ✓
+```
+
+Three mounts go in, and nothing else of your machine:
+
+| | What | Back it up? |
+|---|---|---|
+| `PR_DAEMON_CONFIG_DIR` | `config.toml` | **yes** |
+| `PR_DAEMON_CREDENTIALS_DIR` | the tokens and each repo's dev secrets, **read-only** | **yes**, encrypted |
+| `PR_DAEMON_WORK` | clones, worktrees, agent logs, the database | **no** — rebuildable |
+
+plus the Docker socket, because a preview stack is `docker compose up`. That
+one is worth understanding before you rely on it: **anything that can use the
+Docker socket can get root on the host.** The container is still a large
+improvement — it stops an agent wandering into your home directory — but it is
+not a sandbox. [docs/container.md](docs/container.md) is the whole design: the
+mounts, what an agent can and can't reach, the socket, and the networking
+("localhost" inside the container is not your machine). The work disk has to be
+mounted at the **same path** inside and out; `container-doctor` checks that for
+real.
+
+Picking up a code change is `just container-restart`. Desktop notifications
+can't leave a container, so notices appear under **Needs you** on the status
+page instead.
+
+---
+
 ## When a PR conflicts with `main`
 
 Other work lands on `main` while a PR waits for you. When GitHub says the PR
@@ -569,6 +606,12 @@ installed service after changing the code), `just db`, `just contract`.
   caddy/                            the generated Caddy config, its log, and certificates (binary mode)
 ```
 
+In a container these are three mounts rather than one directory — config,
+credentials (read-only) and the work disk — set by `PR_DAEMON_CONFIG_HOME`,
+`PR_DAEMON_CREDENTIALS_HOME` and `PR_DAEMON_WORK_HOME`. Each falls back to
+`PR_DAEMON_HOME`, so a host install stays exactly as above. The status page
+says which is which, and what to back up.
+
 These are ordinary files and ordinary git checkouts: open a worktree, read it,
 run `git log` in it. `just where` prints the list with the branches checked out
 right now, the status page shows each stack's and each job's worktree, and
@@ -626,12 +669,14 @@ it at one.
 - **The agent has your access.** It runs Claude Code with permission prompts
   off, as your user, on your machine. It can run any command, read your files,
   and use your `gh` and git logins, so it could push to or comment on any repo
-  you can. The prompts tell it not to; nothing technically stops it. Run
-  pr-daemon as a dedicated user, or in a VM, if the machine holds anything you
-  care about. At the least, give it a GitHub login limited to the repos you
-  watch: a fine-grained token per owner in `~/.pr-daemon/gh-tokens/` (see
+  you can. The prompts tell it not to; nothing technically stops it. Two things
+  narrow it, and they are worth doing in this order: **run it in a container**
+  ([above](#or-run-it-in-a-container-recommended-once-it-works)), so the only
+  files it can reach are the three mounts, and give it a GitHub login limited
+  to the repos you watch — a fine-grained token per owner in `gh-tokens/` (see
   [below](#letting-agents-edit-workflows)) replaces your `gh` login for
-  pr-daemon, its agents and your project's commands.
+  pr-daemon, its agents and your project's commands. A dedicated user or a VM
+  is the stricter version of the first.
 - **What it reads is an instruction,** so the checks above decide what reaches
   the agent. pr-daemon hands the agent the issue and the filtered PR
   conversation itself, and the prompts tell it not to fetch comments on its
@@ -668,7 +713,9 @@ it at one.
   optional `gh-tokens/<owner>` go to everything pr-daemon starts for that owner's repos (`gh`, git, agents
   and your project's commands), since that is what limits them. The optional
   Cloudflare token is passed to Caddy only, never to agents or project
-  commands.
+  commands. **[docs/credentials.md](docs/credentials.md)** is the full list:
+  every login, the exact scope it needs (down to which fine-grained GitHub
+  permission is for what), what it can do if it leaks, and how to rotate it.
 
 ### Letting agents edit workflows
 

@@ -88,6 +88,38 @@ A human always merges.
 - **One host process.** Not GitHub Actions, and not a self-hosted runner: both
   were tried and dropped (too much per-repo setup, no control over token use).
   Don't reintroduce them.
+- **It can be that one process in a container** (`docker/`, `docs/container.md`),
+  and that is the recommended way to run it. The reason is blast radius: on a
+  host install an agent can read everything the owner can. In the container the
+  only host things it can reach are **three mounts and the Docker socket**:
+    - **config** (`CONFIG_HOME`): `config.toml`. Writable (the page saves it),
+      and the mount is the *directory* — a save renames a temp file over
+      config.toml, which a bind-mounted file refuses.
+    - **credentials** (`CREDENTIALS_HOME`): `claude-token`, `gh-token`,
+      `gh-tokens/<owner>`, `cloudflare-token`, `secrets/<org>__<repo>.env`.
+      Mounted **read-only**: pr-daemon never writes any of them, so nothing in
+      the container can add or widen a login.
+    - **work** (`WORK_HOME`): `repos/`, `worktrees/`, `out/`, `refs/`,
+      `assets/`, `caddy/`, the database and the log.
+  The first two are backed up, the third is not; the **database goes with the
+  work disk**, because its rows name worktrees on it. All three default to
+  `PR_DAEMON_HOME`, so a host install is still one directory and nothing about
+  it changed. Don't move a path across roots without asking which backup class
+  it belongs to.
+- **The work disk is mounted at the same path inside and outside.** Not
+  negotiable: a preview stack's `docker compose` talks to the **host's**
+  Docker, so every bind mount in the project's compose file is resolved by the
+  host. A worktree at a container-only path means a stack that comes up with
+  empty mounts and nothing saying why. `doctor` verifies it for real — it
+  writes a marker into the work disk and has a sibling container read it back
+  through the same path.
+- **The Docker socket is the one hole, and it is admitted, not hidden.**
+  Anything that can use it can get root on the host. It is mounted because
+  previews *are* containers; the honest framing (README, docs/container.md) is
+  "this stops an agent wandering into your home directory, it is not a
+  sandbox". Don't add security theatre around it. The alternatives, in order of
+  effort, are in docs/container.md; the real fix (a separate Docker daemon for
+  previews) is not wired up because the published ports would move with it.
 - **Node + TypeScript**, run directly (Node ≥ 23.6 strips types; no build
   step). Only syntax that can be stripped: no enums, namespaces or parameter
   properties, and imports use `.ts` extensions.
@@ -283,10 +315,12 @@ A human always merges.
 | `proxy.ts` | Caddy supervisor. `caddyConfig()` is pure (unit-tested): routes are rebuilt from the stacks table every 5s and loaded via the admin API when the hash changes |
 | `db.ts` | Schema plus `Store` (jobs, usage, stacks, events, kv) |
 | `gh.ts` / `git.ts` / `stack.ts` | Wrappers for `gh` (as the user), the cached clone plus worktrees plus the screenshot branch plus reference clones (`refsFor`, `addReference`), and the project's up/down/check commands. `gh.summarizeChecks()` reduces check runs + commit statuses to one verdict; `stack.previewHealth()` turns the two health probes into up/degraded/down (both pure, unit-tested) |
+| `hosts.ts` | Only in a container: the block of preview names pr-daemon keeps in its **own** `/etc/hosts`, rebuilt from the stacks table like the Caddy routes, so agents, Playwright and curl can reach a preview from in there. `stackNames()` and `hostsBlock()` are pure and unit-tested |
 | `config.ts` | `DEFAULT_TOML` (the documented template), `parseConfig()` with readable errors, atomic save |
 | `web.ts` / `ui.html` / `docs.html` | The localhost API (Host check; writes need `X-PR-Daemon: 1`), the status page, and `GET /docs`: the state machines as mermaid diagrams |
+| `docker/` | `Dockerfile` (the daemon plus the tools a target repo needs: git, gh, just, docker CLI + compose, node, deno, python, build-essential, chromium, claude), `compose.yaml` (the three mounts, the socket, the capabilities it drops) and `entrypoint.sh` (uid/gid to match the work disk, the socket's group, git's identity, `/etc/hosts`, then drop privileges) |
 | `setup.ts` / `docs/setup.md` | `paths()` (the runtime directories) and `setupDoc()`: the project contract with this machine's real paths and commands filled in, served as plain text at `GET /setup` and printed by `pr-daemon setup` |
-| `util.ts` | `HOME`, amounts/durations, `run`/`sh`/`must`, `cleanEnv`, `ghAuth` / `asOwner` (the per-owner GitHub tokens) |
+| `util.ts` | `HOME` and the three roots (`CONFIG_HOME` / `CREDENTIALS_HOME` / `WORK_HOME`), amounts/durations, `run`/`sh`/`must`, `cleanEnv`, `ghAuth` / `asOwner` (the per-owner GitHub tokens), and the container's view of the host: `LOCAL_HOST`, `inContainer()`, `viaHost()`, `viaHostCurl()` |
 
 The repo's own `justfile` wraps the CLI plus the dev commands; `examples/justfile` is the contract a target project implements.
 
@@ -304,7 +338,10 @@ the decision so it isn't taken twice. Each job has a unique `trigger_key`
 paused or crashed job keeps its `session_id`, and resuming continues that
 Claude session. On startup, `running` jobs are re-queued.
 
-**Runtime files:** everything lives in `~/.pr-daemon/`: `config.toml`,
+**Runtime files:** on a host install everything lives in `~/.pr-daemon/`; in a
+container the same tree is split across three mounts by backup class (see the
+decision above), which is what `CONFIG_HOME`, `CREDENTIALS_HOME` and
+`WORK_HOME` in `util.ts` are for. The files: `config.toml`,
 `pr-daemon.db`, `pr-daemon.log`, `claude-token` (optional), `gh-tokens/<owner>` and `gh-token`
 (optional: pr-daemon's GitHub logins, see the workflow decision above), `repos/` (cached
 clones), `worktrees/`, `out/` (prompts, agent `*.jsonl` logs, PR text,
@@ -333,6 +370,12 @@ just restart                  # restart the installed service after code changes
 just logs                     # tail -f ~/.pr-daemon/pr-daemon.log
 just db 'select * from jobs limit 5;'
 just contract                 # print examples/justfile, the two recipes a project adds
+
+just container-build          # the image: the daemon plus the tools a target repo needs
+just container-up             # run it from docker/compose.yaml (settings in docker/.env)
+just container-doctor         # doctor from inside it, as the daemon's own user
+just container-shell          # a shell in there, as that user
+just container-restart        # rebuild and restart: how a code change is picked up
 ```
 
 - The service runs the code from this checkout, so restart it to pick up
@@ -538,6 +581,113 @@ just contract                 # print examples/justfile, the two recipes a proje
 - **A session to resume can vanish.** Revise and CI jobs resume the builder's Claude session (context plus a warm cache), but the transcript under `~/.claude/projects/<cwd>/` can be deleted out from under us, and `--resume` then fails with "No conversation found with session ID". `agentStep()` takes a `fresh` prompt and starts a new session from it in that case; every resume site passes the full prompt, which carries all the context the job needs (issue, PR, trusted discussion). Revise/CI then record the session they used as the stack's `builder_session`.
 - **Agents read the target project's CLAUDE.md and skills** from the worktree.
   Project knowledge belongs there, not in pr-daemon's prompts.
+- **In a container, `localhost` is the container.** Everything that assumed
+  otherwise had to be fixed, and each fix is deliberate:
+  - **The status page was bound to `127.0.0.1`,** which Docker's published port
+    cannot reach: the port forwarder dials the *container's address*, not its
+    loopback. It connected and then got an empty reply (curl exit 52). In a
+    container `web.ts` binds `0.0.0.0`; that is still safe, because the port is
+    published to the host's loopback only and the Host check already refuses
+    anything but a local name.
+  - **Health probes use `curl --resolve`, not a rewritten URL.** The request
+    goes to the host while the `Host` header and the TLS name stay what the URL
+    says — which is the whole point of those two probes (is it running vs. can
+    a person open it). A rewritten Host would answer a different question.
+  - **Caddy's admin API is reached by container name** over a shared network
+    (`PR_DAEMON_DOCKER_NETWORK`), and its admin port is then published nowhere.
+    Publishing it to `127.0.0.1` on a **Linux** host is not reachable through
+    `host-gateway` at all, and publishing it on every interface would put
+    Caddy's admin API on the LAN.
+  - **`proxyTo()` sends everything to `host.docker.internal` in docker mode,**
+    which is right for stacks (they are all on the host) and wrong for the
+    status page, which is a container on Caddy's own network. Hence the
+    `dialHost` override and `PR_DAEMON_SELF_HOST`.
+  - **Public preview names** can't be fixed by either: an agent's curl or
+    Playwright gets no flag from us. `hosts.ts` keeps a managed block in the
+    container's own `/etc/hosts`. That file is a bind mount, so it must be
+    written **in place** (a rename over it fails) and it arrives **root-owned**,
+    so `entrypoint.sh` chowns it before dropping privileges. Only `localhost`
+    and `127.0.0.1` are kept out of the block — a name *under* localhost
+    (`app.localhost`, and the whole `domain = "pr-daemon.localhost"` testing
+    mode) is a host address and has to be in it.
+  - **The local URL an agent is told is not the one a person opens,** so with
+    no preview domain `stackWhere()` names both and says which belongs in the
+    PR. Human-facing text (the PR body, the PR comments, the status page) uses
+    the stack row's own URL and is never rewritten.
+- **`tini` as the ENTRYPOINT plus compose's `init: true` means no reaping at
+  all:** tini warns it isn't PID 1 and isn't a subreaper, and zombies pile up.
+  The image uses `tini -s` (register as a subreaper, so it works either way)
+  and `compose.yaml` leaves `init` off, so there is one init and not two.
+- **`docker compose exec` runs as root,** because the image's user *is* root —
+  the entrypoint is what drops privileges. So `container-doctor` and
+  `container-shell` pass `-u pr-daemon`; without it doctor's write tests pass
+  trivially and tell you nothing about the user the daemon actually runs as.
+- **On Docker Desktop the socket is root-owned (gid 0),** so the container user
+  has to be in group 0 to use it. The entrypoint says so in the log rather than
+  doing it quietly. Never `chmod` the socket: that inode is the host's.
+- **A `.localhost` preview domain cannot work in a container, and /etc/hosts
+  can't fix it.** curl and Chrome resolve every `*.localhost` name to loopback
+  themselves (RFC 6761) and never read the hosts file, so an agent opening
+  `https://4-x.pr-daemon.localhost:8443` reaches the container. The owner's own
+  browser is fine, and the probes are fine (`--resolve` does override it), but
+  agents, Playwright and the screenshots are not. Any other name works, real or
+  made-up (pr-daemon writes the entries itself), and `doctor` says so. The
+  block still lists `*.localhost` names for the tools that do read it (`getent`
+  does).
+- **A bind mount delivers no inotify events for an edit made on the host**
+  (Docker Desktop's file sharing drops them), so `watchConfig()`'s directory
+  watch never fires for the owner's own editor — the Config tab worked and a
+  hand edit silently didn't. `reloadConfig()` already compares the text with
+  what it last applied, so it is now also called every `CONFIG_RECHECK_MS`
+  (5s): the watch became an optimisation rather than the only mechanism.
+  `apply()` re-syncs the preview names too, so a new domain doesn't wait for
+  the next poll.
+- **The image needs the tools the target projects use, and `doctor` cannot
+  tell you which.** metapages/superslides.io and framejs.app start their stacks
+  with the **nhost CLI**, which wasn't in the image — so `up` *and* `down`
+  failed for every superslides branch the moment pr-daemon moved into a
+  container, which is also why nothing was destroyed. Hence
+  `PR_DAEMON_EXTRA_SETUP` in docker/.env: one shell line run as root during the
+  build (`EXTRA_SETUP` in the Dockerfile), pinned to a version. Debian packages
+  still go in `PR_DAEMON_EXTRA_APT`. Read the target projects' justfiles for
+  what they call; a missing tool shows up only as a stack whose `up` fails.
+- **A failed `up` must not forget the address.** Caddy's routes are built from
+  `stacks.url`, so writing `""` there on failure took three working previews off
+  the proxy — public 404, while their servers were still running and answering
+  locally. `restart` already kept the old url; `bringUp()` and the build's
+  re-`up` now do too. `healthy: 0` and `error` are what record the failure.
+- **Never open the database from the host while the container runs.** A bind
+  mount shares no file locks between the host and the container, so two SQLite
+  connections cannot see each other at all. The one on the host finds a WAL
+  nobody appears to hold, recovers it, and on close **checkpoints and unlinks
+  it** — while the daemon goes on writing to that now-nameless inode, where
+  every commit is lost. One `sqlite3` on the host cost three job rows here, and
+  the only sign was `pr-daemon.db-wal (deleted)` in `/proc/<pid>/fd`. So
+  `openDb()` opens the database **read-only** outside the container whenever
+  the daemon's marker is there (`.daemon-in-a-container` on the work disk,
+  written at startup and removed on shutdown), and `just db` runs sqlite3
+  inside the container when one is up. Inside, it is an ordinary file on an
+  ordinary mount and the usual rules hold (verified: a second process sees the
+  daemon's commits). `just logs` is safe either way — a log file has no locks.
+- **A container has no `gh auth login`, and that silently cost the git identity.**
+  gh's own login can't exist in there (read-only credentials, no browser), so
+  every call goes through a token file. The calls `asOwner()` wraps were fine;
+  the one with no owner was not — `gh.viewer()`, which is how the daemon learns
+  who it acts as, and whose answer `start()` feeds to `git.ensureIdentity()`.
+  Its rejection was swallowed by a `.catch(() => {})`, so the daemon polled and
+  built normally and the first agent commit would have failed with "Please tell
+  me who you are". Two fixes: `ghTokenFile()` borrows any `gh-tokens/<owner>`
+  file when there is no `gh-token` and gh has no login of its own (they are all
+  the same GitHub user), and `noteViewer()` is called from the first poll too,
+  not only from `start()`.
+- **`doctor` may only use tools the image has.** The DNS check shelled out to
+  `dig`, which isn't in the container, so it reported the owner's working
+  wildcard as broken. It uses `node:dns` now (`resolve4`, then `resolveCname`
+  for the chain, which is the diagnostic that matters). `dnsutils` is in the
+  image as well, for the agents.
+- **Two places name the page's port in a container** — compose publishes
+  `PR_DAEMON_PORT`, the page listens on `config.toml`'s `port`. Nothing answers
+  if they differ, so `doctor` compares them.
 - **`up` / `down` / `check` are arbitrary shell command lines**, run as
   `bash -lc <line>` by `stack.ts` from the worktree root. `just` is only the
   default spelling. The one just-aware bit is `missingRecipe()`: a command of
@@ -578,6 +728,18 @@ just contract                 # print examples/justfile, the two recipes a proje
   by a gateway that routes on Host, so `https://<branch>.home.dionjw.dev`
   returned 404 while the stack answered 200 locally. The status page now shows
   that as **degraded** and names the fix on the row.
+
+- **In a container, a stack whose `up` starts a host process moves inside the
+  container with it.** superslides.io branches differ: `mobile-upgrade-with-login`
+  runs its frontend as a container (published port, works unchanged), while
+  `282-review-tests-and-ci` and `284-production-build-issues` run deno bound to
+  the host's 127.0.0.1. Started from inside the container those servers listen
+  in there, where no browser and no Caddy can reach them. The nhost backend is
+  containers either way. So this deployment wants those frontends containerised;
+  publishing a port range doesn't help while the ports come from a hash of the
+  branch name. The same applies to metapages/public-compute-grid, whose whole
+  stack is a plain dev server (verified: it came up inside the container and
+  answered only in there).
 
 ## Open items
 

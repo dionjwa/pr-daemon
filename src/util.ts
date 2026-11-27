@@ -1,12 +1,99 @@
 // Small shared helpers: human-readable amounts/durations, child processes, logging.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync, spawn } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 /** Where pr-daemon keeps everything (config.ts re-exports it). */
 export const HOME = process.env.PR_DAEMON_HOME ?? join(homedir(), ".pr-daemon");
+
+// ---------- the three roots ----------
+// One directory on a laptop; three mounts in a container, because they want
+// different treatment. Each defaults to HOME, so a host install is unchanged.
+//
+//   config       config.toml. Small, hand-written, worth backing up. Writable:
+//                the status page saves it (atomically, by renaming inside this
+//                directory — so it must be the mount, never a mounted file).
+//   credentials  the logins: claude-token, gh-token, gh-tokens/<owner>,
+//                cloudflare-token, secrets/<org>__<repo>.env. Backed up, and
+//                nothing here is ever written by pr-daemon, so the container
+//                mounts it read-only.
+//   work         repos/, worktrees/, out/, refs/, assets/, caddy/, the
+//                database and the log. Large, rebuildable, NOT backed up.
+//                The database belongs here and not with the config: its rows
+//                point at worktrees on this disk, so the two have to be lost
+//                together or neither.
+export const CONFIG_HOME = process.env.PR_DAEMON_CONFIG_HOME ?? HOME;
+export const CREDENTIALS_HOME = process.env.PR_DAEMON_CREDENTIALS_HOME ?? HOME;
+export const WORK_HOME = process.env.PR_DAEMON_WORK_HOME ?? HOME;
+
+// ---------- in a container ----------
+// Preview stacks are started through the Docker socket, so their containers
+// are pr-daemon's siblings on the host and their ports are published on the
+// host, not in pr-daemon's network namespace: inside the container,
+// "localhost" is no longer where the stacks are. This is the address that is
+// (Docker's host-gateway, as `host.docker.internal`), empty on a host install.
+export const LOCAL_HOST = process.env.PR_DAEMON_LOCAL_HOST?.trim() ?? "";
+
+/** Whether this process is running inside a container (for `doctor` and the status page). */
+export function inContainer(): boolean {
+  return !!LOCAL_HOST || existsSync("/.dockerenv");
+}
+
+let gatewayIp = { at: 0, ip: "" };
+
+/**
+ * LOCAL_HOST as an address, for `curl --resolve` (which takes no names).
+ * Docker's host-gateway doesn't move, so it's looked up once a minute and
+ * never fatal: "" means "don't rewrite anything".
+ */
+export async function localHostIp(): Promise<string> {
+  if (!LOCAL_HOST) return "";
+  if (Date.now() - gatewayIp.at < 60_000) return gatewayIp.ip;
+  // An address in the variable itself needs no lookup (and `dns` wouldn't do one).
+  let ip = /^[\d.]+$/.test(LOCAL_HOST) ? LOCAL_HOST : "";
+  if (!ip) {
+    try { ip = (await lookup(LOCAL_HOST, { family: 4 })).address; }
+    catch { ip = ""; }
+  }
+  gatewayIp = { at: Date.now(), ip };
+  return ip;
+}
+
+/**
+ * `curl` arguments that send a request for this URL to the host instead of
+ * into the container, keeping the Host header and TLS name the server expects
+ * — which plain rewriting to host.docker.internal would lose. Empty outside a
+ * container.
+ */
+export async function viaHostCurl(url: string): Promise<string[]> {
+  const ip = await localHostIp();
+  if (!ip) return [];
+  try {
+    const u = new URL(url);
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    return ["--resolve", `${u.hostname}:${port}:${ip}`];
+  } catch { return []; }
+}
+
+/**
+ * A local URL as seen from inside the container: "localhost" there is the
+ * container itself, so it becomes the host's address. Anything else is left
+ * alone — a name like `local.auth.local.nhost.run` is handled by the
+ * /etc/hosts block instead, which keeps the Host header the app expects.
+ * Pure: unit-tested.
+ */
+export function viaHost(url: string, host = LOCAL_HOST): string {
+  if (!host || !url) return url;
+  try {
+    const u = new URL(url);
+    if (!/^(127\.0\.0\.1|localhost)$/.test(u.hostname)) return url;
+    u.hostname = host;
+    return u.toString().replace(/\/$/, url.endsWith("/") ? "/" : "");
+  } catch { return url; }
+}
 
 // ---------- human amounts: "40M", "1.5m", "500k", "2B", "40,000,000" ----------
 const AMOUNT_SUFFIX: Record<string, number> = { "": 1, k: 1e3, m: 1e6, b: 1e9 };
@@ -78,8 +165,8 @@ export function cleanEnv(extra: Record<string, string | undefined> = {}): NodeJS
 // `gh-token` for any owner without one. Which owner is in play comes from
 // asOwner(): each repo's poll and each job runs inside it, and everything they
 // start (gh, git, agents, stacks) inherits it. Read on every use, like claude-token.
-export const GH_TOKEN_FILE = join(HOME, "gh-token");
-export const GH_TOKENS_DIR = join(HOME, "gh-tokens");
+export const GH_TOKEN_FILE = join(CREDENTIALS_HOME, "gh-token");
+export const GH_TOKENS_DIR = join(CREDENTIALS_HOME, "gh-tokens");
 const owner = new AsyncLocalStorage<string>();
 
 /** Run `fn` with `repo`'s owner's GitHub token for every child process it starts. */
@@ -88,14 +175,28 @@ export function asOwner<T>(repo: string, fn: () => T): T {
 }
 
 /** The token file for an owner: `gh-tokens/<owner>` (any case, as GitHub names are), else `gh-token`. */
-export function ghTokenFile(who = owner.getStore(), home = HOME): string {
+export function ghTokenFile(who = owner.getStore(), home = CREDENTIALS_HOME): string {
+  let files: string[] = [];
+  try { files = readdirSync(join(home, "gh-tokens")).sort(); } catch { /* no directory */ }
   if (who) {
-    try {
-      const hit = readdirSync(join(home, "gh-tokens")).find((f) => f.toLowerCase() === who.toLowerCase());
-      if (hit) return join(home, "gh-tokens", hit);
-    } catch { /* no directory */ }
+    const hit = files.find((f) => f.toLowerCase() === who.toLowerCase());
+    if (hit) return join(home, "gh-tokens", hit);
   }
-  return join(home, "gh-token");
+  const fallback = join(home, "gh-token");
+  // A call with no owner — gh.viewer(), which is who pr-daemon acts as — would
+  // otherwise have no login at all in a container: there is no `gh auth login`
+  // in there (the credentials mount is read-only and nothing can open a
+  // browser), and without it the daemon starts up not knowing its own user,
+  // which also leaves git without an identity to commit with. Any of the
+  // tokens answers that question, because they are all the same GitHub user.
+  if (!existsSync(fallback) && files.length && !ghOwnLogin()) return join(home, "gh-tokens", files[0]);
+  return fallback;
+}
+
+/** Does gh have a login of its own (`gh auth login`)? In a container, never. */
+function ghOwnLogin(): boolean {
+  const dir = process.env.GH_CONFIG_DIR?.trim() || join(homedir(), ".config", "gh");
+  return existsSync(join(dir, "hosts.yml"));
 }
 
 /**

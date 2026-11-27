@@ -3,7 +3,7 @@
 // convention, and the one just-aware bit is missingRecipe() below.
 import { secretsEnv } from "./config.ts";
 import { SERVICE_NAME } from "./proxy.ts";
-import { run, sh, tail } from "./util.ts";
+import { run, sh, tail, viaHostCurl } from "./util.ts";
 
 const UP_TIMEOUT = 30 * 60e3;
 const CHECK_TIMEOUT = 30 * 60e3;
@@ -119,11 +119,23 @@ export async function check(cmd: string, wt: string): Promise<{ ok: boolean; out
 // Caddy has no route for the host, or the upstream rejects the public Host
 // (see proxy_host). So probe both and compare them.
 
-/** One HTTP probe: the status code, or 0 when nothing answered. Local certs are self-signed, hence -k. */
+/**
+ * One HTTP probe: the status code, or 0 when nothing answered. Local certs are
+ * self-signed, hence -k. In a container the request is pointed at the host
+ * (viaHostCurl), which is where every stack's ports and Caddy actually are;
+ * the Host header and the TLS name stay as the URL says, so what is probed is
+ * exactly what a person outside would get.
+ */
 export async function probe(url: string): Promise<number> {
   if (!url) return 0;
-  const r = await run("curl", ["-sk", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", url]);
-  return Number(r.stdout.trim()) || 0;
+  const curl = (args: string[]) => run("curl", [...args, "-sk", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", url]);
+  const via = await viaHostCurl(url);
+  const code = Number((await curl(via)).stdout.trim()) || 0;
+  // Nothing on the host at that address: try it unchanged, in case the stack is
+  // a plain dev server that `up` started inside this container rather than a
+  // sibling container of its own.
+  if (!code && via.length) return Number((await curl([])).stdout.trim()) || 0;
+  return code;
 }
 
 export type HealthState = "up" | "degraded" | "down";

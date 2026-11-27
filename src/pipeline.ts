@@ -12,9 +12,10 @@ import type { Job, Store } from "./db.ts";
 import * as gh from "./gh.ts";
 import * as git from "./git.ts";
 import { assessConflicts, hasConflictMarkers, parseMergeReport, reviewReasons } from "./merge.ts";
+import { syncHosts } from "./hosts.ts";
 import { publicEnv, publicUrl, serviceUrl, stackRoutes } from "./proxy.ts";
 import * as stack from "./stack.ts";
-import { tail, unnotify } from "./util.ts";
+import { LOCAL_HOST, tail, unnotify, viaHost } from "./util.ts";
 
 const PROMPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 const REF_CMD = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "pr-daemon");
@@ -124,10 +125,22 @@ const routesOf = (r: stack.UpResult): { routes?: string } => (r.ok ? { routes: J
  * stack is wired for its public origin, so the public URLs are the only ones
  * that work in a browser: its local URL is just what the proxy forwards to.
  */
-export function stackWhere(cfg: Config, branch: string, r: stack.UpResult): string {
+export function stackWhere(cfg: Config, branch: string, r: stack.UpResult, via = LOCAL_HOST): string {
   const pub = publicUrl(cfg, branch);
-  const url = r.ok ? r.url : "";
-  if (!pub) return url || "(no URL printed)";
+  const own = r.ok ? r.url : "";
+  // The agent runs where pr-daemon does, which in a container is not where the
+  // stack's ports are: localhost in here is not the host's localhost.
+  const url = viaHost(own, via);
+  if (!pub) {
+    if (!url) return "(no URL printed)";
+    // Both addresses, because they are for different readers: the agent can
+    // only reach the first, and a person can only open the second. Without
+    // saying so, the agent writes the container's own name into the PR.
+    return url === own ? url
+      : `${url} — use that address yourself (curl, Playwright, screenshots). The address a PERSON opens is ${own}: ` +
+        `use ${own} in the pull request description and anywhere else you name the preview, never ${new URL(url).host}, ` +
+        `which only exists inside pr-daemon's container.`;
+  }
   const services = r.ok ? Object.keys(r.routes) : [];
   return `${pub} — use ONLY this address (and the service addresses below) in a browser, Playwright, curl and screenshots. ` +
     `The app is configured for this public origin; its local address (${url || "none printed"}) is only what pr-daemon's proxy forwards to, ` +
@@ -393,7 +406,7 @@ export async function build(ctx: Ctx): Promise<void> {
   const pub = publicUrl(cfg, branch);
   const env = publicEnv(cfg, branch);
   const s = await stack.up(repo.up, wt, env);
-  let url = s.ok ? s.url : "";
+  let url = s.ok ? s.url : store.stack(repo.name, branch)?.url ?? "";
   store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url, healthy: s.ok ? 1 : 0, error: s.ok ? "" : s.error, ...routesOf(s),
     networks: withNetworks(store.stack(repo.name, branch)?.networks, s.networks), checked_at: Date.now() });
   if (!s.ok) store.event(`\`${repo.up}\` failed; the agent has been told to fix it first`, job.id, "warn");
@@ -425,7 +438,7 @@ export async function build(ctx: Ctx): Promise<void> {
   let down = !s.ok;
   const restartStack = async (): Promise<void> => {
     const r = await stack.up(repo.up, wt, env);
-    url = r.ok ? r.url || url : "";
+    url = r.ok ? r.url || url : url;
     vars.PREVIEW_URL = stackWhere(cfg, branch, r);
     store.upsertStack({ repo: repo.name, branch, issue: n, worktree: wt, stopped_at: null, url, healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
       networks: withNetworks(store.stack(repo.name, branch)?.networks, r.networks), checked_at: Date.now() });
@@ -643,8 +656,16 @@ async function bringUp(ctx: Ctx, o: { branch: string; wt: string; issue: number;
   const r = await stack.up(repo.up, o.wt, publicEnv(ctx.cfg(), o.branch));
   const prev = store.stack(repo.name, o.branch);
   store.upsertStack({ repo: repo.name, branch: o.branch, issue: o.issue, worktree: o.wt, ...(o.pr ? { pr: o.pr } : {}),
-    url: r.ok ? r.url || prev?.url || "" : "", healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
+    // A failed `up` keeps the last address we knew. Caddy's routes are built from
+    // this column, so clearing it takes the preview off the proxy — and whatever
+    // was serving it is usually still running (seen in the wild: `up` failed for a
+    // missing CLI, the stack kept answering locally and the public URL went 404).
+    // `healthy: 0` and `error` are what say it failed; routesOf keeps the routes too.
+    url: r.ok ? r.url || prev?.url || "" : prev?.url ?? "", healthy: r.ok ? 1 : 0, error: r.ok ? "" : r.error, ...routesOf(r),
     networks: withNetworks(prev?.networks, r.networks), checked_at: Date.now(), stopped_at: null });
+  // In a container, before the agent is told the address: the names this stack
+  // answers on have to resolve in here (hosts.ts). Does nothing on a host.
+  await syncHosts(ctx.cfg(), store.stacks());
   return r;
 }
 

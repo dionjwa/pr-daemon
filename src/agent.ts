@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createWriteStream, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { HOME, secretsEnv } from "./config.ts";
+import { CREDENTIALS_HOME, secretsEnv } from "./config.ts";
 import { cleanEnv } from "./util.ts";
 
 // ---------- Claude's login ----------
@@ -17,7 +17,7 @@ import { cleanEnv } from "./util.ts";
 // owns, sidesteps both. It's read on every run, so a new one applies without
 // a restart, and only `claude` processes get it, not the project's stacks.
 export const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
-export const CLAUDE_TOKEN_FILE = join(HOME, "claude-token");
+export const CLAUDE_TOKEN_FILE = join(CREDENTIALS_HOME, "claude-token");
 
 /** Where Claude's login comes from: the service's environment, the token file, or Claude's own (Keychain / credentials file). */
 export function claudeAuth(): { source: "env" | "file" | "claude"; token: string; loose: boolean } {

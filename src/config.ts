@@ -4,26 +4,28 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "smol-toml";
-import { HOME, parseAmount, parseDuration } from "./util.ts";
+import { CONFIG_HOME, CREDENTIALS_HOME, HOME, WORK_HOME, parseAmount, parseDuration } from "./util.ts";
 
-export { HOME };
+export { CONFIG_HOME, CREDENTIALS_HOME, HOME, WORK_HOME };
 
 /** The login every workflow's GITHUB_TOKEN acts as (gh.ts re-exports it). */
 export const ACTIONS_BOT = "github-actions[bot]";
-export const CONFIG_PATH = process.env.PR_DAEMON_CONFIG ?? join(HOME, "config.toml");
+export const CONFIG_PATH = process.env.PR_DAEMON_CONFIG ?? join(CONFIG_HOME, "config.toml");
 
 /**
  * A repo's dev secrets (API keys its preview stack needs): one env file per
- * repo, `<HOME>/secrets/<org>__<repo>.env`, found from a worktree path the way
- * refsFor() finds its references. "" for a directory that isn't one of
- * pr-daemon's worktrees. Pure.
+ * repo, `<credentials>/secrets/<org>__<repo>.env`, found from a worktree path
+ * the way refsFor() finds its references. "" for a directory that isn't one of
+ * pr-daemon's worktrees. The two roots are the same directory on a host
+ * install; in a container the worktrees are on the work disk and the secrets
+ * are on the read-only credentials mount. Pure.
  */
-export function secretsFor(worktree: string, home = HOME): string {
-  const root = resolve(home, "worktrees") + sep;
+export function secretsFor(worktree: string, work = WORK_HOME, credentials = CREDENTIALS_HOME): string {
+  const root = resolve(work, "worktrees") + sep;
   const abs = resolve(worktree) + sep;
   if (!abs.startsWith(root)) return "";
   const repo = abs.slice(root.length).split(sep)[0];
-  return repo ? join(home, "secrets", `${repo}.env`) : "";
+  return repo ? join(credentials, "secrets", `${repo}.env`) : "";
 }
 
 /**

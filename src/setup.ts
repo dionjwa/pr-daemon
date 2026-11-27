@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_PATH, HOME, type Config } from "./config.ts";
+import { CONFIG_PATH, CREDENTIALS_HOME, WORK_HOME, type Config } from "./config.ts";
 import { render } from "./pipeline.ts";
 
 const DOC = join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "setup.md");
@@ -12,14 +12,14 @@ const DOC = join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "setup.m
 /** The runtime directories, for the status page, /setup and `doctor`. */
 export function paths(): Record<string, string> {
   return {
-    home: HOME,
+    home: WORK_HOME,
     config: CONFIG_PATH,
-    repos: join(HOME, "repos"),
-    worktrees: join(HOME, "worktrees"),
-    out: join(HOME, "out"),
-    refs: join(HOME, "refs"),
-    secrets: join(HOME, "secrets"),
-    log: join(HOME, "pr-daemon.log"),
+    repos: join(WORK_HOME, "repos"),
+    worktrees: join(WORK_HOME, "worktrees"),
+    out: join(WORK_HOME, "out"),
+    refs: join(WORK_HOME, "refs"),
+    secrets: join(CREDENTIALS_HOME, "secrets"),
+    log: join(WORK_HOME, "pr-daemon.log"),
   };
 }
 
